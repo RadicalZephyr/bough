@@ -11,7 +11,29 @@ impl<T> Stream<T> {
     pub fn listen(&self, f: impl FnMut(T)) -> impl FnOnce() {
         || todo!()
     }
+
+    pub fn receiver(&self) -> StreamReceiver<T> {
+        StreamReceiver::new()
+    }
 }
+
+pub struct StreamReceiver<T> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T> StreamReceiver<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn recv(&self) -> Result<T, RecvError> {
+        todo!()
+    }
+}
+
+pub struct RecvError;
 
 pub struct StreamSink<T> {
     _phantom: PhantomData<T>,
@@ -35,12 +57,15 @@ impl<T> StreamSink<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn listen_interface() {
         let sink = StreamSink::<u8>::new();
 
         let s = sink.stream();
@@ -51,5 +76,19 @@ mod tests {
         sink.send(42);
 
         assert_eq!(*observed.lock().unwrap(), vec![42]);
+    }
+
+    #[test]
+    fn sync_channel_interface() {
+        let sink = StreamSink::<u8>::new();
+
+        let s = sink.stream();
+
+        thread::scope(|sc| {
+            sc.spawn(|| {
+                let rec = s.receiver();
+            });
+            sink.send(42);
+        });
     }
 }
