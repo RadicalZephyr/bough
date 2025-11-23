@@ -12,8 +12,29 @@ impl<T> Stream<T> {
         || todo!()
     }
 
+    pub fn sync_receiver(&self, bound: usize) -> StreamSyncReceiver<T> {
+        StreamSyncReceiver::new()
+    }
+
     pub fn receiver(&self) -> StreamReceiver<T> {
         StreamReceiver::new()
+    }
+}
+
+pub struct StreamSyncReceiver<T> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T> StreamSyncReceiver<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    // TODO [ZEFS 2025-11-22 Github#3]: Should this be fallible?
+    pub fn recv(&self) -> Result<T, RecvError> {
+        todo!()
     }
 }
 
@@ -27,19 +48,16 @@ impl<T> StreamReceiver<T> {
             _phantom: PhantomData,
         }
     }
-
-    pub fn recv(&self) -> Result<T, RecvError> {
-        todo!()
-    }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecvError;
 
-pub struct StreamSink<T> {
+pub struct StreamSender<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T> StreamSink<T> {
+impl<T> StreamSender<T> {
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
@@ -66,29 +84,39 @@ mod tests {
 
     #[test]
     fn listen_interface() {
-        let sink = StreamSink::<u8>::new();
+        let tx = StreamSender::<u8>::new();
 
-        let s = sink.stream();
+        let s = tx.stream();
 
         let observed: Arc<Mutex<Vec<u8>>> = Arc::default();
         let _unsub = s.listen(|x| observed.lock().unwrap().push(x));
 
-        sink.send(42);
+        tx.send(42);
 
         assert_eq!(*observed.lock().unwrap(), vec![42]);
     }
 
     #[test]
     fn sync_channel_interface() {
-        let sink = StreamSink::<u8>::new();
+        let tx = StreamSender::<u8>::new();
 
-        let s = sink.stream();
+        let s = tx.stream();
 
         thread::scope(|sc| {
             sc.spawn(|| {
-                let rec = s.receiver();
+                let rx = s.sync_receiver(2);
+                assert_eq!(42, rx.recv().expect("unexpected receive error"));
             });
-            sink.send(42);
+            tx.send(42);
         });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn async_channel_interface() {
+        let tx = StreamSender::<u8>::new();
+
+        let s = tx.stream();
+
+        let rx = s.receiver();
     }
 }
