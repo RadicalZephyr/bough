@@ -126,4 +126,26 @@ mod tests {
             assert_eq!(0, ctx.recv(output));
         });
     }
+
+    // #[test]
+    // fn main() {
+    //     let rt = Runtime::build_with_cycles(
+    //         // Cycle pre-declarations are the second capability argument
+    //         |inputs: Stream<usize>, cycles: Cell<usize>| {
+    //             let sum_events: Stream<usize> =
+    //                 inputs.snapshot(cycles, |input, cycle| cycle + input);
+    //             let sum_state = sum_events.hold(0); // Initialize the state to zero
+    //             // Cycle combinator results are the second return value
+    //             (sum_events, sum_state)
+    //         },
+    //     );
+
+    //     rt.with_io(|ctx, input, output| {
+    //         ctx.send(input, 1);
+    //         assert_eq!(1, ctx.recv(output));
+
+    //         ctx.send(input, 2);
+    //         assert_eq!(3, ctx.recv(output));
+    //     });
+    // }
 }
