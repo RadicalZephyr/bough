@@ -151,13 +151,14 @@ impl<M: Mode> Graph<M> {
         todo!()
     }
 
-    /// Roots a node the I/O world wants to hold without listening to it.
-    pub fn pin(&mut self, token: &impl TokenRef) -> Pin {
+    /// Roots a node the I/O world wants to hold without listening to it,
+    /// returning the handle that keeps the root.
+    pub fn root(&mut self, token: &impl TokenRef) -> Root {
         todo!()
     }
 
-    /// [`pin`](Graph::pin), returning the error instead of panicking.
-    pub fn try_pin(&mut self, token: &impl TokenRef) -> Result<Pin, TokenError> {
+    /// [`root`](Graph::root), returning the error instead of panicking.
+    pub fn try_root(&mut self, token: &impl TokenRef) -> Result<Root, TokenError> {
         todo!()
     }
 
@@ -287,14 +288,17 @@ impl Listener {
 }
 
 /// A root on a node the I/O world holds without listening to it. Dropping
-/// it unpins.
-pub struct Pin {
+/// it removes the root.
+///
+/// Named `Root` rather than `Pin` to stay clear of `std::pin::Pin`, which is
+/// an unrelated concept.
+pub struct Root {
     alive: Arc<()>,
 }
 
-impl Pin {
+impl Root {
     /// Removes the root now, the same as dropping the handle.
-    pub fn unpin(self) {
+    pub fn unroot(self) {
         todo!()
     }
 

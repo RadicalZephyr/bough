@@ -28,7 +28,7 @@ pub(crate) mod sealed {
 /// Anything that names a node: the four token types.
 ///
 /// Used by [`Build::depends`](crate::Build::depends) and
-/// [`Graph::pin`](crate::Graph::pin), which take any token.
+/// [`Graph::root`](crate::Graph::root), which take any token.
 pub trait TokenRef: sealed::Sealed {}
 
 /// A linear stream of occurrences.

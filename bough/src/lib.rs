@@ -12,7 +12,7 @@
 //!
 //! This is the API skeleton: every public signature, with `todo!()` bodies.
 //! The examples in the documentation compile against it, and the guarantees
-//! the RFDs make are pinned by `compile_fail` doc tests. The engine lands
+//! the RFDs make are fixed by `compile_fail` doc tests. The engine lands
 //! behind these signatures one increment at a time.
 //!
 //! ```no_run
@@ -53,7 +53,7 @@ pub use error::{
     InsideTransactionError, PoisonedError, PumpError, RemoteSendError, SendError, TokenError,
     TransactionSendError,
 };
-pub use graph::{CollectionPolicy, Graph, Listener, Pin, Remote, RemoteTransaction, Transaction};
+pub use graph::{CollectionPolicy, Graph, Listener, Remote, RemoteTransaction, Root, Transaction};
 pub use mode::{Accepts, Local, Mode, Threaded};
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
 pub use token::{Cell, Input, Shared, Stream, TokenRef};

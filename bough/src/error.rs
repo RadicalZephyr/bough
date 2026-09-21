@@ -39,7 +39,7 @@ pub enum TransactionSendError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonedError;
 
-/// Failure modes of `try_listen`, `try_listen_cell`, `try_pin` and
+/// Failure modes of `try_listen`, `try_listen_cell`, `try_root` and
 /// `try_sample`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenError {
