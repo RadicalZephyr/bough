@@ -1,0 +1,27 @@
+[package]
+name = "bough-bench"
+description = "The three benchmark shapes, their imperative baselines, and the CI regression gate."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bough.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+iai-callgrind.workspace = true
+
+# Wall-clock, run by hand: the factor-three bar against the imperative baselines.
+[[bench]]
+name = "shapes"
+harness = false
+
+# Instruction counts, run in CI: the regression gate.
+[[bench]]
+name = "regression"
+harness = false

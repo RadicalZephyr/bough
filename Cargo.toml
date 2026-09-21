@@ -1,8 +1,22 @@
-[package]
-name = "bough"
-description = ""
-authors = ["Zefira Shannon"]
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["bough", "bough-derive", "bough-oracle", "bough-bench"]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+authors = ["Zefira Shannon"]
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/bough-frp/bough"
+
+[workspace.dependencies]
+bough = { path = "bough", version = "0.1.0" }
+bough-derive = { path = "bough-derive", version = "0.1.0" }
+bough-oracle = { path = "bough-oracle", version = "0.1.0" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+proptest = "1"
+criterion = "0.5"
+iai-callgrind = "0.14"

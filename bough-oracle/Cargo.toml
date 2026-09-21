@@ -1,0 +1,15 @@
+[package]
+name = "bough-oracle"
+description = "The Sodium denotational semantics as an executable oracle, and the property tests that hold bough to it."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true

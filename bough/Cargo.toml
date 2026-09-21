@@ -1,0 +1,20 @@
+[package]
+name = "bough"
+description = "Lightweight FRP rooted in Rust: a Sodium-semantics engine with a build-time and I/O-time separation."
+readme = "../README.md"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Re-exports `#[derive(Trace)]` from `bough-derive`.
+derive = ["dep:bough-derive"]
+# Per-transaction phase counters for attributing a regression to a phase.
+statistics = []
+
+[dependencies]
+bough-derive = { workspace = true, optional = true }

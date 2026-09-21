@@ -58,6 +58,15 @@ using Bough’s iterator-like combinators.
 
 ---
 
+## Design
+
+The design decisions behind Bough are recorded as RFDs at
+<https://github.com/bough-frp/rfd>: the guiding principles and standing
+policies, the separation of building FRP from driving it, the memory
+model, the value model, the transaction protocol, and the I/O edge.
+
+---
+
 ## Inspiration
 
 Bough draws significant inspiration from the design philosophy and
