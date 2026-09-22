@@ -31,6 +31,37 @@ pub trait Trace {
     fn trace(&self, tracer: &mut Tracer);
 }
 
+/// A value of a foreign type that holds no tokens, wrapped so that it can
+/// live in a cell. The orphan rules forbid implementing `Trace` for another
+/// crate's type, so a bare `tokio::sync::mpsc::Sender` cannot be a cell
+/// value, but `Leaf<Sender>` can: it traces nothing and derefs to the value.
+/// Inside a derived type, `#[trace(skip)]` on the field does the same job.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Leaf<T>(pub T);
+
+impl<T> Trace for Leaf<T> {
+    fn trace(&self, _tracer: &mut Tracer) {}
+}
+
+impl<T> std::ops::Deref for Leaf<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Leaf<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl<T> From<T> for Leaf<T> {
+    fn from(value: T) -> Self {
+        Leaf(value)
+    }
+}
+
 impl<A> Trace for Stream<A> {
     fn trace(&self, tracer: &mut Tracer) {
         tracer.visit(self);

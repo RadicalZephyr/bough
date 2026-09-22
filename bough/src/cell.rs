@@ -41,15 +41,35 @@ impl<A: 'static> Cell<A> {
     {
         todo!()
     }
+}
 
-    /// A read-through cell of two cells. `lift` is binary and composes by
-    /// chaining; Sodium's `apply` is `lift` with `|f, a| f(a)`.
-    pub fn lift<M, B, C, F>(self, build: &mut Build<M>, other: Cell<B>, f: F) -> Cell<C>
+impl<A: Clone + 'static> Cell<A> {
+    /// Sodium's `updates`: a stream of this cell's steps, each carrying the
+    /// post-instant value, including a step to an equal value.
+    ///
+    /// The Sodium book, section 8.4: "To protect the idea of a continuously
+    /// varying cell, a true FRP system must ensure that changes in a cell's
+    /// value aren't observable." This stream observes them, and so depends on
+    /// how the cell was built rather than only on what it holds. Use it where
+    /// an operational situation needs it, such as sending a cell over a wire;
+    /// from I/O code, [`Graph::listen_steps`](crate::Graph::listen_steps) is
+    /// the same view. It is a build-time error on an
+    /// [`accumulate_mut`](crate::Source::accumulate_mut) cell, whose new
+    /// state does not exist until commit.
+    pub fn steps<M>(self, build: &mut Build<M>) -> Stream<A>
     where
-        M: Mode + Accepts<F> + Accepts<C>,
-        B: 'static,
-        C: 'static,
-        F: Fn(&A, &B) -> C + 'static,
+        M: Mode + Accepts<A>,
+    {
+        todo!()
+    }
+
+    /// Sodium's `value`: fires once at its creation instant with the
+    /// post-instant value, then on every step like [`steps`](Cell::steps),
+    /// with the same warning. From I/O code,
+    /// [`Graph::listen_cell`](crate::Graph::listen_cell) is the same view.
+    pub fn steps_with_current<M>(self, build: &mut Build<M>) -> Stream<A>
+    where
+        M: Mode + Accepts<A>,
     {
         todo!()
     }
@@ -57,7 +77,9 @@ impl<A: 'static> Cell<A> {
 
 impl<A: 'static> Cell<Cell<A>> {
     /// Sodium's `switchC`: the cell that the outer cell currently selects,
-    /// read through with no state of its own.
+    /// read through on read. Its one piece of state is the inner it depends
+    /// on, relinked at commit whenever the outer steps; it steps at creation
+    /// and at every switch instant, even when the new inner is quiet.
     pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> Cell<A> {
         todo!()
     }

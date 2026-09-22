@@ -43,6 +43,7 @@ mod build;
 mod cell;
 mod error;
 mod graph;
+mod lift;
 mod mode;
 mod source;
 mod token;
@@ -56,7 +57,8 @@ pub use error::{
 pub use graph::{
     Anchor, CollectionPolicy, Graph, Listener, Remote, RemoteTransaction, Transaction,
 };
+pub use lift::Lift;
 pub use mode::{Accepts, Local, Mode, Threaded};
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
 pub use token::{Cell, Input, Shared, Stream, TokenRef};
-pub use trace::{Trace, Tracer};
+pub use trace::{Leaf, Trace, Tracer};
