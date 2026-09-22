@@ -2,7 +2,7 @@
 //!
 //! A token is an index, a generation and a graph id. It has no method that
 //! creates a node without a [`Build`](crate::Build) context. `Cell`, `Input`
-//! and `Shared` are `Copy` for every item type; `Stream` is move-only because
+//! and `Shared` are `Copy` for every event type; `Stream` is move-only because
 //! it is linear (RFD 4).
 
 use std::fmt;
@@ -28,36 +28,37 @@ pub(crate) mod sealed {
 /// Anything that names a node: the four token types.
 ///
 /// Used by [`Build::depends`](crate::Build::depends) and
-/// [`Graph::root`](crate::Graph::root), which take any token.
+/// [`Graph::anchor`](crate::Graph::anchor), which take any token.
 pub trait TokenRef: sealed::Sealed {}
 
-/// A linear stream of occurrences.
+/// A linear stream of events.
 ///
 /// A `Stream` has exactly one consumer: every constructor takes it by value,
 /// and using it twice is a compile error. To give it more than one consumer,
-/// [`share`](crate::Source::share) it. The `PhantomData<fn() -> A>` keeps the
+/// [`share`](crate::Source::share) it. A toolkit's event becomes a Bough
+/// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
 /// token `Send` and `Sync` whatever `A` is; a token is three integers.
 pub struct Stream<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
-/// A stream with any number of consumers, each of which clones the occurrence.
+/// A stream with any number of consumers, each of which clones the event.
 ///
 /// Produced by [`share`](crate::Source::share), which requires `A: Clone`.
 pub struct Shared<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
 /// A value that exists at every instant.
 ///
 /// Cell values are read by reference and are never cloned by the engine. A
-/// cell is either a hold, which moves its occurrence into its committed value
+/// cell is either a hold, which moves its event into its committed value
 /// at commit, or a read-through cell computed from other cells on demand.
 pub struct Cell<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
 /// The I/O side of an input: the token that [`Graph::send`](crate::Graph::send)
@@ -69,7 +70,7 @@ pub struct Cell<A> {
 /// token discipline could make static.
 pub struct Input<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
 macro_rules! token_impls {
@@ -78,7 +79,7 @@ macro_rules! token_impls {
             pub(crate) fn from_token(token: Token) -> Self {
                 Self {
                     token,
-                    item: PhantomData,
+                    event: PhantomData,
                 }
             }
         }

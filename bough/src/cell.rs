@@ -29,30 +29,10 @@ impl<A: 'static> Cell<A> {
         todo!()
     }
 
-    /// The cell's steps as a stream, Sodium's `updates`. Fires on every step,
-    /// including one to an equal value. Requires `Clone`, since the hold
-    /// keeps the value too.
-    pub fn steps<M>(self, build: &mut Build<M>) -> Stream<A>
-    where
-        M: Mode + Accepts<A>,
-        A: Clone,
-    {
-        todo!()
-    }
-
-    /// Sodium's `value`: fires once at the instant it is created, with the
-    /// value the cell has just after that instant, then on every step.
-    pub fn steps_with_current<M>(self, build: &mut Build<M>) -> Stream<A>
-    where
-        M: Mode + Accepts<A>,
-        A: Clone,
-    {
-        todo!()
-    }
-
     /// A read-through cell: `f` of this cell's value, computed on read and
     /// memoized against this cell's version. `f` must be pure; the engine
-    /// may call it any number of times per change.
+    /// calls it at most once per version of its input, and not at all if the
+    /// cell is never read.
     pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> Cell<B>
     where
         M: Mode + Accepts<F> + Accepts<B>,
@@ -86,12 +66,12 @@ impl<A: 'static> Cell<Cell<A>> {
 impl<S> Cell<S>
 where
     S: Node + 'static,
-    S::Item: 'static,
+    S::Event: 'static,
 {
-    /// Sodium's `switchS`: the occurrences of the stream the cell selected
+    /// Sodium's `switchS`: the events of the stream the cell selected
     /// before the instant. A cell holding linear streams may have exactly
     /// one switch; a second is a build-time error.
-    pub fn switch_stream<M: Mode>(self, build: &mut Build<M>) -> Stream<S::Item> {
+    pub fn switch_stream<M: Mode>(self, build: &mut Build<M>) -> Stream<S::Event> {
         todo!()
     }
 }

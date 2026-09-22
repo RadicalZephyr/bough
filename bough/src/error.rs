@@ -39,8 +39,8 @@ pub enum TransactionSendError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonedError;
 
-/// Failure modes of `try_listen`, `try_listen_cell`, `try_root` and
-/// `try_sample`.
+/// Failure modes of `try_listen`, `try_listen_cell`, `try_listen_steps`,
+/// `try_anchor` and `try_sample`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenError {
     /// The node was collected.

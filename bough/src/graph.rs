@@ -87,8 +87,7 @@ impl<M: Mode> Graph<M> {
 
     /// Listens to a materialized node. A linear stream is moved in, so it can
     /// be listened to once; a shared stream any number of times. Listeners
-    /// take the occurrence by value, have no graph access, and run after
-    /// commit.
+    /// take the event by value, have no graph access, and run after commit.
     ///
     /// A chain cannot be listened to:
     ///
@@ -111,8 +110,8 @@ impl<M: Mode> Graph<M> {
     pub fn listen<S, F>(&mut self, source: S, f: F) -> Listener
     where
         S: Node,
-        S::Item: 'static,
-        F: FnMut(S::Item) + 'static,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
         M: Accepts<F>,
     {
         todo!()
@@ -122,15 +121,17 @@ impl<M: Mode> Graph<M> {
     pub fn try_listen<S, F>(&mut self, source: S, f: F) -> Result<Listener, TokenError>
     where
         S: Node,
-        S::Item: 'static,
-        F: FnMut(S::Item) + 'static,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
         M: Accepts<F>,
     {
         todo!()
     }
 
     /// Listens to a cell: fires once now with the current value, then on
-    /// every step, with the value by reference.
+    /// every step, with the value by reference. Sodium's `value`, an
+    /// operational primitive, which is why it lives on `Graph` and not on
+    /// `Cell`.
     pub fn listen_cell<A, F>(&mut self, cell: Cell<A>, f: F) -> Listener
     where
         A: 'static,
@@ -151,14 +152,37 @@ impl<M: Mode> Graph<M> {
         todo!()
     }
 
-    /// Roots a node the I/O world wants to hold without listening to it,
-    /// returning the handle that keeps the root.
-    pub fn root(&mut self, token: &impl TokenRef) -> Root {
+    /// Listens to a cell's steps only, with the new value by reference, and
+    /// nothing at registration. Sodium's `updates`, an operational primitive,
+    /// which is why it lives on `Graph` and not on `Cell`.
+    pub fn listen_steps<A, F>(&mut self, cell: Cell<A>, f: F) -> Listener
+    where
+        A: 'static,
+        F: FnMut(&A) + 'static,
+        M: Accepts<F>,
+    {
         todo!()
     }
 
-    /// [`root`](Graph::root), returning the error instead of panicking.
-    pub fn try_root(&mut self, token: &impl TokenRef) -> Result<Root, TokenError> {
+    /// [`listen_steps`](Graph::listen_steps), returning the error instead of
+    /// panicking.
+    pub fn try_listen_steps<A, F>(&mut self, cell: Cell<A>, f: F) -> Result<Listener, TokenError>
+    where
+        A: 'static,
+        F: FnMut(&A) + 'static,
+        M: Accepts<F>,
+    {
+        todo!()
+    }
+
+    /// Anchors a node that I/O code wants to hold without listening to it,
+    /// returning the handle that keeps it alive.
+    pub fn anchor(&mut self, token: &impl TokenRef) -> Anchor {
+        todo!()
+    }
+
+    /// [`anchor`](Graph::anchor), returning the error instead of panicking.
+    pub fn try_anchor(&mut self, token: &impl TokenRef) -> Result<Anchor, TokenError> {
         todo!()
     }
 
@@ -287,18 +311,18 @@ impl Listener {
     }
 }
 
-/// A root on a node the I/O world holds without listening to it. Dropping
-/// it removes the root.
+/// The handle that keeps a node alive from I/O code without listening to
+/// it, one of the three kinds of root. Dropping it removes the root.
 ///
-/// Named `Root` rather than `Pin` to stay clear of `std::pin::Pin`, which is
-/// an unrelated concept.
-pub struct Root {
+/// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
+/// which is the concept this is one kind of.
+pub struct Anchor {
     alive: Arc<()>,
 }
 
-impl Root {
+impl Anchor {
     /// Removes the root now, the same as dropping the handle.
-    pub fn unroot(self) {
+    pub fn unanchor(self) {
         todo!()
     }
 

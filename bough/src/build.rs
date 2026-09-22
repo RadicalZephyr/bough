@@ -95,9 +95,10 @@ impl<M: Mode> Build<M> {
         todo!()
     }
 
-    /// Declares that `node` keeps `on` alive, for a closure that captures a
-    /// token that is not upstream of its own node (RFD 3).
-    pub fn depends(&mut self, node: &impl TokenRef, on: &impl TokenRef) {
+    /// Declares that `node` keeps every token in `on` alive, for a closure
+    /// that captures tokens that are not upstream of its own node (RFD 3).
+    /// One declaration per closure; the slice is heterogeneous.
+    pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn TokenRef]) {
         todo!()
     }
 }
@@ -121,7 +122,7 @@ impl<M: Mode> Build<M> {
 /// ```
 pub struct CellLoop<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
 impl<A: 'static> CellLoop<A> {
@@ -134,7 +135,7 @@ impl<A: 'static> CellLoop<A> {
 /// The closer of a stream loop.
 pub struct StreamLoop<A> {
     token: Token,
-    item: PhantomData<fn() -> A>,
+    event: PhantomData<fn() -> A>,
 }
 
 impl<A: 'static> StreamLoop<A> {
@@ -142,7 +143,7 @@ impl<A: 'static> StreamLoop<A> {
     pub fn close<M, S>(self, build: &mut Build<M>, definition: S)
     where
         M: Mode + Accepts<S>,
-        S: Source<Item = A>,
+        S: Source<Event = A>,
     {
         todo!()
     }

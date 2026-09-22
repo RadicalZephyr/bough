@@ -53,7 +53,9 @@ pub use error::{
     InsideTransactionError, PoisonedError, PumpError, RemoteSendError, SendError, TokenError,
     TransactionSendError,
 };
-pub use graph::{CollectionPolicy, Graph, Listener, Remote, RemoteTransaction, Root, Transaction};
+pub use graph::{
+    Anchor, CollectionPolicy, Graph, Listener, Remote, RemoteTransaction, Transaction,
+};
 pub use mode::{Accepts, Local, Mode, Threaded};
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
 pub use token::{Cell, Input, Shared, Stream, TokenRef};
