@@ -54,7 +54,11 @@ jobs:
       - name: Measure the base commit
         run: |
           git checkout --quiet ${{ github.event.pull_request.base.sha }}
-          cargo bench -p bough-bench --bench regression
+          if [ -f bough-bench/Cargo.toml ]; then
+            cargo bench -p bough-bench --bench regression
+          else
+            echo "The base commit has no bough-bench crate, so this run only records the head."
+          fi
       - name: Measure the head commit and compare
         run: |
           git checkout --quiet ${{ github.event.pull_request.head.sha }}

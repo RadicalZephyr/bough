@@ -1,8 +1,8 @@
 # Introduction
 
 Bough is a lightweight FRP library rooted in Rust. It implements the Sodium
-denotational semantics with an API that keeps building FRP logic and driving
-it from I/O in two separate worlds.
+denotational semantics with an API that cleanly separates building FRP logic
+from driving it with I/O.
 
 This book follows [Diátaxis](https://diataxis.fr/): tutorials teach, how-to
 guides solve, and explanation discusses. The reference is the crate

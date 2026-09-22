@@ -1,4 +1,4 @@
-//! Tokens: the handles the I/O world and graph code hold on nodes.
+//! Tokens: the names I/O code and graph code hold for nodes.
 //!
 //! A token is an index, a generation and a graph id. It has no method that
 //! creates a node without a [`Build`](crate::Build) context. `Cell`, `Input`

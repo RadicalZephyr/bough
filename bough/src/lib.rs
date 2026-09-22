@@ -1,8 +1,8 @@
 //! Lightweight FRP rooted in Rust.
 //!
 //! Bough implements the Sodium FRP denotational semantics with an API that
-//! keeps building FRP logic and driving it from I/O in two separate worlds.
-//! Every node-creating operation needs a [`Build`] context, which only exists
+//! cleanly separates building FRP logic from driving it with I/O. Every
+//! node-creating operation needs a [`Build`] context, which only exists
 //! inside [`Graph::build`] and inside [`Source::construct`] closures; sending,
 //! listening and sampling from outside live on [`Graph`], which only exists
 //! once the build closure has returned. The design is recorded in the RFDs

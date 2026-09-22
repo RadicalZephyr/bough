@@ -12,5 +12,5 @@
 
 # Explanation
 
-- [Two worlds: building FRP and driving it](./explanation/two-worlds.md)
+- [Building FRP logic and driving it with I/O](./explanation/building-and-driving.md)
 - [Coming from Sodium](./explanation/coming-from-sodium.md)

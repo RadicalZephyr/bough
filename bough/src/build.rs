@@ -17,7 +17,7 @@ pub struct Build<M: Mode = Local> {
 }
 
 impl<M: Mode> Build<M> {
-    /// A stream driven from the I/O world, and the token that drives it.
+    /// A stream driven from I/O code, and the token that drives it.
     pub fn input<A: 'static>(&mut self) -> (Stream<A>, Input<A>) {
         todo!()
     }
@@ -33,7 +33,7 @@ impl<M: Mode> Build<M> {
         todo!()
     }
 
-    /// A cell driven from the I/O world: a hold over an input.
+    /// A cell driven from I/O code: a hold over an input.
     pub fn input_cell<A>(&mut self, initial: A) -> (Cell<A>, Input<A>)
     where
         A: Trace + 'static,
@@ -42,7 +42,7 @@ impl<M: Mode> Build<M> {
         todo!()
     }
 
-    /// A cell driven from the I/O world whose input coalesces.
+    /// A cell driven from I/O code whose input coalesces.
     pub fn input_cell_coalescing<A, F>(&mut self, initial: A, f: F) -> (Cell<A>, Input<A>)
     where
         A: Trace + 'static,

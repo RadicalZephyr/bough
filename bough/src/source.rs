@@ -229,8 +229,8 @@ pub trait Source: Sized {
 
     /// The semantics' `Execute`: runs `f` at each event with a fresh
     /// build context, so graph can be constructed at runtime. Its results
-    /// reach the world only through [`Cell::switch_stream`] and
-    /// [`Cell::switch_cell`].
+    /// are ordinary events: tokens on their way to a hold and a
+    /// [`Cell::switch_stream`] or [`Cell::switch_cell`], or plain values.
     fn construct<M, B, F>(self, build: &mut Build<M>, f: F) -> Stream<B>
     where
         M: Mode + Accepts<Self> + Accepts<F>,
