@@ -10,7 +10,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["std"]
+# The standard library: the thread-id guard on `Remote`, `Trace` for the
+# standard collections and `Instant`, and the standard mutex under input
+# slots. Off for bare metal; a web build keeps it.
+std = []
+# Guards input slots on bare metal with the critical section every HAL
+# implements. The default feature set has no runtime dependency.
+critical-section = ["dep:critical-section"]
 # Re-exports `#[derive(Trace)]` from `bough-derive`.
 derive = ["dep:bough-derive"]
 # Per-transaction phase counters for attributing a regression to a phase.
@@ -18,3 +25,4 @@ statistics = []
 
 [dependencies]
 bough-derive = { workspace = true, optional = true }
+critical-section = { workspace = true, optional = true }

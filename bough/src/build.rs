@@ -1,8 +1,9 @@
 //! The build context (RFD 2).
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 use crate::mode::{Accepts, Local, Mode};
+use crate::slot::InputSlot;
 use crate::source::Source;
 use crate::token::{Cell, Input, Stream, Token, TokenRef};
 use crate::trace::Trace;
@@ -99,6 +100,18 @@ impl<M: Mode> Build<M> {
     /// that captures tokens that are not upstream of its own node (RFD 3).
     /// One declaration per closure; the slice is heterogeneous.
     pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn TokenRef]) {
+        todo!()
+    }
+
+    /// Connects an [`InputSlot`] to an input, so that
+    /// [`pump`](crate::Graph::pump) drains it (RFD 7).
+    ///
+    /// Callable more than once for one input, one slot per producer; the
+    /// driver drains slots in connection order, each as its own transaction.
+    /// The slot's fold and the input's coalescing function are independent:
+    /// the fold combines a burst between two pumps, the coalescing function
+    /// combines two sends inside one transaction, which slots never cause.
+    pub fn connect<A: Send + 'static>(&mut self, input: Input<A>, slot: &'static InputSlot<A>) {
         todo!()
     }
 }

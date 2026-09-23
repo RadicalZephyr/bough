@@ -2,11 +2,14 @@
 //!
 //! Each family of operations with the same failure modes has its own type,
 //! and no type carries a variant that one of its operations cannot return.
+//! The bounded engine, when it lands, adds `Exhausted` to three of these and
+//! is a major version for it.
 
-use std::error::Error;
-use std::fmt;
+use core::error::Error;
+use core::fmt;
 
-/// Failure modes of [`Graph::try_send`](crate::Graph::try_send).
+/// Failure modes of [`Graph::try_send`](crate::Graph::try_send). One send
+/// opens one transaction, so no double send can occur here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
     /// The input's node was collected. The panicking variant treats this as
@@ -14,9 +17,7 @@ pub enum SendError {
     Stale,
     /// The token belongs to another graph.
     ForeignGraph,
-    /// A second send to a non-coalescing input in one transaction.
-    DoubleSend,
-    /// A previous panic escaped `send`.
+    /// A previous transaction never finished: a panic escaped it.
     Poisoned,
 }
 
@@ -32,10 +33,10 @@ pub enum TransactionSendError {
     DoubleSend,
 }
 
-/// The graph is poisoned: a previous panic escaped `send`.
+/// The graph is poisoned: a previous transaction never finished, because a
+/// panic escaped it.
 ///
-/// Returned by `try_transaction`, `try_collect_garbage`, `try_pump` and
-/// `try_remote`.
+/// Returned by `try_transaction`, `try_collect_garbage` and `try_remote`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonedError;
 
@@ -47,35 +48,51 @@ pub enum TokenError {
     Stale,
     /// The token belongs to another graph.
     ForeignGraph,
-    /// A previous panic escaped `send`.
+    /// A previous transaction never finished: a panic escaped it.
     Poisoned,
 }
 
 /// Failure modes of [`Graph::try_pump`](crate::Graph::try_pump).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PumpError {
-    /// A previous panic escaped `send`.
+    /// A previous transaction never finished: a panic escaped it.
     Poisoned,
-    /// A remote transaction sent twice to a non-coalescing input. Whether an
-    /// input coalesces is graph knowledge, so this is only discoverable here.
-    /// The offending transaction is dropped and the rest stay queued.
+    /// A queued unit sends to an input that was collected before the driver
+    /// pumped. Whether an input is collected is graph knowledge, so this is
+    /// only discoverable here. The offending unit is dropped and the rest
+    /// stay queued.
+    Stale,
+    /// A queued unit sent twice to a non-coalescing input. Whether an input
+    /// coalesces is graph knowledge, so this is only discoverable here. The
+    /// offending unit is dropped and the rest stay queued.
     DoubleSend,
 }
 
 /// Failure modes of [`Remote::try_send`](crate::Remote::try_send).
+#[cfg(target_has_atomic = "ptr")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteSendError {
     /// The token belongs to another graph.
     ForeignGraph,
-    /// Called on the driver thread while a transaction is evaluating: I/O
-    /// from inside graph code.
+    /// Called on the driver thread while a transaction runs: I/O from inside
+    /// graph code. Checked under `std`, where a thread id exists.
     InsideTransaction,
+    /// The graph is poisoned; the inbox mirrors the bit, so no thread keeps
+    /// filling an inbox that no pump will drain.
+    Poisoned,
 }
 
-/// [`Remote::try_transaction`](crate::Remote::try_transaction) was called on
-/// the driver thread while a transaction is evaluating.
+/// Failure modes of
+/// [`Remote::try_transaction`](crate::Remote::try_transaction).
+#[cfg(target_has_atomic = "ptr")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InsideTransactionError;
+pub enum RemoteTransactionError {
+    /// Called on the driver thread while a transaction runs. Checked under
+    /// `std`, where a thread id exists.
+    InsideTransaction,
+    /// The graph is poisoned.
+    Poisoned,
+}
 
 macro_rules! display_error {
     ($ty:ty, $text:literal) => {
@@ -95,8 +112,7 @@ display_error!(
     "the token is stale, foreign, or the graph is poisoned"
 );
 display_error!(PumpError, "pump failed");
+#[cfg(target_has_atomic = "ptr")]
 display_error!(RemoteSendError, "remote send failed");
-display_error!(
-    InsideTransactionError,
-    "remote transaction requested from inside a transaction"
-);
+#[cfg(target_has_atomic = "ptr")]
+display_error!(RemoteTransactionError, "remote transaction failed");

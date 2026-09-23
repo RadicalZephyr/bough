@@ -15,6 +15,16 @@
 //! the RFDs make are fixed by `compile_fail` doc tests. The engine lands
 //! behind these signatures one increment at a time.
 //!
+//! # Targets
+//!
+//! The core is `no_std` over `alloc`. The `std` feature, on by default, adds
+//! the thread-id guard on [`Remote`], `Trace` for the standard collections and
+//! `Instant`, and the standard mutex under input slots. Where the target has
+//! no pointer atomics, on a Cortex-M0, `Threaded`, `Remote` and the unit queue
+//! do not exist, and the path from an interrupt handler into the graph is an
+//! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
+//! a web build keeps `std` (RFD 7).
+//!
 //! ```no_run
 //! use bough::{Graph, Source};
 //!
@@ -38,6 +48,11 @@
 // are unused for now. The names are the documentation, so they stay.
 #![allow(dead_code, unused_variables)]
 #![warn(missing_docs)]
+#![no_std]
+
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod build;
 mod cell;
@@ -45,20 +60,23 @@ mod error;
 mod graph;
 mod lift;
 mod mode;
+mod slot;
 mod source;
 mod token;
 mod trace;
 
 pub use build::{Build, CellLoop, StreamLoop};
-pub use error::{
-    InsideTransactionError, PoisonedError, PumpError, RemoteSendError, SendError, TokenError,
-    TransactionSendError,
-};
-pub use graph::{
-    Anchor, CollectionPolicy, Graph, Listener, Remote, RemoteTransaction, Transaction,
-};
+pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
+#[cfg(target_has_atomic = "ptr")]
+pub use error::{RemoteSendError, RemoteTransactionError};
+pub use graph::{Anchor, CollectionPolicy, Graph, Listener, Transaction};
+#[cfg(target_has_atomic = "ptr")]
+pub use graph::{Remote, RemoteTransaction};
 pub use lift::Lift;
-pub use mode::{Accepts, Local, Mode, Threaded};
+#[cfg(target_has_atomic = "ptr")]
+pub use mode::Threaded;
+pub use mode::{Accepts, Local, Mode};
+pub use slot::InputSlot;
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
 pub use token::{Cell, Input, Shared, Stream, TokenRef};
 pub use trace::{Leaf, Trace, Tracer};

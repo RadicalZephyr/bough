@@ -5,9 +5,9 @@
 //! and `Shared` are `Copy` for every event type; `Stream` is move-only because
 //! it is linear (RFD 4).
 
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
+use core::fmt;
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
 
 /// The node reference inside every token. `pub` so the sealed accessor may
 /// name it, but the module is private, so it is unnameable from outside.

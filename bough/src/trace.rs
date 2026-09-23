@@ -5,10 +5,16 @@
 //! fails the generation check; no memory is ever touched through a stale
 //! token. A derive lands with the memory-model increment.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::rc::Rc;
+use alloc::string::String;
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+#[cfg(feature = "std")]
+use std::collections::{HashMap, HashSet};
 
 use crate::token::{Cell, Input, Shared, Stream, TokenRef};
 
@@ -43,14 +49,14 @@ impl<T> Trace for Leaf<T> {
     fn trace(&self, _tracer: &mut Tracer) {}
 }
 
-impl<T> std::ops::Deref for Leaf<T> {
+impl<T> core::ops::Deref for Leaf<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
     }
 }
 
-impl<T> std::ops::DerefMut for Leaf<T> {
+impl<T> core::ops::DerefMut for Leaf<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }
@@ -110,9 +116,10 @@ leaf!(
     f64,
     String,
     &'static str,
-    std::time::Duration,
-    std::time::Instant,
+    core::time::Duration,
 );
+#[cfg(feature = "std")]
+leaf!(std::time::Instant);
 
 impl<T: ?Sized> Trace for PhantomData<T> {
     fn trace(&self, _tracer: &mut Tracer) {}
@@ -142,6 +149,7 @@ impl<T: Trace + ?Sized> Trace for Rc<T> {
         (**self).trace(tracer);
     }
 }
+#[cfg(target_has_atomic = "ptr")]
 impl<T: Trace + ?Sized> Trace for Arc<T> {
     fn trace(&self, tracer: &mut Tracer) {
         (**self).trace(tracer);
@@ -171,6 +179,7 @@ impl<T: Trace> Trace for VecDeque<T> {
         }
     }
 }
+#[cfg(feature = "std")]
 impl<K: Trace, V: Trace, S> Trace for HashMap<K, V, S> {
     fn trace(&self, tracer: &mut Tracer) {
         for (key, value) in self {
@@ -187,6 +196,7 @@ impl<K: Trace, V: Trace> Trace for BTreeMap<K, V> {
         }
     }
 }
+#[cfg(feature = "std")]
 impl<T: Trace, S> Trace for HashSet<T, S> {
     fn trace(&self, tracer: &mut Tracer) {
         for value in self {

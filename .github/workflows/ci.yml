@@ -36,6 +36,39 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features ${{ matrix.profile == 'release' && '--release' || '' }}
 
+  targets:
+    name: Check (${{ matrix.target }}${{ matrix.features && ', ' }}${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Bare metal: the no_std core over alloc, with and without the
+          # critical section that guards input slots.
+          - { target: thumbv7m-none-eabi, features: "--no-default-features" }
+          - { target: thumbv7m-none-eabi, features: "--no-default-features --features critical-section" }
+          - { target: thumbv7em-none-eabihf, features: "--no-default-features" }
+          # The Cortex-M0 has no pointer atomics: no Threaded, no Remote.
+          - { target: thumbv6m-none-eabi, features: "--no-default-features" }
+          # The web keeps std; the no_std build must still type-check there.
+          - { target: wasm32-unknown-unknown, features: "" }
+          - { target: wasm32-unknown-unknown, features: "--no-default-features" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p bough --target ${{ matrix.target }} ${{ matrix.features }}
+
+  msrv:
+    name: Check on the minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p bough --all-features
+
   regression:
     name: Instruction-count regression gate
     runs-on: ubuntu-latest
