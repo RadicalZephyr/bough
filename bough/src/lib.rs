@@ -17,7 +17,8 @@
 //! that materializes them; the materializers `hold`, `node`, `share`,
 //! `merge` and `or_else`; and on [`Graph`] transactions, listeners and
 //! `sample`. Stage 2 adds the accumulators `accumulate`, `accumulate_mut`
-//! and `scan`. Every other operation still has a `todo!()` body. The
+//! and `scan`, and read-through cells with `map_cell`. Every other
+//! operation still has a `todo!()` body. The
 //! examples in the documentation that call only working operations run,
 //! the rest compile, and the guarantees the RFDs make are fixed by
 //! `compile_fail` doc tests.
@@ -32,7 +33,13 @@
 //! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
 //! a web build keeps `std` (RFD 7).
 //!
-//! ```no_run
+//! RFD 2's example: a click counter and its label, a listener that fires
+//! now and on every step, one send, and a transaction.
+//!
+//! ```
+//! use std::cell::RefCell;
+//! use std::rc::Rc;
+//!
 //! use bough::{Graph, Source};
 //!
 //! struct Click;
@@ -44,11 +51,17 @@
 //!     (clicks_in, label) // whatever build returns is the edge, and the root set
 //! });
 //!
-//! let _listener = graph.listen_cell(label, |text| println!("{text}"));
-//! graph.send(clicks_in, Click);
-//! graph.transaction(|tx| {
-//!     tx.send(clicks_in, Click);
+//! let shown = Rc::new(RefCell::new(Vec::new()));
+//! let _listener = graph.listen_cell(label, {
+//!     let shown = shown.clone();
+//!     move |text| shown.borrow_mut().push(text.clone()) // fires now, then on every step
 //! });
+//! graph.send(clicks_in, Click); // one transaction
+//! graph.transaction(|tx| {
+//!     tx.send(clicks_in, Click); // several sends, one instant
+//! });
+//! assert_eq!(*shown.borrow(), ["0", "1", "2"]);
+//! assert_eq!(graph.sample(label), "2");
 //! ```
 
 // The later stages' bodies are still `todo!()`, so their parameters and

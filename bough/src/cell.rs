@@ -1,9 +1,13 @@
 //! Operations on cells (RFD 4).
 
+use alloc::boxed::Box;
+
 use crate::Build;
-use crate::mode::{Accepts, Mode};
+use crate::engine::nodes::read::{ReadFn, ReadNode};
+use crate::engine::{Data, Kind, NodeOps};
+use crate::mode::{Accepts, Erase, Mode};
 use crate::source::Node;
-use crate::token::{Cell, State, Stream, TokenRef};
+use crate::token::{Cell, State, Stream, Token, TokenRef};
 
 /// Anything that names a cell: a [`Cell`], or a [`State`].
 ///
@@ -52,6 +56,25 @@ impl<A: 'static> CellRef for State<A> {
     type Value = A;
 }
 
+/// A read-through cell over the cells at `inputs`: `f` of their values,
+/// computed on read. Its function and its memo live in the node's data; it
+/// has no program.
+pub(crate) fn read_through<M, V, R, F>(build: &mut Build<M>, inputs: &[u32], f: F) -> Token
+where
+    M: Mode + Accepts<F> + Accepts<R>,
+    V: 'static,
+    R: 'static,
+    F: ReadFn<V, R>,
+{
+    let data = Data::ReadThrough {
+        f: <M as Accepts<F>>::erase(Erase::Value(f)),
+        memo: <M as Accepts<R>>::erase(Erase::Memo),
+    };
+    let ops = &<ReadNode<V, R, F> as NodeOps<M>>::OPS;
+    let n = build.materialize(Kind::ReadThrough, data, Box::new([]), ops, inputs, 0);
+    build.token(n)
+}
+
 impl<A: 'static> State<A> {
     /// The state at the start of the current transaction, or its current
     /// state between transactions. An in-place accumulator's function runs
@@ -60,6 +83,30 @@ impl<A: 'static> State<A> {
     pub fn sample<M: Mode>(self, build: &Build<M>) -> &A {
         let i = build.check(self.token);
         build.value::<A>(i)
+    }
+
+    /// A read-through cell over the state, as [`Cell::map_cell`]. It is a
+    /// `State` too: its value after an instant in which the state stepped
+    /// does not exist until commit either, so it has no stream view.
+    ///
+    /// ```compile_fail,E0599
+    /// use bough::{Graph, Source};
+    ///
+    /// let (_graph, _) = Graph::build(|b| {
+    ///     let (names, _names_in) = b.input::<String>();
+    ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+    ///     let count = members.map_cell(b, |m| m.len());
+    ///     let _counts = count.steps(b); // error: no method named `steps` found for struct `State`
+    /// });
+    /// ```
+    pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> State<B>
+    where
+        M: Mode + Accepts<F> + Accepts<B>,
+        B: 'static,
+        F: Fn(&A) -> B + 'static,
+    {
+        let input = build.check(self.token);
+        State::from_token(read_through::<M, (A,), B, F>(build, &[input], f))
     }
 }
 
@@ -89,16 +136,21 @@ impl<A: 'static> Cell<A> {
     }
 
     /// A read-through cell: `f` of this cell's value, computed on read and
-    /// memoized against this cell's version. `f` must be pure; the engine
-    /// calls it at most once per version of its input, and not at all if the
-    /// cell is never read.
+    /// memoized until this cell steps. `f` must be pure; the engine calls it
+    /// at most once per value of its input, and not at all if the cell is
+    /// never read.
+    ///
+    /// The new cell steps whenever this one does, so its listeners fire on
+    /// every step, and a read during a transaction sees the value from
+    /// before the instant, as every cell read does.
     pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> Cell<B>
     where
         M: Mode + Accepts<F> + Accepts<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
-        todo!()
+        let input = build.check(self.token);
+        Cell::from_token(read_through::<M, (A,), B, F>(build, &[input], f))
     }
 }
 
