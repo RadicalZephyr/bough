@@ -4,8 +4,9 @@ use alloc::boxed::Box;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::engine::nodes::cell::HoldNode;
 use crate::engine::nodes::stream::CoalescingInput;
-use crate::engine::{Data, Kind, NodeOps, Ops, Sched, Store, Tx};
+use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::slot::InputSlot;
 use crate::source::Source;
@@ -74,6 +75,22 @@ impl<M: Mode> Build<M> {
             "bough: a loop declared in this scope was never closed"
         );
     }
+
+    /// The hold of an input cell. Its chain is the input's own stream token,
+    /// which is `Send` whatever `A` is, so it is erased through
+    /// `erase_send` and needs no `Accepts<Stream<A>>` bound.
+    fn hold_input<A>(&mut self, stream: Stream<A>, initial: A) -> Cell<A>
+    where
+        A: 'static,
+        M: Accepts<A>,
+    {
+        let input = self.check(stream.token);
+        let data = Data::Cell(<M as Accepts<A>>::erase(Erase::Cell(initial)));
+        let parts: Box<[M::Carrier]> = Box::new([M::erase_send(stream)]);
+        let ops = &<HoldNode<Stream<A>> as NodeOps<M>>::OPS;
+        let n = self.materialize(Kind::Hold, data, parts, ops, &[input], COMMITS);
+        Cell::from_token(self.token(n))
+    }
 }
 
 impl<M: Mode> Build<M> {
@@ -107,13 +124,14 @@ impl<M: Mode> Build<M> {
         (Stream::from_token(t), Input::from_token(t))
     }
 
-    /// A cell driven from I/O code: a hold over an input.
+    /// A cell driven from I/O code: a hold over an input, two nodes.
     pub fn input_cell<A>(&mut self, initial: A) -> (Cell<A>, Input<A>)
     where
         A: Trace + 'static,
         M: Accepts<A>,
     {
-        todo!()
+        let (stream, input) = self.input::<A>();
+        (self.hold_input(stream, initial), input)
     }
 
     /// A cell driven from I/O code whose input coalesces.
@@ -123,7 +141,8 @@ impl<M: Mode> Build<M> {
         F: Fn(A, A) -> A + 'static,
         M: Accepts<A> + Accepts<F>,
     {
-        todo!()
+        let (stream, input) = self.input_coalescing::<A, F>(f);
+        (self.hold_input(stream, initial), input)
     }
 
     /// A cell that never changes.

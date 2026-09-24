@@ -7,7 +7,7 @@
 //! node's closure. A chain is linear: it is consumed by the first
 //! materializer, and using it twice is a compile error.
 //!
-//! ```no_run
+//! ```
 //! use bough::{Graph, Source};
 //!
 //! let (graph, total) = Graph::build(|b| {
@@ -33,11 +33,34 @@
 //!     let b2 = doubled.hold(b, 0u32); // error: use of moved value
 //! });
 //! ```
+//!
+//! A chain runs only inside its node. The hidden method that pulls it takes
+//! a context graph code cannot name or construct:
+//!
+//! ```compile_fail,E0433
+//! use bough::{Graph, Source};
+//!
+//! let (graph, _) = Graph::build(|b| {
+//!     let (mut numbers, _in) = b.input::<u32>();
+//!     let _ = numbers.pull(&mut bough::Cx::new(b)); // error: no `Cx` in `bough`
+//! });
+//! ```
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use crate::Build;
-use crate::mode::{Accepts, Mode};
-use crate::token::{Cell, Shared, Stream};
+use crate::engine::nodes::cell::HoldNode;
+use crate::engine::nodes::stream::{ChainNode, MergeNode};
+use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
+use crate::mode::{Accepts, Erase, Mode};
+use crate::token::{Cell, Shared, Stream, Token};
 use crate::trace::Trace;
+
+pub(crate) mod sealed {
+    /// Implemented by the two node types and the adapter types.
+    pub trait Sealed {}
+}
 
 /// Anything that yields events: a materialized node or a chain of adapters.
 ///
@@ -45,9 +68,29 @@ use crate::trace::Trace;
 /// type such as [`Map`] cannot implement a generic `Source<A>`, because `A`
 /// would appear only in its bounds. `Source<Event = Click>` reads as "a source
 /// of click events".
-pub trait Source: Sized {
+///
+/// Sealed, and `'static`: a materializer stores the chain itself in its node
+/// and runs it through the hidden methods, so every adapter must be the
+/// crate's own.
+pub trait Source: Sized + 'static + sealed::Sealed {
     /// The type of each event.
     type Event;
+
+    /// The one node this chain reads events from: its dependency.
+    #[doc(hidden)]
+    fn dependency(&self) -> Token;
+
+    /// The cells the chain reads with `snapshot` and `gate`: reach for
+    /// collection, never dependencies, since a cell is read as it was
+    /// before the instant.
+    #[doc(hidden)]
+    fn read_cells(&self, visit: &mut dyn FnMut(Token));
+
+    /// Runs the fused chain for this instant: reads the dependency's slot,
+    /// taking the event from a linear stream and cloning it from a shared
+    /// one, and applies every adapter. `None` when nothing fires.
+    #[doc(hidden)]
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<Self::Event>;
 
     // ----- adapters: no node, no context -----
 
@@ -94,6 +137,7 @@ pub trait Source: Sized {
     /// transaction.
     fn snapshot<B, C, F>(self, cell: Cell<B>, f: F) -> Snapshot<Self, B, F>
     where
+        B: 'static,
         F: Fn(Self::Event, &B) -> C + 'static,
     {
         Snapshot {
@@ -109,8 +153,15 @@ pub trait Source: Sized {
     }
 
     /// Keeps only the first event.
+    ///
+    /// Its state lives in the fused chain and is set during evaluation. A
+    /// chain runs at most once per transaction, so that cannot be told from
+    /// setting it at commit.
     fn once(self) -> Once<Self> {
-        Once { source: self }
+        Once {
+            source: self,
+            done: false,
+        }
     }
 
     // ----- materializers: one node, build context -----
@@ -124,7 +175,13 @@ pub trait Source: Sized {
         M: Mode + Accepts<Self> + Accepts<Self::Event>,
         Self::Event: Trace + 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Cell(<M as Accepts<Self::Event>>::erase(Erase::Cell(initial)));
+        let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<Self>>::erase(Erase::Value(self))]);
+        let ops = &<HoldNode<Self> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::Hold, data, parts, ops, &[dependency], COMMITS);
+        build.set_reach(n, cells);
+        Cell::from_token(build.token(n))
     }
 
     /// Sodium's `accum`: `hold initial (snapshot f self cell)`, with `f`
@@ -172,39 +229,61 @@ pub trait Source: Sized {
         M: Mode + Accepts<Self> + Accepts<Self::Event>,
         Self::Event: Clone + 'static,
     {
-        todo!()
+        Shared::from_token(chain_node(self, build))
     }
 
     /// Materializes a chain as a linear stream with an identity of its own,
     /// so it can be stored in a value or returned from build.
+    ///
+    /// The node's slot keeps an event nobody consumed between transactions,
+    /// so the mode must accept the event type; a `Threaded` graph refuses a
+    /// stream of `Rc`s here:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _shared = numbers.map(Rc::new).node(b); // error: Rc is not Send
+    /// });
+    /// ```
     fn node<M>(self, build: &mut Build<M>) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self>,
+        M: Mode + Accepts<Self> + Accepts<Self::Event>,
         Self::Event: 'static,
     {
-        todo!()
+        Stream::from_token(chain_node(self, build))
     }
 
     /// Merges two streams; `f` combines simultaneous events, with this
     /// stream's event on the left. Both inputs move through.
     fn merge<M, T, F>(self, build: &mut Build<M>, other: T, f: F) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<T> + Accepts<F>,
+        M: Mode + Accepts<Self> + Accepts<T> + Accepts<F> + Accepts<Self::Event>,
         T: Source<Event = Self::Event>,
         F: Fn(Self::Event, Self::Event) -> Self::Event + 'static,
         Self::Event: 'static,
     {
-        todo!()
+        let f = <M as Accepts<F>>::erase(Erase::Value(f));
+        merge_node::<M, Self, T, F>(self, build, other, f)
     }
 
     /// Merges two streams, this stream winning when both fire.
     fn or_else<M, T>(self, build: &mut Build<M>, other: T) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<T>,
+        M: Mode + Accepts<Self> + Accepts<T> + Accepts<Self::Event>,
         T: Source<Event = Self::Event>,
         Self::Event: 'static,
     {
-        todo!()
+        // An engine-made function pointer is `Send` whatever the event type.
+        let left: fn(Self::Event, Self::Event) -> Self::Event = |left, _| left;
+        merge_node::<M, Self, T, fn(Self::Event, Self::Event) -> Self::Event>(
+            self,
+            build,
+            other,
+            M::erase_send(left),
+        )
     }
 
     /// Emits each element of an event in its own child transaction,
@@ -241,26 +320,149 @@ pub trait Source: Sized {
     }
 }
 
+/// The node of `node` and `share`: the chain, fused into one program.
+fn chain_node<S, M>(chain: S, build: &mut Build<M>) -> Token
+where
+    S: Source,
+    M: Mode + Accepts<S> + Accepts<S::Event>,
+    S::Event: 'static,
+{
+    let (dependency, cells) = build.chain_reach(&chain);
+    let data = Data::Slot(<M as Accepts<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<S>>::erase(Erase::Value(chain))]);
+    let ops = &<ChainNode<S> as NodeOps<M>>::OPS;
+    let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
+    build.set_reach(n, cells);
+    build.token(n)
+}
+
+/// The node of `merge` and `or_else`: two chains and an erased function.
+fn merge_node<M, S, T, F>(
+    left: S,
+    build: &mut Build<M>,
+    right: T,
+    f: M::Carrier,
+) -> Stream<S::Event>
+where
+    M: Mode + Accepts<S> + Accepts<T> + Accepts<S::Event>,
+    S: Source,
+    T: Source<Event = S::Event>,
+    F: Fn(S::Event, S::Event) -> S::Event + 'static,
+    S::Event: 'static,
+{
+    let (l, mut cells) = build.chain_reach(&left);
+    let (r, more) = build.chain_reach(&right);
+    cells.extend(more);
+    let data = Data::Slot(<M as Accepts<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[M::Carrier]> = Box::new([
+        <M as Accepts<S>>::erase(Erase::Value(left)),
+        <M as Accepts<T>>::erase(Erase::Value(right)),
+        f,
+    ]);
+    let ops = &<MergeNode<S, T, F> as NodeOps<M>>::OPS;
+    let n = build.materialize(Kind::Stream, data, parts, ops, &[l, r], 0);
+    build.set_reach(n, cells);
+    Stream::from_token(build.token(n))
+}
+
+impl<M: Mode> Build<M> {
+    /// Checks a chain's dependency and the cells it reads, and returns
+    /// their indices. A foreign or stale token is a build-time panic.
+    pub(crate) fn chain_reach<S: Source>(&self, chain: &S) -> (u32, Vec<u32>) {
+        let dependency = self.check(chain.dependency());
+        let mut cells = Vec::new();
+        chain.read_cells(&mut |t| cells.push(self.check(t)));
+        (dependency, cells)
+    }
+
+    /// Records what a new node keeps alive beyond its dependencies.
+    pub(crate) fn set_reach(&mut self, n: u32, cells: Vec<u32>) {
+        if !cells.is_empty() {
+            self.store.cold[n as usize].reach = cells;
+        }
+    }
+}
+
 /// A materialized node: what [`Graph::listen`](crate::Graph::listen) accepts.
 /// Adapter types do not implement it, so a chain cannot be listened to.
-pub trait Node: Source {}
+///
+/// Sealed, with hidden items: a listener reads a node the way its type
+/// says, taking the event from a linear stream and cloning it from a
+/// shared one, and a switch needs to know which of the two it holds.
+pub trait Node: Source {
+    /// A linear stream, whose one consumer takes the event.
+    #[doc(hidden)]
+    const LINEAR: bool;
 
-impl<A> Source for Stream<A> {
-    type Event = A;
+    /// The node this token names.
+    #[doc(hidden)]
+    fn node_token(&self) -> Token;
+
+    /// Reads the event of the node at `index` the way this type does: take
+    /// for a linear stream, clone for a shared one.
+    #[doc(hidden)]
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<Self::Event>;
 }
-impl<A> Node for Stream<A> {}
-impl<A: Clone> Source for Shared<A> {
+
+impl<A> sealed::Sealed for Stream<A> {}
+impl<A: 'static> Source for Stream<A> {
     type Event = A;
+    fn dependency(&self) -> Token {
+        self.token
+    }
+    fn read_cells(&self, _visit: &mut dyn FnMut(Token)) {}
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
+        cx.take::<A>(self.token.index)
+    }
 }
-impl<A: Clone> Node for Shared<A> {}
+impl<A: 'static> Node for Stream<A> {
+    const LINEAR: bool = true;
+    fn node_token(&self) -> Token {
+        self.token
+    }
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<A> {
+        cx.take::<A>(index)
+    }
+}
+
+impl<A> sealed::Sealed for Shared<A> {}
+impl<A: Clone + 'static> Source for Shared<A> {
+    type Event = A;
+    fn dependency(&self) -> Token {
+        self.token
+    }
+    fn read_cells(&self, _visit: &mut dyn FnMut(Token)) {}
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
+        cx.cloned::<A>(self.token.index)
+    }
+}
+impl<A: Clone + 'static> Node for Shared<A> {
+    const LINEAR: bool = false;
+    fn node_token(&self) -> Token {
+        self.token
+    }
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<A> {
+        cx.cloned::<A>(index)
+    }
+}
 
 /// The adapter returned by [`Source::map`].
 pub struct Map<S, F> {
     source: S,
     f: F,
 }
+impl<S, F> sealed::Sealed for Map<S, F> {}
 impl<S: Source, B, F: Fn(S::Event) -> B + 'static> Source for Map<S, F> {
     type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).map(&self.f)
+    }
 }
 
 /// The adapter returned by [`Source::filter`].
@@ -268,8 +470,18 @@ pub struct Filter<S, P> {
     source: S,
     predicate: P,
 }
+impl<S, P> sealed::Sealed for Filter<S, P> {}
 impl<S: Source, P: Fn(&S::Event) -> bool + 'static> Source for Filter<S, P> {
     type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        self.source.pull(cx).filter(|e| (self.predicate)(e))
+    }
 }
 
 /// The adapter returned by [`Source::filter_map`].
@@ -277,8 +489,18 @@ pub struct FilterMap<S, F> {
     source: S,
     f: F,
 }
+impl<S, F> sealed::Sealed for FilterMap<S, F> {}
 impl<S: Source, B, F: Fn(S::Event) -> Option<B> + 'static> Source for FilterMap<S, F> {
     type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).and_then(&self.f)
+    }
 }
 
 /// The adapter returned by [`Source::map_to`].
@@ -286,8 +508,18 @@ pub struct MapTo<S, B> {
     source: S,
     value: B,
 }
+impl<S, B> sealed::Sealed for MapTo<S, B> {}
 impl<S: Source, B: Clone + 'static> Source for MapTo<S, B> {
     type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).map(|_| self.value.clone())
+    }
 }
 
 /// The adapter returned by [`Source::snapshot`].
@@ -296,8 +528,21 @@ pub struct Snapshot<S, B, F> {
     cell: Cell<B>,
     f: F,
 }
-impl<S: Source, B, C, F: Fn(S::Event, &B) -> C + 'static> Source for Snapshot<S, B, F> {
+impl<S, B, F> sealed::Sealed for Snapshot<S, B, F> {}
+impl<S: Source, B: 'static, C, F: Fn(S::Event, &B) -> C + 'static> Source for Snapshot<S, B, F> {
     type Event = C;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        visit(self.cell.token);
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<C> {
+        let a = self.source.pull(cx)?;
+        // The value before the instant: a read, not a dependency.
+        Some((self.f)(a, cx.sample::<B>(self.cell.token.index)))
+    }
 }
 
 /// The adapter returned by [`Source::gate`].
@@ -305,14 +550,44 @@ pub struct Gate<S> {
     source: S,
     cell: Cell<bool>,
 }
+impl<S> sealed::Sealed for Gate<S> {}
 impl<S: Source> Source for Gate<S> {
     type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        visit(self.cell.token);
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        // The source is pulled whether or not the gate is open, so a `once`
+        // inside it takes its first event even when the gate drops it.
+        let a = self.source.pull(cx)?;
+        (*cx.sample::<bool>(self.cell.token.index)).then_some(a)
+    }
 }
 
 /// The adapter returned by [`Source::once`].
 pub struct Once<S> {
     source: S,
+    done: bool,
 }
+impl<S> sealed::Sealed for Once<S> {}
 impl<S: Source> Source for Once<S> {
     type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
+        self.source.read_cells(visit)
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        if self.done {
+            return None;
+        }
+        let a = self.source.pull(cx)?;
+        self.done = true;
+        Some(a)
+    }
 }

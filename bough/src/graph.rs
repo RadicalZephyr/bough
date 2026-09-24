@@ -105,6 +105,18 @@ impl<M: Mode> Graph<M> {
         assert!(!self.poisoned(), "{POISONED}");
     }
 
+    /// The checks of the `try_` entries that take a token: poison, graph,
+    /// liveness.
+    fn lookup(&self, token: Token) -> Result<u32, TokenError> {
+        if self.poisoned() {
+            return Err(TokenError::Poisoned);
+        }
+        self.build.lookup(token).map_err(|fault| match fault {
+            TokenFault::Foreign => TokenError::ForeignGraph,
+            TokenFault::Stale => TokenError::Stale,
+        })
+    }
+
     /// Sends one value in a transaction of its own, then runs its child
     /// transactions and its listeners before returning.
     ///
@@ -277,13 +289,33 @@ impl<M: Mode> Graph<M> {
     }
 
     /// The cell's current value, by reference.
+    ///
+    /// The graph is borrowed shared, so two samples compose in one
+    /// expression; nothing runs, and the value changes only at a commit,
+    /// which needs `&mut self`. So a sampled reference cannot be held across
+    /// a send:
+    ///
+    /// ```compile_fail,E0502
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (numbers_in, latest)) = Graph::build(|b| {
+    ///     let (numbers, numbers_in) = b.input::<u32>();
+    ///     (numbers_in, numbers.hold(b, 0u32))
+    /// });
+    /// let before = graph.sample(latest);
+    /// graph.send(numbers_in, 1); // error: graph is also borrowed as immutable
+    /// assert_eq!(*before, 0);
+    /// ```
     pub fn sample<A: 'static>(&self, cell: Cell<A>) -> &A {
-        todo!()
+        self.enter();
+        let i = self.build.check(cell.token);
+        self.build.value::<A>(i)
     }
 
     /// [`sample`](Graph::sample), returning the error instead of panicking.
     pub fn try_sample<A: 'static>(&self, cell: Cell<A>) -> Result<&A, TokenError> {
-        todo!()
+        let i = self.lookup(cell.token)?;
+        Ok(self.build.value::<A>(i))
     }
 
     /// Runs a garbage collection now (RFD 3).

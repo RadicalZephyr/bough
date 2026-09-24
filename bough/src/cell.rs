@@ -12,7 +12,7 @@ impl<A: 'static> Cell<A> {
     /// The context is borrowed shared, so several samples compose in one
     /// expression, and a caller that wants to keep a value clones it:
     ///
-    /// ```no_run
+    /// ```
     /// use bough::{Graph, Source};
     ///
     /// let (graph, _) = Graph::build(|b| {
