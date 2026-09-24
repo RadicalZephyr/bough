@@ -21,6 +21,13 @@
 //! to a program that fails the same way, and reported with its schedule and
 //! every observed node, the engine beside the oracle.
 //!
+//! The fixed programs are the shapes RFD 1 asks for: counters, a loop
+//! capped by its own value, two loops that read each other, the
+//! sodium-rust#52 shape, a state loop, stream loops through a hold and
+//! through children, splits sharing child indices with each other and with
+//! a defer, and transaction zero's children. Each asserts the oracle's
+//! answer, times included, as well as the engine's agreement with it.
+//!
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
 //! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
 //! The tests of the builder, the comparison and the generator alone, and
@@ -44,7 +51,8 @@ use bough::{Local, Threaded};
 use bough_oracle::{
     Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
     Program, Reference, RunOptions, Scalar, Type, Value, Window, check, check_program, compare,
-    expected, programs, reduce, run, with_same_instant_cycle,
+    expected, guard_element, guard_filter, guard_map, programs, reduce, run,
+    with_same_instant_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -174,6 +182,30 @@ fn timed_stream(transactions: usize, events: &[(&[i64], i64)]) -> Expected {
         lists[time[0] as usize - 1].push((time.to_vec(), *value));
     }
     Expected::Stream { events: lists }
+}
+
+/// A cell's expectation from its value after transaction zero and its
+/// steps over `transactions` transactions, each with its time.
+fn timed_cell(initial: i64, transactions: usize, steps: &[(&[i64], i64)]) -> Expected {
+    let mut lists: Vec<Vec<(Vec<i64>, i64)>> = vec![Vec::new(); transactions];
+    for (time, value) in steps {
+        lists[time[0] as usize - 1].push((time.to_vec(), *value));
+    }
+    let mut value = initial;
+    let values = lists
+        .iter()
+        .map(|steps| {
+            if let Some((_, last)) = steps.last() {
+                value = *last;
+            }
+            value
+        })
+        .collect();
+    Expected::Cell {
+        initial,
+        steps: lists,
+        values,
+    }
 }
 
 // ----- random programs -----
@@ -687,6 +719,776 @@ fn accumulate_and_accumulate_mut_agree() {
     // The snapshot reads the state before the instant.
     assert_eq!(answers[2], stream(&[&[], &[10007], &[20026], &[30026]]));
     assert_eq!(answers[3], cell(0, &[Some(0), Some(0), None, Some(0)]));
+}
+
+// ----- fixed programs: loops -----
+
+/// A counter: a cell loop closed with a hold of a snapshot of its own
+/// forward, which reads the count from before each instant. After the
+/// close anything may use the forward: a steps view of it carries the
+/// definition's steps, a map_cell of it reads through, and another
+/// snapshot of it reads the count before the instant.
+#[test]
+fn a_counter_reads_its_own_forward_through_a_snapshot() {
+    let Some(oracle) = oracle() else { return };
+    let counter = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Share(TopLevel(1)),
+            Snapshot {
+                function: SecondArgument + Literal(1),
+                source: TopLevel(2),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(3),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(4),
+            },
+            Steps(TopLevel(0)),
+            MapCell {
+                function: Argument * Literal(10),
+                cell: TopLevel(0),
+            },
+            Snapshot {
+                function: SecondArgument,
+                source: TopLevel(2),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(99),
+                source: TopLevel(8),
+            },
+        ],
+        vec![0, 4, 6, 7, 9],
+        &[&[(0, 1)], &[], &[(0, 1)], &[(0, 1)]],
+    );
+    assert_eq!(
+        agree(oracle, &counter),
+        [
+            cell(0, &[Some(1), None, Some(2), Some(3)]),
+            cell(0, &[Some(1), None, Some(2), Some(3)]),
+            stream(&[&[1], &[], &[2], &[3]]),
+            cell(0, &[Some(10), None, Some(20), Some(30)]),
+            cell(99, &[Some(0), None, Some(1), Some(2)]),
+        ]
+    );
+}
+
+/// Fact 1's capped counter, which the lazy text cannot run: a filter inside
+/// the loop reads the loop's own value, so the count steps to 3 and stops.
+#[test]
+fn a_counter_capped_by_its_own_value_stops() {
+    let Some(oracle) = oracle() else { return };
+    let capped = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Snapshot {
+                function: SecondArgument + Literal(1),
+                source: TopLevel(1),
+                cell: TopLevel(0),
+            },
+            Filter {
+                predicate: Argument.less_than(Literal(4)),
+                source: TopLevel(2),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(3),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(4),
+            },
+        ],
+        vec![0],
+        &[
+            &[(0, 1)],
+            &[(0, 1)],
+            &[(0, 1)],
+            &[(0, 1)],
+            &[(0, 1)],
+            &[(0, 1)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &capped),
+        [cell(0, &[Some(1), Some(2), Some(3), None, None, None])]
+    );
+}
+
+/// A diamond through loops: two loops read each other through snapshots of
+/// one shared stream, so both step in one instant, each reading the other
+/// from before it. Downstream a lift joins the two forwards, a merge joins
+/// their steps, and a lift joins the definitions with a hold of the shared
+/// stream, upstream of both. A reads B, B accumulates what it reads of A,
+/// and at [1] A steps to the value it had, which is still a step.
+#[test]
+fn two_loops_that_read_each_other_lifted_and_merged_downstream() {
+    let Some(oracle) = oracle() else { return };
+    let diamond = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Share(TopLevel(2)),
+            Snapshot {
+                function: Argument + SecondArgument,
+                source: TopLevel(3),
+                cell: TopLevel(1),
+            },
+            Hold {
+                initial: Literal(1),
+                source: TopLevel(4),
+            },
+            Snapshot {
+                function: SecondArgument * Literal(2) - Argument,
+                source: TopLevel(3),
+                cell: TopLevel(0),
+            },
+            Accumulate {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(6),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(5),
+            },
+            Close {
+                forward: 1,
+                definition: TopLevel(7),
+            },
+            Lift {
+                function: ArgumentAt(0) * Literal(100) + ArgumentAt(1),
+                cells: vec![TopLevel(0), TopLevel(1)],
+            },
+            Steps(TopLevel(0)),
+            Steps(TopLevel(1)),
+            Merge {
+                function: Argument * Literal(1000) + SecondArgument,
+                left: TopLevel(11),
+                right: TopLevel(12),
+            },
+            Hold {
+                initial: Literal(5),
+                source: TopLevel(3),
+            },
+            Lift {
+                function: ArgumentAt(0) + ArgumentAt(1) + ArgumentAt(2),
+                cells: vec![TopLevel(5), TopLevel(7), TopLevel(14)],
+            },
+        ],
+        vec![0, 1, 10, 13, 15],
+        &[&[(0, 1)], &[(0, 2)], &[], &[(0, 3)]],
+    );
+    assert_eq!(
+        agree(oracle, &diamond),
+        [
+            cell(1, &[Some(1), Some(3), None, Some(4)]),
+            cell(0, &[Some(1), Some(1), None, Some(4)]),
+            cell(100, &[Some(101), Some(301), None, Some(404)]),
+            stream(&[&[1001], &[3001], &[], &[4004]]),
+            cell(6, &[Some(3), Some(6), None, Some(11)]),
+        ]
+    );
+}
+
+/// The sodium-rust#52 shape, as RFD 1 asks: health, a loop, clamps its own
+/// value plus the merge of heal and damage by the maximum from before the
+/// instant, itself a loop over the level-ups, upstream of health; and a
+/// lift reads health with the maximum. The lift is observation only, so
+/// health is 100 at the record-0003 instant, where sodium-rust 2.1.3 gave
+/// 60 with a lift; and 200, not 250, where the maximum steps with a heal.
+#[test]
+fn a_loop_cell_lifted_with_a_cell_upstream_of_itself() {
+    let Some(oracle) = oracle() else { return };
+    let shape = program(
+        integers(3),
+        vec![
+            CellLoop(Type::Integer),
+            Definition::Input(2),
+            Snapshot {
+                function: SecondArgument + Argument,
+                source: TopLevel(1),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(100),
+                source: TopLevel(2),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(3),
+            },
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Definition::Input(1),
+            Map {
+                function: Literal(0) - Argument,
+                source: TopLevel(7),
+            },
+            Merge {
+                function: Argument + SecondArgument,
+                left: TopLevel(6),
+                right: TopLevel(8),
+            },
+            Snapshot {
+                function: Argument + SecondArgument,
+                source: TopLevel(9),
+                cell: TopLevel(5),
+            },
+            Snapshot {
+                function: Argument.minimum(SecondArgument).maximum(Literal(0)),
+                source: TopLevel(10),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(60),
+                source: TopLevel(11),
+            },
+            Close {
+                forward: 5,
+                definition: TopLevel(12),
+            },
+            Lift {
+                function: ArgumentAt(0) * Literal(1000) + ArgumentAt(1),
+                cells: vec![TopLevel(5), TopLevel(0)],
+            },
+        ],
+        vec![3, 12, 14, 5],
+        &[
+            &[(0, 100), (1, 50), (2, 100)],
+            &[(1, 30)],
+            &[(0, 500), (2, 50)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &shape),
+        [
+            cell(100, &[Some(200), None, Some(250)]),
+            cell(60, &[Some(100), Some(70), Some(200)]),
+            cell(60100, &[Some(100200), Some(70200), Some(200250)]),
+            cell(60, &[Some(100), Some(70), Some(200)]),
+        ]
+    );
+}
+
+/// A stream loop read through a hold of its forward and a snapshot of that:
+/// a running total, which needs no child transaction.
+#[test]
+fn a_stream_loop_read_through_a_hold_and_a_snapshot() {
+    let Some(oracle) = oracle() else { return };
+    let total = program(
+        integers(1),
+        vec![
+            StreamLoop(Type::Integer),
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(0),
+            },
+            Definition::Input(0),
+            Snapshot {
+                function: Argument + SecondArgument,
+                source: TopLevel(2),
+                cell: TopLevel(1),
+            },
+            Share(TopLevel(3)),
+            Close {
+                forward: 0,
+                definition: TopLevel(4),
+            },
+        ],
+        vec![1, 4],
+        &[&[(0, 2)], &[(0, 3)], &[], &[(0, 10)]],
+    );
+    assert_eq!(
+        agree(oracle, &total),
+        [
+            cell(0, &[Some(2), Some(5), None, Some(15)]),
+            stream(&[&[2], &[5], &[], &[15]]),
+        ]
+    );
+}
+
+/// A loop closed with an in-place accumulator is a state loop: the builder
+/// looks ahead at the Close and declares it with `state_loop`, and the
+/// forward is a State, which a map_cell reads through and a snapshot reads
+/// from before the instant. The accumulator admits an event while the state
+/// before the instant is below 10, and a step of 0 at [4] is still a step.
+#[test]
+fn an_in_place_accumulator_closes_a_state_loop() {
+    let Some(oracle) = oracle() else { return };
+    let members = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Share(TopLevel(1)),
+            Snapshot {
+                function: Expression::if_then_else(
+                    SecondArgument.less_than(Literal(10)),
+                    Argument,
+                    Literal(0),
+                ),
+                source: TopLevel(2),
+                cell: TopLevel(0),
+            },
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(3),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(4),
+            },
+            MapCell {
+                function: Argument * Literal(2),
+                cell: TopLevel(0),
+            },
+            Snapshot {
+                function: SecondArgument,
+                source: TopLevel(2),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(-1),
+                source: TopLevel(7),
+            },
+        ],
+        vec![0, 4, 6, 8],
+        &[&[(0, 4)], &[(0, 5)], &[(0, 6)], &[(0, 7)]],
+    );
+    let types = check(&members).unwrap();
+    assert_eq!(
+        types[0],
+        NodeType::Cell {
+            value: Scalar::Integer,
+            state: true
+        },
+        "a loop closed with a State is a State"
+    );
+    assert_eq!(
+        agree(oracle, &members),
+        [
+            cell(0, &[Some(4), Some(9), Some(15), Some(15)]),
+            cell(0, &[Some(4), Some(9), Some(15), Some(15)]),
+            cell(0, &[Some(8), Some(18), Some(30), Some(30)]),
+            cell(-1, &[Some(0), Some(4), Some(9), Some(15)]),
+        ]
+    );
+}
+
+// ----- fixed programs: child transactions -----
+
+/// A countdown: a stream loop through a defer, merged with an input, whose
+/// guard, `(x mod 7) - 1` kept while positive, ends it. Each event comes
+/// back one child level down, `[1]`, `[1, 0]`, `[1, 0, 0]`, and an
+/// accumulator over it steps at each.
+#[test]
+fn a_stream_loop_through_a_defer_counts_down_one_child_level_at_a_time() {
+    let Some(oracle) = oracle() else { return };
+    let countdown = program(
+        integers(1),
+        vec![
+            StreamLoop(Type::Integer),
+            Map {
+                function: guard_map(7, 1),
+                source: TopLevel(0),
+            },
+            Filter {
+                predicate: guard_filter(),
+                source: TopLevel(1),
+            },
+            Definition::Defer(TopLevel(2)),
+            Definition::Input(0),
+            Definition::OrElse {
+                left: TopLevel(4),
+                right: TopLevel(3),
+            },
+            Share(TopLevel(5)),
+            Close {
+                forward: 0,
+                definition: TopLevel(6),
+            },
+            Accumulate {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(6),
+            },
+        ],
+        vec![6, 8],
+        &[&[(0, 3)], &[(0, 9)], &[(0, -1)]],
+    );
+    assert!(bough_oracle::well_founded(&countdown));
+    assert_eq!(
+        agree(oracle, &countdown),
+        [
+            timed_stream(
+                3,
+                &[
+                    (&[1], 3),
+                    (&[1, 0], 2),
+                    (&[1, 0, 0], 1),
+                    (&[2], 9),
+                    (&[2, 0], 1),
+                    (&[3], -1),
+                    (&[3, 0], 5),
+                    (&[3, 0, 0], 4),
+                    (&[3, 0, 0, 0], 3),
+                    (&[3, 0, 0, 0, 0], 2),
+                    (&[3, 0, 0, 0, 0, 0], 1),
+                ]
+            ),
+            timed_cell(
+                0,
+                3,
+                &[
+                    (&[1], 3),
+                    (&[1, 0], 5),
+                    (&[1, 0, 0], 6),
+                    (&[2], 15),
+                    (&[2, 0], 16),
+                    (&[3], 15),
+                    (&[3, 0], 20),
+                    (&[3, 0, 0], 24),
+                    (&[3, 0, 0, 0], 27),
+                    (&[3, 0, 0, 0, 0], 29),
+                    (&[3, 0, 0, 0, 0, 0], 30),
+                ]
+            ),
+        ]
+    );
+}
+
+/// A stream loop through a split: each event x makes two smaller ones in
+/// its children, `(x mod 6) - 1 - i`, kept while positive, so the split
+/// fires inside its own children. The children run depth first, which is
+/// time order: `[1, 0, 0]` and its own child come before `[1, 1]`, where
+/// breadth first would give 4, 3, 2, 2, 1, 1, 1 (the text's Split, before
+/// the oracle's patch F7, orders them by parent, not by time).
+#[test]
+fn a_stream_loop_through_a_split_runs_its_children_depth_first() {
+    let Some(oracle) = oracle() else { return };
+    let tree = program(
+        integers(1),
+        vec![
+            StreamLoop(Type::Integer),
+            MapList {
+                length: Literal(2),
+                element: guard_element(6, 1),
+                source: TopLevel(0),
+            },
+            Definition::Split(TopLevel(1)),
+            Filter {
+                predicate: guard_filter(),
+                source: TopLevel(2),
+            },
+            Definition::Input(0),
+            Merge {
+                function: Argument * Literal(100) + SecondArgument,
+                left: TopLevel(4),
+                right: TopLevel(3),
+            },
+            Share(TopLevel(5)),
+            Close {
+                forward: 0,
+                definition: TopLevel(6),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(6),
+            },
+        ],
+        vec![6, 8],
+        &[&[(0, 4)], &[(0, 2)]],
+    );
+    assert!(bough_oracle::well_founded(&tree));
+    let events: &[(&[i64], i64)] = &[
+        (&[1], 4),
+        (&[1, 0], 3),
+        (&[1, 0, 0], 2),
+        (&[1, 0, 0, 0], 1),
+        (&[1, 0, 1], 1),
+        (&[1, 1], 2),
+        (&[1, 1, 0], 1),
+        (&[2], 2),
+        (&[2, 0], 1),
+    ];
+    assert_eq!(
+        agree(oracle, &tree),
+        [timed_stream(2, events), timed_cell(0, 2, events)]
+    );
+}
+
+/// Two splits that fire in one instant share child indices: element n of
+/// each is in child n, and a merge combines them there. The longer split's
+/// last element is alone in its child.
+#[test]
+fn two_splits_in_one_instant_share_child_indices() {
+    let Some(oracle) = oracle() else { return };
+    let splits = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            MapList {
+                length: Literal(3),
+                element: Argument * Literal(10) + SecondArgument,
+                source: TopLevel(1),
+            },
+            Definition::Split(TopLevel(2)),
+            MapList {
+                length: Literal(2),
+                element: SecondArgument - Argument,
+                source: TopLevel(1),
+            },
+            Definition::Split(TopLevel(4)),
+            Merge {
+                function: Argument * Literal(1000) + SecondArgument,
+                left: TopLevel(3),
+                right: TopLevel(5),
+            },
+        ],
+        vec![6],
+        &[&[(0, 1)], &[(0, 2)]],
+    );
+    assert_eq!(
+        agree(oracle, &splits),
+        [timed_stream(
+            2,
+            &[
+                (&[1, 0], 9999),
+                (&[1, 1], 11000),
+                (&[1, 2], 12),
+                (&[2, 0], 19998),
+                (&[2, 1], 20999),
+                (&[2, 2], 22),
+            ]
+        )]
+    );
+}
+
+/// A defer is a split of one element, so it shares child index 0 with
+/// every split that fires in its instant (finding F13), and a merge
+/// combines the deferred event with the split's first element.
+#[test]
+fn a_split_and_a_defer_share_child_index_0() {
+    let Some(oracle) = oracle() else { return };
+    let shared = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            MapList {
+                length: Literal(2),
+                element: Argument + SecondArgument,
+                source: TopLevel(1),
+            },
+            Definition::Split(TopLevel(2)),
+            Map {
+                function: Argument * Literal(100),
+                source: TopLevel(1),
+            },
+            Definition::Defer(TopLevel(4)),
+            Merge {
+                function: Argument - SecondArgument,
+                left: TopLevel(3),
+                right: TopLevel(5),
+            },
+        ],
+        vec![6],
+        &[&[(0, 1)], &[(0, 3)]],
+    );
+    assert_eq!(
+        agree(oracle, &shared),
+        [timed_stream(
+            2,
+            &[(&[1, 0], -99), (&[1, 1], 2), (&[2, 0], -297), (&[2, 1], 4)]
+        )]
+    );
+}
+
+/// Lists of length 0 to 3, split: an empty list emits nothing and runs no
+/// child, and a hold over the elements steps once in each child, so a cell
+/// listener hears several steps in one external transaction and a sample
+/// after it reads the last.
+#[test]
+fn splits_of_lists_of_zero_to_three_elements() {
+    let Some(oracle) = oracle() else { return };
+    let lengths = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            MapList {
+                length: Argument,
+                element: SecondArgument * Literal(10) + Argument,
+                source: TopLevel(0),
+            },
+            Definition::Split(TopLevel(1)),
+            Share(TopLevel(2)),
+            Hold {
+                initial: Literal(-1),
+                source: TopLevel(3),
+            },
+        ],
+        vec![3, 4],
+        &[&[(0, 4)], &[(0, 1)], &[(0, 2)], &[(0, 3)], &[(0, 0)]],
+    );
+    let elements: &[(&[i64], i64)] = &[
+        (&[2, 0], 1),
+        (&[3, 0], 2),
+        (&[3, 1], 12),
+        (&[4, 0], 3),
+        (&[4, 1], 13),
+        (&[4, 2], 23),
+    ];
+    assert_eq!(
+        agree(oracle, &lengths),
+        [timed_stream(5, elements), timed_cell(-1, 5, elements)]
+    );
+}
+
+/// A cell loop through a defer of its own steps view: legal where the same
+/// loop without the defer is F3's same-instant cycle, and ended by its
+/// guard. The forward steps one child level down each time round.
+#[test]
+fn a_cell_loop_through_a_defer_of_its_steps_view() {
+    let Some(oracle) = oracle() else { return };
+    let looped = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            Steps(TopLevel(0)),
+            Map {
+                function: guard_map(7, 2),
+                source: TopLevel(1),
+            },
+            Filter {
+                predicate: guard_filter(),
+                source: TopLevel(2),
+            },
+            Definition::Defer(TopLevel(3)),
+            Definition::Input(0),
+            Definition::OrElse {
+                left: TopLevel(5),
+                right: TopLevel(4),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(6),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(7),
+            },
+        ],
+        vec![0, 7],
+        &[&[(0, 6)], &[(0, 3)]],
+    );
+    assert!(bough_oracle::well_founded(&looped));
+    let steps: &[(&[i64], i64)] = &[
+        (&[1], 6),
+        (&[1, 0], 4),
+        (&[1, 0, 0], 2),
+        (&[2], 3),
+        (&[2, 0], 1),
+    ];
+    assert_eq!(
+        agree(oracle, &looped),
+        [timed_cell(0, 2, steps), timed_cell(0, 2, steps)]
+    );
+}
+
+/// Transaction zero has children (finding F11): a defer of a
+/// steps_with_current built in the build fires at `[0, 0]`, before build
+/// returns, so a hold over it starts the graph at the input cell's value.
+/// After that it follows the cell one child level down.
+#[test]
+fn a_defer_in_transaction_zero_runs_before_build_returns() {
+    let Some(oracle) = oracle() else { return };
+    let zero = program(
+        integers(1),
+        vec![
+            InputCell {
+                input: 0,
+                initial: Literal(5),
+            },
+            StepsWithCurrent(TopLevel(0)),
+            Definition::Defer(TopLevel(1)),
+            Share(TopLevel(2)),
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(3),
+            },
+        ],
+        vec![4, 3],
+        &[&[(0, 7)], &[]],
+    );
+    assert_eq!(
+        agree(oracle, &zero),
+        [
+            timed_cell(5, 2, &[(&[1, 0], 7)]),
+            timed_stream(2, &[(&[1, 0], 7)]),
+        ]
+    );
+}
+
+/// F3's loop, `c = hold 0 (merge ticks (map (+1) (steps c)))`, which RFD
+/// 2's path rule accepts because the path passes through a hold, is a
+/// same-instant cycle: the builder builds it as a user would, and the
+/// engine refuses it at its close, in both modes, naming the cycle.
+#[test]
+fn a_loop_through_its_holds_steps_view_is_refused_at_close() {
+    let f3 = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Steps(TopLevel(0)),
+            Map {
+                function: Argument + Literal(1),
+                source: TopLevel(2),
+            },
+            Merge {
+                function: Argument + SecondArgument,
+                left: TopLevel(1),
+                right: TopLevel(3),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(4),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(5),
+            },
+        ],
+        vec![5],
+        &[&[(0, 1)]],
+    );
+    assert!(
+        check(&f3).is_ok(),
+        "the builder leaves the refusal to the engine"
+    );
+    assert!(!bough_oracle::well_founded(&f3));
+    for engine in ENGINES {
+        let message = panic_message(|| (engine.run)(&f3, RunOptions::default()))
+            .unwrap_or_else(|| panic!("{} mode built F3's loop", engine.name));
+        assert!(
+            message.contains("closing this loop makes a same-instant cycle"),
+            "{message}"
+        );
+    }
 }
 
 // ----- the builder and the generator alone -----
