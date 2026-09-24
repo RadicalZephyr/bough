@@ -274,10 +274,10 @@ impl<A: 'static> Cell<Cell<A>> {
     /// current inner steps. At a switch instant the value it steps to is the
     /// new inner's value after that instant, so a [`steps`](Cell::steps)
     /// view there runs the new inner, and what it reads, at that instant,
-    /// before the instant's order would have. A switch built in the build
-    /// closure steps in transaction zero, where its steps view fires with
-    /// the value it starts with; one built later starts from the inner its
-    /// outer holds at that instant.
+    /// before the instant's order would have. A switch steps at the
+    /// instant it is built, starting from the inner its outer held before
+    /// that instant: one built in the build closure steps in transaction
+    /// zero, where its steps view fires with the value it starts with.
     ///
     /// ```
     /// use std::cell::RefCell;
@@ -307,11 +307,11 @@ impl<A: 'static> Cell<Cell<A>> {
     /// The outer and the current inner are dependencies: a loop closed
     /// through either at the same instant is refused, and so is a switch to
     /// a cell that depends on the switch itself. The switch links the inner
-    /// its outer selects at its first evaluation, at the end of the
-    /// transaction that creates it, so its outer may be a loop that is not
-    /// closed yet. Its first link and every move to another inner check
-    /// that no cycle forms, and one that does is a panic that poisons the
-    /// graph, naming the cycle's nodes.
+    /// its outer selects at its first evaluation, in the transaction that
+    /// creates it but after the closure that built it returns, so its outer
+    /// may be a loop that is not closed yet. Its first link and every move
+    /// to another inner check that no cycle forms, and one that does is a
+    /// panic that poisons the graph, naming the cycle's nodes.
     pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> Cell<A> {
         Cell::from_token(build.switch_cell_node::<Cell<A>>(self.token))
     }
@@ -399,11 +399,12 @@ where
     /// rule is [`Build::cell_loop`]'s): the switch may select, through a
     /// hold, a stream built from its own events. Its only dependency is the
     /// stream it currently follows, which may not depend on the switch. The
-    /// switch links that stream at its first evaluation, at the end of the
-    /// transaction that creates it, and moves at the commit of every
-    /// instant the cell steps, even one the old stream is quiet at; its
-    /// first link and every move check that no cycle forms, and one that
-    /// does is a panic that poisons the graph, naming the cycle's nodes.
+    /// switch links that stream at its first evaluation, in the transaction
+    /// that creates it but after the closure that built it returns, and
+    /// moves at the commit of every instant the cell steps, even one the
+    /// old stream is quiet at; its first link and every move check that no
+    /// cycle forms, and one that does is a panic that poisons the graph,
+    /// naming the cycle's nodes.
     ///
     /// A linear stream has one consumer, and a switch over linear streams
     /// takes their events, so a cell holding linear streams may have one
