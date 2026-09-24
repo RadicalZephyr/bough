@@ -3,9 +3,62 @@
 //! which may evaluate and computes read-through values, and `post`, which
 //! reads.
 
-use super::{IN_PROGRESS, Kind, NOOP, cell, in_place, memo};
+use super::{IN_PROGRESS, Kind, LINKED, NOOP, cell, in_place, memo};
 use crate::build::Build;
 use crate::mode::Mode;
+
+/// What a read of a cell's value has passed on its way down, for Brent's
+/// cycle detection over the switch_cells whose selection it follows before
+/// any cycle check has seen that selection. It is an argument, on the call
+/// stack, since a read through `&Build` can mark nothing in the arena.
+///
+/// A read follows a switch_cell to the inner its outer selects, not to its
+/// link, and a switch_cell built in this instant has no link until its
+/// first evaluation, which is what checks that the inner does not depend
+/// on it. Before that, a read can go around a cycle the check would refuse:
+/// a loop closed with the switch, which its outer selects (F49). Every
+/// other step of a read follows a dependency, and the dependency graph is
+/// acyclic, so a read that goes around a cycle passes such a switch on
+/// every round. A read's steps depend only on the graph, and a read-through
+/// cell on the way is still filling its memo, so a read that meets a
+/// switch it passed before, further up its own path, goes around for ever.
+/// Brent's algorithm finds the meeting within a few rounds of the cycle.
+#[derive(Clone, Copy)]
+pub(crate) struct Passed {
+    /// The switch the read saved, to meet again on a cycle.
+    saved: u32,
+    /// Switches passed since it saved one, and how many to pass before it
+    /// saves the next.
+    since: u32,
+    power: u32,
+}
+
+impl Passed {
+    /// A read that has passed nothing.
+    pub(crate) const NOTHING: Passed = Passed {
+        saved: NOOP,
+        since: 0,
+        power: 1,
+    };
+
+    /// The read passes switch_cell `i`, or, `None`, meets the switch it
+    /// saved: it has gone around a cycle.
+    fn pass(self, i: u32) -> Option<Passed> {
+        if i == self.saved {
+            return None;
+        }
+        let since = self.since + 1;
+        Some(if since == self.power {
+            Passed {
+                saved: i,
+                since: 0,
+                power: self.power.saturating_mul(2),
+            }
+        } else {
+            Passed { since, ..self }
+        })
+    }
+}
 
 impl<M: Mode> Build<M> {
     /// Makes sure `x` has run at this instant, running its dependencies
@@ -76,18 +129,39 @@ impl<M: Mode> Build<M> {
     /// t) t`: two chases through its outer and no memo; it never reads its
     /// own link, which exists for marking.
     pub(crate) fn value<A: 'static>(&self, i: u32) -> &A {
+        self.value_through::<A>(i, Passed::NOTHING)
+    }
+
+    /// `value`, as a step of a read that has passed what `passed` says. A
+    /// read that goes around a cycle through a switch_cell's selection
+    /// before the switch's first link panics, which poisons the graph
+    /// inside a transaction, where it would recurse until the stack
+    /// overflowed (`Passed`).
+    pub(crate) fn value_through<A: 'static>(&self, i: u32, passed: Passed) -> &A {
         let data = &self.store.data[i as usize];
         match self.store.hot[i as usize].kind {
             Kind::Hold | Kind::Constant => &cell::<M, A>(data).value,
             Kind::InPlace => in_place::<M, A>(data),
-            Kind::ReadThrough => (self.store.ops[i as usize].value)(self, i)
+            Kind::ReadThrough => (self.store.ops[i as usize].value)(self, i, passed)
                 .downcast_ref::<A>()
                 .expect("bough engine: cell type"),
-            Kind::Loop => self.value::<A>(self.loop_target(i)),
+            Kind::Loop => self.value_through::<A>(self.loop_target(i), passed),
             Kind::SwitchCell => {
                 let outer = self.store.relations[i as usize].deps[0];
-                let inner = (self.store.ops[i as usize].inner)(self, outer, false);
-                self.value::<A>(self.check(inner))
+                let inner = (self.store.ops[i as usize].inner)(self, outer, false, passed);
+                let inner = self.check(inner);
+                let passed = if self.store.hot[i as usize].flags & LINKED == 0 {
+                    passed.pass(i).unwrap_or_else(|| {
+                        panic!(
+                            "bough: a same-instant cycle through a switch_cell read before its \
+                             first link, at node {i}. The cell a switch selects may not depend \
+                             on the switch at the same instant"
+                        )
+                    })
+                } else {
+                    passed
+                };
+                self.value_through::<A>(inner, passed)
             }
             k => panic!("bough engine: node {i} ({k:?}) is not a cell"),
         }

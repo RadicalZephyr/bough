@@ -51,6 +51,7 @@ use crate::mode::{Carrier, Mode};
 use crate::token::Token;
 use crate::trace::Tracer;
 
+pub(crate) use pull::Passed;
 pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
 pub use sched::Statistics;
@@ -250,16 +251,18 @@ pub(crate) struct Ops<M: Mode> {
     /// Commit: a hold moves `pending` into `value`; an in-place accumulator
     /// runs its function.
     pub(crate) commit: fn(&mut [M::Carrier], &mut Data<M>),
-    /// A read-through cell's value before the instant, computing the memo.
-    pub(crate) value: for<'a> fn(&'a Build<M>, u32) -> &'a dyn Any,
+    /// A read-through cell's value before the instant, computing the memo,
+    /// as a step of a read that has passed what `Passed` says.
+    pub(crate) value: for<'a> fn(&'a Build<M>, u32, Passed) -> &'a dyn Any,
     /// A read-through cell's post-instant value, computed by `prepare`.
     pub(crate) compute_post: fn(&mut Build<M>, u32),
     /// A stepped read-through cell at commit: promote the post-instant
     /// value into the memo, or clear the memo.
     pub(crate) settle_memo: fn(&mut Data<M>),
     /// A switch: the token inside the outer's value, before (`false`) or
-    /// after (`true`) the instant.
-    pub(crate) inner: fn(&Build<M>, u32, bool) -> Token,
+    /// after (`true`) the instant; a read before it is a step of a read
+    /// that has passed what `Passed` says.
+    pub(crate) inner: fn(&Build<M>, u32, bool, Passed) -> Token,
     /// A split or defer capture: starts its output with the next element
     /// of its top entry, and says whether there was one.
     pub(crate) emit_child: fn(&mut [M::Carrier], &mut Build<M>, u32) -> bool,
@@ -279,12 +282,12 @@ pub(crate) struct Ops<M: Mode> {
 
 fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) {}
 fn no_commit<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>) {}
-fn no_value<M: Mode>(_: &Build<M>, n: u32) -> &dyn Any {
+fn no_value<M: Mode>(_: &Build<M>, n: u32, _: Passed) -> &dyn Any {
     unreachable!("bough engine: node {n} is not a read-through cell")
 }
 fn no_compute_post<M: Mode>(_: &mut Build<M>, _: u32) {}
 fn no_settle_memo<M: Mode>(_: &mut Data<M>) {}
-fn no_inner<M: Mode>(_: &Build<M>, n: u32, _: bool) -> Token {
+fn no_inner<M: Mode>(_: &Build<M>, n: u32, _: bool, _: Passed) -> Token {
     unreachable!("bough engine: node {n} is not a switch")
 }
 fn no_emit_child<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) -> bool {

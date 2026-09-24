@@ -1243,3 +1243,136 @@ fn a_construct_closure_that_swaps_its_build_context_panics_and_poisons() {
     // graph has; the poison is found first.
     assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Poisoned));
 }
+
+// ----------------------------------------------------------- reads before a first link
+
+/// F49: a switch_cell has no link until its first evaluation, which checks
+/// that its inner does not depend on it, and a read follows a switch to
+/// the inner its outer selects. A sample in the closure that built a loop
+/// closed with the switch, which a constant selects, goes around the cycle,
+/// directly or through a map_cell, where the memo's `OnceCell` does not
+/// stop it: each recursed until the stack overflowed and aborted the
+/// process. A read now keeps Brent's cycle detection over the unlinked
+/// switch_cells it passes and panics when it meets one again, which
+/// poisons the graph. The same sample in a build closure panics in
+/// `Graph::build`.
+#[test]
+fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
+    const MESSAGE: &str = "a same-instant cycle through a switch_cell read before its first link";
+    for through_a_map_cell in [false, true] {
+        let cycle = move |b: &mut Build| {
+            let (forward, closer) = b.cell_loop::<u32>();
+            let selected = if through_a_map_cell {
+                forward.map_cell(b, |v| v + 1)
+            } else {
+                forward
+            };
+            let outer = b.constant(selected);
+            let switched = outer.switch_cell(b);
+            closer.close(b, switched);
+            *switched.sample(b)
+        };
+        let (mut graph, (go_in, latest)) = Graph::build(move |b| {
+            let (go, go_in) = b.input::<u32>();
+            let go = go.share(b);
+            let _made = go.construct(b, move |b, _| cycle(b));
+            (go_in, go.hold(b, 0u32))
+        });
+        let message = panic_message(|| graph.send(go_in, 1));
+        assert!(message.contains(MESSAGE), "{message}");
+        assert_poisoned(&mut graph, go_in, 2, latest);
+
+        let message = panic_message(|| Graph::build(cycle));
+        assert!(message.contains(MESSAGE), "{message}");
+    }
+}
+
+/// The same read with no sample in graph code: a stream loop built before
+/// the switch closes with a snapshot of the switch over the stream that
+/// runs the closure, so the new-node phase pulls the snapshot, as the
+/// loop's dependency, before it reaches the switch, and the snapshot fires
+/// and reads. A closure's stream always fires at the closure's instant,
+/// which makes this read the ordinary case in a construct; a build closure
+/// needs a stream that fires in transaction zero for it.
+#[test]
+fn a_node_pulled_before_a_switch_s_first_link_that_reads_around_a_cycle_panics() {
+    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+        let (go, go_in) = b.input::<u32>();
+        let go = go.share(b);
+        let _made = go.construct(b, move |b, _| {
+            let (pulled, pulled_loop) = b.stream_loop::<u32>();
+            let (forward, closer) = b.cell_loop::<u32>();
+            let outer = b.constant(forward);
+            let switched = outer.switch_cell(b);
+            closer.close(b, switched);
+            let reads = go.snapshot(switched, |n, v| n + v).node(b);
+            pulled_loop.close(b, reads);
+            pulled.hold(b, 0u32)
+        });
+        (go_in, go.hold(b, 0u32))
+    });
+    let message = panic_message(|| graph.send(go_in, 1));
+    assert!(
+        message.contains("a same-instant cycle through a switch_cell read before its first link"),
+        "{message}"
+    );
+    assert_poisoned(&mut graph, go_in, 2, latest);
+}
+
+/// A read may pass many unlinked switch_cells without a cycle: a chain of
+/// eight switches, each over a constant holding the one before, all built
+/// in the closure that samples the last, reads the first one's selection
+/// through all eight, in a build closure and in a construct closure. So
+/// the guard saves switches as Brent's algorithm does, at the first,
+/// second, fourth and eighth passed, and meets none of them again.
+#[test]
+fn a_read_through_unlinked_switches_without_a_cycle_reads_the_selection() {
+    fn chain(b: &mut Build, n: u32) -> u32 {
+        let mut selected = b.constant(n);
+        for _ in 0..8 {
+            selected = b.constant(selected).switch_cell(b);
+        }
+        *selected.sample(b)
+    }
+    let (mut graph, (go_in, made)) = Graph::build(|b| {
+        assert_eq!(chain(b, 7), 7);
+        let (go, go_in) = b.input::<u32>();
+        let made = go.construct(b, chain);
+        (go_in, made)
+    });
+    let (received, on) = recorder();
+    graph.listen(made, on).keep();
+    graph.send(go_in, 5);
+    assert_eq!(*received.borrow(), [5]);
+}
+
+/// The guard does not depend on how many switch_cells are unlinked: a
+/// closure that builds ten thousand others before it reads around the
+/// cycle still panics within a few rounds of it. A guard that counted the
+/// unlinked switch_cells a read passes against how many exist went around
+/// the cycle ten thousand times and overflowed the stack first.
+#[test]
+fn a_read_around_a_cycle_panics_however_many_switches_are_unlinked() {
+    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+        let (go, go_in) = b.input::<u32>();
+        let go = go.share(b);
+        let _made = go.construct(b, |b, _| {
+            let one = b.constant(1u32);
+            for _ in 0..10_000 {
+                let _unread = b.constant(one).switch_cell(b);
+            }
+            let (forward, closer) = b.cell_loop::<u32>();
+            let outer = b.constant(forward);
+            let switched = outer.switch_cell(b);
+            closer.close(b, switched);
+            *switched.sample(b)
+        });
+        (go_in, go.hold(b, 0u32))
+    });
+    let message = panic_message(|| graph.send(go_in, 1));
+    assert!(
+        message.contains("a same-instant cycle through a switch_cell read before its first link"),
+        "{message}"
+    );
+    assert_poisoned(&mut graph, go_in, 2, latest);
+}

@@ -17,15 +17,16 @@ use core::cell::OnceCell;
 
 use super::Marker;
 use crate::build::Build;
-use crate::engine::{Data, Memo, NodeOps, Ops, memo_mut};
+use crate::engine::{Data, Memo, NodeOps, Ops, Passed, memo_mut};
 use crate::mode::{Carrier, Mode};
 
 /// A read-through cell's function over its inputs' values, arity 1 for
 /// `map_cell` and 2 to 6 for `lift`. `V` is the tuple of the inputs' value
 /// types, so one node type serves every arity.
 pub(crate) trait ReadFn<V, R>: 'static {
-    /// The function of the inputs' values before the instant.
-    fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R;
+    /// The function of the inputs' values before the instant, read as
+    /// steps of a read that has passed what `passed` says.
+    fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32], passed: Passed) -> R;
 
     /// The function of the inputs' values after the instant. Every input
     /// has been prepared.
@@ -38,8 +39,8 @@ macro_rules! read_fn {
         where
             F: Fn($(&$v),+) -> R + 'static,
         {
-            fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R {
-                self($(b.value::<$v>(inputs[$i])),+)
+            fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32], passed: Passed) -> R {
+                self($(b.value_through::<$v>(inputs[$i], passed)),+)
             }
 
             fn posts<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R {
@@ -62,8 +63,11 @@ pub(crate) struct ReadNode<V, R, F>(Marker<(V, R, F)>);
 
 /// The value before the instant: the memo, filled on the first read since
 /// the cell last stepped. The inputs are read the same way, so a chain of
-/// read-through cells fills its memos from the bottom up.
-fn value_read<M, V, R, F>(b: &Build<M>, me: u32) -> &dyn Any
+/// read-through cells fills its memos from the bottom up. A read that comes
+/// back to this cell while it fills the memo would fill it again for ever,
+/// since the `OnceCell` panics on re-entry only once an inner fill
+/// returns; what the read has passed stops it (`Passed`).
+fn value_read<M, V, R, F>(b: &Build<M>, me: u32, passed: Passed) -> &dyn Any
 where
     M: Mode,
     V: 'static,
@@ -82,7 +86,7 @@ where
             .get()
             .downcast_ref::<F>()
             .expect("bough engine: function type");
-        f.values(b, &b.store.relations[me as usize].deps)
+        f.values(b, &b.store.relations[me as usize].deps, passed)
     })
 }
 

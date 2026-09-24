@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use super::Marker;
 use crate::build::Build;
 use crate::cell::CellRef;
-use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, TAKES_LINEAR, WATCHED};
+use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_LINEAR, WATCHED};
 use crate::mode::Mode;
 use crate::source::Node;
 use crate::token::Token;
@@ -58,12 +58,14 @@ use crate::token::Token;
 pub(crate) struct SwitchCellNode<C>(Marker<C>);
 
 /// The token of the cell the outer holds before the instant, or after it.
-/// The caller has prepared the outer before asking for the value after.
-fn inner_cell<M: Mode, C: CellRef>(b: &Build<M>, outer: u32, post: bool) -> Token {
+/// The caller has prepared the outer before asking for the value after. A
+/// read before it is a step of the read that asked, which has passed what
+/// `passed` says.
+fn inner_cell<M: Mode, C: CellRef>(b: &Build<M>, outer: u32, post: bool, passed: Passed) -> Token {
     let inner = if post {
         b.post::<C>(outer)
     } else {
-        b.value::<C>(outer)
+        b.value_through::<C>(outer, passed)
     };
     inner.token()
 }
@@ -103,11 +105,11 @@ where
 
 /// The token of the stream the outer holds before the instant, or after
 /// it.
-fn inner_stream<M: Mode, S: Node>(b: &Build<M>, outer: u32, post: bool) -> Token {
+fn inner_stream<M: Mode, S: Node>(b: &Build<M>, outer: u32, post: bool, passed: Passed) -> Token {
     let inner = if post {
         b.post::<S>(outer)
     } else {
-        b.value::<S>(outer)
+        b.value_through::<S>(outer, passed)
     };
     inner.node_token()
 }
@@ -200,7 +202,7 @@ impl<M: Mode> Build<M> {
     /// The node a switch's outer selects, before the instant or after it.
     fn selected(&self, n: u32, post: bool) -> u32 {
         let outer = self.outer_of(n);
-        let inner = (self.store.ops[n as usize].inner)(self, outer, post);
+        let inner = (self.store.ops[n as usize].inner)(self, outer, post, Passed::NOTHING);
         self.check(inner)
     }
 
