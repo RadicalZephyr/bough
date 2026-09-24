@@ -20,6 +20,7 @@ module Main (main) where
 
 import Test.HUnit
 import System.Exit (exitFailure, exitSuccess)
+import System.Timeout (timeout)
 import Control.Monad (forM_)
 import Data.Function (on)
 import Data.List (groupBy, isInfixOf, isPrefixOf, nub, sort)
@@ -1005,18 +1006,87 @@ interpreterLoops = test [
                 [1, 4] [[(0, 1)], [(0, 2)], [(0, 3)]]
         answers program [cellOf 0 [([1],1),([2],3),([3],6)], cellOf 0 [([1],1),([2],3),([3],6)]]
         assertEqual "knot" (interpret FixedPoint program) (interpret Knot program),
-    "a loop through defer without a filter does not converge" ~: do
-        line <- answer (show (driven 1 [SInput 0, SLoop TInt, SDefer (N 1), SMap (Add Arg (Lit 1)) (N 2), SOrElse (N 0) (N 3), Close 1 (N 4)]
-            [4] [[(0, 0)]]))
-        assertEqual "answer" ("ERR the loops did not converge in " ++ show maxRounds ++ " rounds") line,
-    "a loop inside a body that does not converge answers ERR" ~: do
+    "a loop whose answer chains through 250 instants converges, and equals accumulate" ~: do
+        -- One round per instant: 251 rounds, past the 200 that once were all
+        -- a loop had. Accumulate's knot needs no rounds at all.
+        let program = driven 1
+                [ SInput 0, CAccum (Lit 0) (Add Arg Arg2) (N 0)
+                , CLoop TInt, SSnapshot (Add Arg Arg2) (N 0) (N 2), CHold (Lit 0) (N 3), Close 2 (N 4) ]
+                [1, 4] [ [(0, k)] | k <- [1 .. 250] ]
+            sums = cellOf 0 [ ([k], k * (k + 1) `div` 2) | k <- [1 .. 250] ]
+        answers program [sums, sums]
+        assertEqual "knot" (interpret FixedPoint program) (interpret Knot program),
+    "two loops, one reading the other within the instant, settle an instant every two rounds" ~: do
+        -- a = hold 0 (snapshot ticks b (+1)) and b = map_cell a: where the
+        -- rounds' iterates first differ stays at an instant for two rounds,
+        -- so a test that it moves on every round would refuse this loop.
+        let program = driven 1
+                [ SInput 0, CLoop TInt, CLoop TInt, SSnapshot (Add Arg2 (Lit 1)) (N 0) (N 2)
+                , CHold (Lit 0) (N 3), Close 1 (N 4), CMapCell Arg (N 1), Close 2 (N 6) ]
+                [4, 6] (replicate 3 [(0, 0)])
+            counted = cellOf 0 [([1],1),([2],2),([3],3)]
+        answers program [counted, counted]
+        assertEqual "knot" (interpret FixedPoint program) (interpret Knot program),
+    "a running sum over split's children chains through 201 child instants" ~:
+        answers (Program FromFirstTransaction [Input TList Nothing]
+            [SInput 0, SSplit (N 0), CLoop TInt, SSnapshot (Add Arg2 Arg) (N 1) (N 2), CHold (Lit 0) (N 3), Close 2 (N 4)]
+            [4] (replicate 67 [(0, L [1, 1, 1])]))
+            [cellOf 0 [ ([k, j], 3 * (k - 1) + j + 1) | k <- [1 .. 67], j <- [0 .. 2] ]],
+    "a body's loop that never stops at the loops' start converges with them" ~: do
+        -- The body counts 0, 1, 2, ... in child instants of [1] and stops
+        -- where the count meets the outer loop's value before [1], which is
+        -- 5; it emits 5. At the start the outer loop holds 0, where the
+        -- count never stops. The body's loop iterates in the same rounds as
+        -- the outer one, so it never has to settle on the start's value
+        -- alone (the oracle review's e.txt).
+        let body limit result = Body
+                [ SLoop TInt, SDefer (Local 0), SMap (Add Arg (Lit 1)) (Local 1), SFilter limit (Local 2)
+                , SOnce (N 0), SMapTo (I 0) (Local 4), SOrElse (Local 5) (Local 3), Close 0 (Local 6)
+                , CHold (Lit 0) (Local 6) ]
+                result
+            emitsFive limit = driven 1
+                [ SInput 0, CLoop TInt, SConstruct (body limit (RValue (Add (Sample (Local 8)) (Lit 5)))) (N 0)
+                , CHold (Lit 5) (N 2), Close 1 (N 3) ]
+                [3] [[(0, 0)]]
+        answers (emitsFive (Not (Eq Arg (Sample (N 1))))) [cellOf 5 [([1],5)]]
+        answers (emitsFive (Lt Arg (Sample (N 1)))) [cellOf 5 [([1],5)]]
+        -- The count itself, with the limit a constant: a switch shows the
+        -- body's loop after [1].
+        answers (driven 1
+            [ SInput 0, CConstant (Lit 5), SConstruct (body (Not (Eq Arg (Sample (N 1)))) (RNode (Local 6))) (N 0)
+            , SNever TInt, CHoldStream (N 3) (N 2), SSwitch (N 4) ]
+            [5] [[(0, 0)], []])
+            [streamOf [([1,0],1),([1,0,0],2),([1,0,0,0],3),([1,0,0,0,0],4)]],
+    "a same-instant cycle that counts up at one instant answers ERR" ~: do
+        -- s = the input merged (+) with (s held, its steps, plus one): at
+        -- [1], x = 0 + (x + 1). The text diverges on it, and the engine must
+        -- refuse it (finding F3). It stays small, so the rounds run out.
+        line <- answer (show (driven 1
+            [SInput 0, SLoop TInt, CHold (Lit 0) (N 1), SSteps (N 2), SMap (Add Arg (Lit 1)) (N 3), SMerge (Add Arg Arg2) (N 0) (N 4), Close 1 (N 5)]
+            [5] [[(0, 0)]]))
+        assertEqual "answer"
+            ("ERR the loops did not converge in " ++ show (roundsAllowed 2) ++ " rounds; still changing: node 1 at [1]")
+            line,
+    "a same-instant cycle in a body answers ERR, naming the body run" ~: do
+        -- The same cycle in a body run at [1], whose result nothing reads:
+        -- its loop iterates with the rest all the same.
         line <- answer (show (driven 1
             [ SInput 0
-            , SConstruct (Body [SLoop TInt, SDefer (Local 0), SMap (Add Arg (Lit 1)) (Local 1), SOrElse (N 0) (Local 2), Close 0 (Local 3)]
-                (RNode (Local 3))) (N 0)
-            , SNever TInt, CHoldStream (N 2) (N 1), SSwitch (N 3) ]
-            [4] [[(0, 0)], [(0, 0)]]))
-        assertEqual "answer" ("ERR node 1, body at [1]: the loops did not converge in " ++ show maxRounds ++ " rounds") line
+            , SConstruct (Body
+                [SLoop TInt, CHold (Lit 0) (Local 0), SSteps (Local 1), SMap (Add Arg (Lit 1)) (Local 2), SMerge (Add Arg Arg2) (N 0) (Local 3), Close 0 (Local 4)]
+                (RValue (Lit 0))) (N 0) ]
+            [1] [[(0, 0)]]))
+        assertEqual "answer"
+            ("ERR the loops did not converge in " ++ show (roundsAllowed 3) ++ " rounds; still changing: node 1, body at [1], node 0 at [1]")
+            line,
+    "a loop through defer with no filter grows without end, until the time limit" ~: do
+        -- Each round adds a child instant, [1,0], [1,0,0], and so on, and the
+        -- rounds allowed grow with it (finding F22): only the process's time
+        -- limit ends it.
+        result <- timeout 1000000 (answer (show (driven 1
+            [SInput 0, SLoop TInt, SDefer (N 1), SMap (Add Arg (Lit 1)) (N 2), SOrElse (N 0) (N 3), Close 1 (N 4)]
+            [4] [[(0, 0)]])))
+        assertEqual "answer" Nothing result
   ]
 
 -- | The first line of an answer's message, for checks.

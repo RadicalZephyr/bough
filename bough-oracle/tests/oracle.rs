@@ -1420,6 +1420,18 @@ fn the_uncapped_counter() {
 }
 
 #[test]
+fn a_loop_whose_answer_chains_through_250_instants_converges() {
+    let Some(oracle) = oracle() else { return };
+    // One round per tick, 251 rounds: more than the 200 that once were all
+    // any loop had.
+    let expected: Vec<(Vec<i64>, i64)> = (1..=250).map(|k| (vec![k], k)).collect();
+    assert_eq!(
+        observe(oracle, &counter(250, None)),
+        vec![Observation::cell(0, expected)]
+    );
+}
+
+#[test]
 fn a_stream_loop_through_defer_counts_down_in_child_instants() {
     let Some(oracle) = oracle() else { return };
     let program = vector(
@@ -1458,35 +1470,42 @@ fn a_stream_loop_through_defer_counts_down_in_child_instants() {
 }
 
 #[test]
-fn a_loop_that_does_not_converge_answers_err() {
+fn a_loop_that_does_not_settle_answers_err() {
     let Some(oracle) = oracle() else { return };
-    // A stream loop through defer with no filter: every round adds a child
-    // instant, [1,0], [1,0,0], and so on.
+    // A same-instant cycle through a hold's steps view, which the text
+    // diverges on and the engine must refuse (finding F3): at [1], x = 0 +
+    // (x + 1). The iteration counts up at [1] and stays small, so the rounds
+    // allowed, 200 and two for its loop and its step, run out.
     let program = driven(
         1,
         vec![
             Definition::Input(0),
             StreamLoop(Type::Integer),
-            Defer(TopLevel(1)),
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(1),
+            },
+            Steps(TopLevel(2)),
             Map {
                 function: Argument + Literal(1),
-                source: TopLevel(2),
+                source: TopLevel(3),
             },
-            OrElse {
+            Merge {
+                function: Argument + SecondArgument,
                 left: TopLevel(0),
-                right: TopLevel(3),
+                right: TopLevel(4),
             },
             Close {
                 forward: 1,
-                definition: TopLevel(4),
+                definition: TopLevel(5),
             },
         ],
-        vec![4],
+        vec![5],
         &[&[(0, 0)]],
     );
     assert_eq!(
         error_message(oracle, &program),
-        "the loops did not converge in 200 rounds"
+        "the loops did not converge in 204 rounds; still changing: node 1 at [1]"
     );
 }
 
@@ -1761,9 +1780,14 @@ fn the_health_and_shield_slice_on_the_long_schedule() {
 
 // ----- the protocol and the pool -----
 
-/// The uncapped counter over twenty thousand transactions: its loop needs
-/// more rounds than the oracle allows, and each round reads the counter at
-/// every tick, so an answer would take hours.
+/// The uncapped counter over twenty thousand transactions. Its loop needs a
+/// round per transaction, 20,001 in all, and each round reads the counter's
+/// steps at every tick, so the cost of a round grows with the square of the
+/// ticks. Measured on one machine: over a thousand ticks the counter answers
+/// in nine seconds, nine milliseconds a round; over twenty thousand a round
+/// takes about four seconds, and the answer about twenty hours. Its memory
+/// stays flat, under ten megabytes after a minute, so the answer cannot
+/// become `ERR heap`.
 fn never_finishes() -> Program {
     counter(20_000, None)
 }
@@ -1905,6 +1929,9 @@ fn a_heap_overflow_answers_err_and_the_process_lives_on() {
 #[test]
 fn extreme_integers_round_trip_and_arithmetic_wraps() {
     let Some(oracle) = oracle() else { return };
+    // GHC's Read takes a negative number with or without its parentheses, so
+    // this shows that the values survive the trip; the printer's own tests
+    // hold it to the parentheses.
     let program = Program {
         window: Window::Everything,
         inputs: vec![Input::new(Type::Integer), Input::new(Type::List)],
@@ -1947,6 +1974,53 @@ fn extreme_integers_round_trip_and_arithmetic_wraps() {
             Observation::stream(extremes.clone()),
             Observation::stream(extremes),
             Observation::stream([(vec![1], vec![i64::MIN, -1, i64::MAX])]),
+        ]
+    );
+}
+
+#[test]
+fn not_if_and_a_sample_at_the_top_level_evaluate_as_documented() {
+    let Some(oracle) = oracle() else { return };
+    // Input 0 sends 0, 1 and -3; input 1 steps its cell from 7 to 9 at [1].
+    let program = driven(
+        2,
+        vec![
+            Definition::Input(0),
+            InputCell {
+                input: 1,
+                initial: Literal(7),
+            },
+            Map {
+                function: !Argument,
+                source: TopLevel(0),
+            },
+            Map {
+                function: Expression::if_then_else(Argument, Literal(10), Literal(20)),
+                source: TopLevel(0),
+            },
+            // At the top level a sample reads the cell as it was before the
+            // build, [0], at whatever instant the expression runs.
+            Map {
+                function: Argument + Expression::Sample(TopLevel(1)),
+                source: TopLevel(0),
+            },
+            Constant(Expression::Sample(TopLevel(1)) * Literal(2)),
+            Hold {
+                initial: Expression::Sample(TopLevel(1)),
+                source: TopLevel(0),
+            },
+        ],
+        vec![2, 3, 4, 5, 6],
+        &[&[(0, 0), (1, 9)], &[(0, 1)], &[(0, -3)]],
+    );
+    assert_eq!(
+        observe(oracle, &program),
+        vec![
+            stream(&[(&[1], 1), (&[2], 0), (&[3], 0)]),
+            stream(&[(&[1], 20), (&[2], 10), (&[3], 10)]),
+            stream(&[(&[1], 7), (&[2], 8), (&[3], 4)]),
+            cell(14, &[]),
+            cell(7, &[(&[1], 0), (&[2], 1), (&[3], -3)]),
         ]
     );
 }
@@ -2045,6 +2119,44 @@ fn counts(text: &str, from: &str) -> Vec<u64> {
         .collect()
 }
 
+/// The groups of `OracleTests.hs`, and the cases each holds. The first five
+/// are the research's tests of every operation (69 cases), the next five its
+/// verification's (35). A case added or removed changes a count here.
+const HASKELL_GROUPS: &[(&str, usize)] = &[
+    ("sodium.hs vectors through Derived", 20),
+    ("common-tests SemanticTests.hs, Denotational.hs times", 10),
+    ("Bough operations", 28),
+    ("loops", 6),
+    ("text versus Derived", 5),
+    ("verification: creation time", 11),
+    ("verification: simultaneous events", 7),
+    ("verification: child-transaction times", 7),
+    ("verification: loops", 7),
+    ("verification: text claims", 3),
+    ("patches", 5),
+    ("interpreter: sodium.hs vectors", 20),
+    ("interpreter: common-tests vectors", 5),
+    ("interpreter: derived operations", 9),
+    ("interpreter: loops", 13),
+    ("interpreter: checks", 15),
+    ("interpreter: answers", 7),
+];
+
+/// The group of each case the HUnit runner reports as passed. Its lines
+/// read `ok   <index>:<label>:…`, the label in quotes when it holds a colon.
+fn passed_groups(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("ok   "))
+        .filter_map(|path| {
+            let (_, rest) = path.split_once(':')?;
+            match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next(),
+                None => rest.split(':').next(),
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn the_haskell_tests_and_the_vendored_vectors_pass() {
     let Some(_) = oracle() else { return };
@@ -2058,9 +2170,23 @@ fn the_haskell_tests_and_the_vendored_vectors_pass() {
     let [cases, tried, errors, failures] = counts(&text, "Counts {")[..] else {
         panic!("no counts in {text}");
     };
-    // The research's 69 and 35, and the patches' and the interpreter's own.
-    assert!(cases >= 104, "{text}");
-    assert_eq!((tried, errors, failures), (cases, 0, 0), "{text}");
+    let groups = passed_groups(&text);
+    for (label, expected) in HASKELL_GROUPS {
+        let passed = groups.iter().filter(|group| *group == label).count();
+        assert_eq!(passed, *expected, "the group {label:?}\n{text}");
+    }
+    let total = HASKELL_GROUPS.iter().map(|(_, cases)| cases).sum::<usize>();
+    assert_eq!(
+        groups.len(),
+        total,
+        "a group this test does not list\n{text}"
+    );
+    let total = u64::try_from(total).unwrap();
+    assert_eq!(
+        (cases, tried, errors, failures),
+        (total, total, 0, 0),
+        "{text}"
+    );
 
     // sodium.hs prints its counts on standard error and exits 0 either way.
     let vectors = bough_oracle::compile_haskell(&directory, "sodium.hs", "sodium-vectors", &[])

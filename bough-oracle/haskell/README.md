@@ -31,21 +31,44 @@ A stream is `[0, [[t, v], ...]]` and a cell is `[1, v0, [[t, v], ...]]`, one
 element per observed node. With the window `FromFirstTransaction`, `v0` is
 the cell's value after transaction zero and its child transactions, and the
 events and steps are those from `[1]`; with `Everything`, they are the
-initial value and every step and event. A loop that does not converge in 200
-rounds answers `ERR`, and so does a heap overflow (`ERR heap`): the process
-is built with `-threaded`, so the five-second limit interrupts pure code,
-and linked with `-with-rtsopts=-M1g`. It lives on after either.
+initial value and every step and event. A loop that does not settle answers
+`ERR` when its rounds run out (below), and a heap overflow answers `ERR heap`:
+the process is built with `-threaded`, so the five-second limit interrupts
+pure code, and linked with `-with-rtsopts=-M1g`. It lives on after either.
 
 Loops are computed by explicit fixed-point iteration, never by lazy
 knot-tying: the text does not terminate on a loop whose spine depends on its
 values, such as a filter inside a loop through a hold. Each loop node is
 bound to a concrete term, starting from a cell that never steps and a stream
-that never fires, and the whole scope is interpreted again until every
-loop's iterate reproduces itself. The iteration is the semantics for loops
-whose back edge is a read before the instant (`snapshot`, `gate`, `sample`,
-the selection of `switch_stream`) or a child instant (`split`, `defer`). A
-back edge through a steps view is a same-instant cycle; programs for the
-oracle must not contain one.
+that never fires, and the whole program is interpreted again until every
+loop's iterate reproduces itself. Every loop iterates in the same rounds:
+those of the top level, and those of each run of a construct body, so a
+body's loop is never solved on its own while the loops around it are still
+far from their answer. The iteration is the semantics for loops whose back
+edge is a read before the instant (`snapshot`, `gate`, `sample`, the
+selection of `switch_stream`) or a child instant (`split`, `defer`). A back
+edge through a steps view is a same-instant cycle; programs for the oracle
+must not contain one.
+
+A round settles at least one more instant of a loop, or one more loop where
+loops read one another within an instant, so a loop needs about a round for
+each instant its answer chains through: the counter over n transactions
+needs n + 1 rounds. The rounds allowed are 200, and two for every loop,
+step, event and body run the largest round held, which leaves a loop that
+settles room twice over, however far it chains. One that never settles and
+stays small, such as a same-instant cycle that counts up at `[1]`, answers
+`ERR` and names a loop that still changes:
+
+```text
+ERR the loops did not converge in 204 rounds; still changing: node 1 at [1]
+```
+
+A loop that grows without end, such as a stream loop through `defer` with no
+filter (finding F22), answers `TIMEOUT`, and so does a long enough chain,
+since each round costs more as the loops grow: the counter takes about a
+second at 500 transactions, and at 1000 it would need nine. `CAccum` and
+`SScan` tie knots of their own and take no rounds, so they answer far longer
+runs than the same state written as a cell loop, which denotes the same cell.
 
 ## Two patches to the text
 
@@ -109,5 +132,5 @@ ghc -outputdir /tmp/sodium-vectors -o /tmp/sodium-vectors/run sodium.hs
 /tmp/sodium-vectors/run
 ```
 
-With GHC 9.4.7 the program answers `OK [[0,[[[0],6]]]]`, all 173 cases of
+With GHC 9.4.7 the program answers `OK [[0,[[[0],6]]]]`, all 178 cases of
 `OracleTests.hs` pass, and all twenty cases of `sodium.hs` pass.

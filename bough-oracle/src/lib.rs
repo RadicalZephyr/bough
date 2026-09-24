@@ -48,13 +48,30 @@
 //! depends on its values: `c = hold 0 (filter (<= 10) (snapshot ticks c
 //! (+1)))` never returns (finding F1). Each loop node is bound to a concrete
 //! term, starting from a cell that never steps and a stream that never
-//! fires; each round interprets the scope again, and the loops of one scope
-//! iterate together until every iterate reproduces itself. After 200 rounds
-//! the answer is `ERR`. The fixed point is the semantics only for loops
-//! whose back edge is a read before the instant (`snapshot`, `gate`,
-//! `sample`, the selection of `switch_stream`) or a child instant (`split`,
-//! `defer`); a back edge through a steps view is a same-instant cycle, which
-//! programs for the oracle must not contain (finding F3).
+//! fires. Each round interprets the whole program again, and every loop
+//! iterates in the same rounds, the top level's and those of each run of a
+//! construct body alike, until every iterate reproduces itself. The fixed
+//! point is the semantics only for loops whose back edge is a read before
+//! the instant (`snapshot`, `gate`, `sample`, the selection of
+//! `switch_stream`) or a child instant (`split`, `defer`); a back edge
+//! through a steps view is a same-instant cycle, which programs for the
+//! oracle must not contain (finding F3).
+//!
+//! A round settles at least one more instant of a loop, or one more loop
+//! where loops read one another within an instant, so a loop needs about a
+//! round for each instant its answer chains through: the counter over n
+//! transactions needs n + 1 rounds, and a running sum over a split's
+//! children needs one per child. The rounds allowed grow with the loops:
+//! 200, and two for every loop, step, event and body run the largest round
+//! held, which leaves a loop that settles room twice over, however far it
+//! chains. One that never settles and stays small answers `ERR`, naming a
+//! loop that still changes. A loop that grows without end, such as a stream
+//! loop through `defer` with no filter to stop it (finding F22), answers
+//! `TIMEOUT`, and so does a long enough chain: each round costs more as the
+//! loops grow, and the counter takes about a second at 500 transactions, and
+//! at 1000 it would need nine. `accumulate` and `scan` tie knots of their
+//! own and take no rounds, so they answer far longer runs than the same
+//! state written as a cell loop, which denotes the same cell.
 //!
 //! # Two patches to the text
 //!
@@ -85,9 +102,11 @@
 //! An [`Oracle`] keeps idle processes behind a mutex, so parallel test
 //! threads never share one. A process answers `TIMEOUT` after five seconds
 //! and `ERR heap` past its heap limit, 1 GB, and lives on. A process that
-//! dies is replaced, and the [`Error`] names the program it was answering;
-//! one that stops answering is killed after [`Oracle::with_watchdog`]'s
-//! limit, and reported the same way.
+//! dies is replaced, and the [`Error`] names the program it was answering,
+//! with the end of its standard error and whatever it wrote of its answer.
+//! One that stops answering is killed after [`Oracle::with_watchdog`]'s
+//! limit, and one whose answer does not follow the protocol is stopped;
+//! both are reported the same way.
 
 #![warn(missing_docs)]
 

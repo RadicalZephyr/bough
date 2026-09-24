@@ -30,15 +30,14 @@ pub const INSTALL_HINT: &str = "install GHC and HUnit with `apt-get install ghc 
 /// The name of the oracle binary in the build directory.
 const ORACLE: &str = "bough-oracle";
 
-/// How long to wait for another process's build before giving up.
-const LOCK_PATIENCE: Duration = Duration::from_secs(10 * 60);
-
-/// How often the holder of the build lock touches it.
-const LOCK_HEARTBEAT: Duration = Duration::from_secs(2);
-
-/// A lock file nobody has touched for this long was left by a process that
-/// died while building, for example a test run interrupted by Ctrl-C.
-const STALE_LOCK: Duration = Duration::from_secs(30);
+/// When the build lock counts as abandoned, and how long a build waits for
+/// it. A build of the oracle takes seconds; the lock is touched throughout.
+const BUILD_LOCK: LockTiming = LockTiming {
+    heartbeat: Duration::from_secs(2),
+    stale: Duration::from_secs(30),
+    patience: Duration::from_secs(10 * 60),
+    poll: Duration::from_millis(100),
+};
 
 /// How long a pool waits for an answer before it kills the process. The
 /// process answers `TIMEOUT` after five seconds on its own; this catches one
@@ -83,6 +82,9 @@ pub enum Error {
         status: String,
         /// The end of the process's standard error.
         standard_error: String,
+        /// What the process wrote of its answer, when it exited in the middle
+        /// of the line; empty otherwise.
+        unfinished_answer: String,
     },
     /// No answer came within the watchdog's limit, so the process was
     /// killed. The pool starts a new process for the next program.
@@ -95,8 +97,16 @@ pub enum Error {
         standard_error: String,
     },
     /// The answer did not follow the protocol. The process is stopped, since
-    /// it may be out of step.
-    Malformed(MalformedAnswer),
+    /// it may be out of step, and the pool starts a new one for the next
+    /// program.
+    Malformed {
+        /// The program the process was answering.
+        program: String,
+        /// The answer, and what is wrong with it.
+        answer: MalformedAnswer,
+        /// The end of the process's standard error.
+        standard_error: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -110,13 +120,25 @@ impl fmt::Display for Error {
                 program,
                 status,
                 standard_error,
-            } => write!(
-                formatter,
-                "the oracle process exited ({status}) while answering this program, \
-                 and a new process will answer the next one\nprogram: {}\nstandard error: {}",
-                shorten(program),
-                standard_error.trim_end()
-            ),
+                unfinished_answer,
+            } => {
+                write!(
+                    formatter,
+                    "the oracle process exited ({status}) while answering this program, \
+                     and a new process will answer the next one\nprogram: {}\nstandard error: {}",
+                    shorten(program),
+                    standard_error.trim_end()
+                )?;
+                if unfinished_answer.is_empty() {
+                    Ok(())
+                } else {
+                    write!(
+                        formatter,
+                        "\nunfinished answer: {}",
+                        shorten(unfinished_answer)
+                    )
+                }
+            }
             Error::NoAnswer {
                 program,
                 waited,
@@ -128,7 +150,17 @@ impl fmt::Display for Error {
                 shorten(program),
                 standard_error.trim_end()
             ),
-            Error::Malformed(error) => write!(formatter, "{error}"),
+            Error::Malformed {
+                program,
+                answer,
+                standard_error,
+            } => write!(
+                formatter,
+                "{answer}; the process was stopped, and a new process will answer the next one\n\
+                 program: {}\nstandard error: {}",
+                shorten(program),
+                standard_error.trim_end()
+            ),
         }
     }
 }
@@ -319,27 +351,53 @@ fn compile_now(
     Err(Error::Build(message))
 }
 
-/// A lock file, held while it exists: created exclusively, touched while
-/// held, removed on drop.
+/// When a lock file counts as abandoned, and how waiting for one goes.
+#[derive(Clone, Copy, Debug)]
+struct LockTiming {
+    /// How often the holder touches the lock file.
+    heartbeat: Duration,
+    /// A lock file nobody has touched for this long was left by a process
+    /// that died holding it, for example a test run interrupted by Ctrl-C.
+    stale: Duration,
+    /// How long to wait for another holder before giving up.
+    patience: Duration,
+    /// How long a waiter sleeps between looks.
+    poll: Duration,
+}
+
+/// A lock file, held while it exists and holds this holder's token: created
+/// exclusively, touched while held, and removed on drop if it is still this
+/// holder's.
 struct BuildLock {
     path: PathBuf,
+    token: String,
     heartbeat: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
 }
 
 impl BuildLock {
     fn acquire(path: PathBuf) -> Result<BuildLock, Error> {
+        BuildLock::acquire_with(path, BUILD_LOCK)
+    }
+
+    fn acquire_with(path: PathBuf, timing: LockTiming) -> Result<BuildLock, Error> {
         let started = Instant::now();
+        let token = lock_token();
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
-                    // The process id is for a person looking at a lock left behind.
-                    let _ = writeln!(file, "{}", std::process::id());
+                    if let Err(error) = file.write_all(token.as_bytes()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(Error::Build(format!(
+                            "cannot write {}: {error}",
+                            path.display()
+                        )));
+                    }
                     let (stop, stopped) = mpsc::channel::<()>();
                     let heartbeat = thread::Builder::new()
                         .name("bough-oracle build lock".to_owned())
                         .spawn(move || {
                             while let Err(RecvTimeoutError::Timeout) =
-                                stopped.recv_timeout(LOCK_HEARTBEAT)
+                                stopped.recv_timeout(timing.heartbeat)
                             {
                                 let _ = file.set_modified(SystemTime::now());
                             }
@@ -347,6 +405,7 @@ impl BuildLock {
                     return match heartbeat {
                         Ok(heartbeat) => Ok(BuildLock {
                             path,
+                            token,
                             heartbeat: Some((stop, heartbeat)),
                         }),
                         Err(error) => {
@@ -356,21 +415,18 @@ impl BuildLock {
                     };
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| modified.elapsed().ok());
-                    if age.is_some_and(|age| age > STALE_LOCK) {
-                        let _ = fs::remove_file(&path);
+                    let abandoned = age(&path).is_some_and(|age| age > timing.stale);
+                    if abandoned && break_abandoned(&path, timing.stale) {
                         continue;
                     }
-                    if started.elapsed() > LOCK_PATIENCE {
+                    if started.elapsed() > timing.patience {
                         return Err(Error::Build(format!(
-                            "another build has held {} for {LOCK_PATIENCE:?}",
-                            path.display()
+                            "another build has held {} for {:?}",
+                            path.display(),
+                            timing.patience
                         )));
                     }
-                    thread::sleep(Duration::from_millis(100));
+                    thread::sleep(timing.poll);
                 }
                 Err(error) => {
                     return Err(Error::Build(format!(
@@ -389,7 +445,65 @@ impl Drop for BuildLock {
             drop(stop);
             let _ = heartbeat.join();
         }
-        let _ = fs::remove_file(&self.path);
+        // A lock is taken over only once nobody has touched it for the stale
+        // time, which a live holder's heartbeat prevents. Should it happen
+        // all the same, the file is another holder's now, and stays.
+        if fs::read_to_string(&self.path).is_ok_and(|text| text == self.token) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// A token no other holder of a lock has: the process id, which is also for
+/// a person looking at a lock left behind, a count within the process, and
+/// the time.
+fn lock_token() -> String {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!(
+        "{} {} {time}\n",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::SeqCst)
+    )
+}
+
+/// How long ago a file was last modified, when it exists and says.
+fn age(path: &Path) -> Option<Duration> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+}
+
+/// Removes an abandoned lock file, one waiter at a time, and says whether it
+/// did. A waiter creates `<lock>.break` exclusively, looks at the lock's age
+/// again, and removes the lock only if it is still abandoned. So of two
+/// waiters that found it abandoned at once, the second finds the lock the
+/// first took, fresh, and leaves it. A `.break` file left by a waiter that
+/// died in the moment it holds one is abandoned in turn after the stale
+/// time.
+fn break_abandoned(path: &Path, stale: Duration) -> bool {
+    let mut breaking = path.as_os_str().to_owned();
+    breaking.push(".break");
+    let breaking = PathBuf::from(breaking);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&breaking)
+    {
+        Ok(_) => {
+            let removed = age(path).is_some_and(|age| age > stale) && fs::remove_file(path).is_ok();
+            let _ = fs::remove_file(&breaking);
+            removed
+        }
+        Err(_) => {
+            if age(&breaking).is_some_and(|age| age > stale) {
+                let _ = fs::remove_file(&breaking);
+            }
+            false
+        }
     }
 }
 
@@ -478,19 +592,26 @@ impl Oracle {
         let mut process = self.take()?;
         if process.send(line).is_err() {
             // The process exited before or while it read the program.
-            return Err(process.died(line));
+            return Err(process.died(line, String::new()));
         }
-        match process.lines.recv_timeout(self.watchdog) {
-            Ok(text) => match Answer::parse(&text) {
+        match process.output.recv_timeout(self.watchdog) {
+            Ok(Output::Line(text)) => match Answer::parse(&text) {
                 Ok(answer) => {
                     lock(&self.idle).push(process);
                     Ok(answer)
                 }
-                Err(error) => {
+                Err(answer) => {
                     process.stop();
-                    Err(Error::Malformed(error))
+                    Err(Error::Malformed {
+                        program: line.to_owned(),
+                        answer,
+                        standard_error: process.standard_error(),
+                    })
                 }
             },
+            // The output ended in the middle of the line: the process exited
+            // while it wrote the answer.
+            Ok(Output::Unfinished(text)) => Err(process.died(line, text)),
             Err(RecvTimeoutError::Timeout) => {
                 process.stop();
                 Err(Error::NoAnswer {
@@ -499,7 +620,7 @@ impl Oracle {
                     standard_error: process.standard_error(),
                 })
             }
-            Err(RecvTimeoutError::Disconnected) => Err(process.died(line)),
+            Err(RecvTimeoutError::Disconnected) => Err(process.died(line, String::new())),
         }
     }
 
@@ -537,9 +658,18 @@ impl Oracle {
 struct Process {
     child: Child,
     input: Option<ChildStdin>,
-    lines: Receiver<String>,
+    output: Receiver<Output>,
     standard_error: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
+}
+
+/// What a process wrote on its standard output, as the reader passes it on.
+enum Output {
+    /// A line, without its line ending: an answer.
+    Line(String),
+    /// Text after the last line ending, where the output ended: an answer
+    /// the process was writing when it exited.
+    Unfinished(String),
 }
 
 impl Process {
@@ -563,13 +693,28 @@ impl Process {
             let _ = child.wait();
             return Err(Error::Process("the oracle process has no pipes".to_owned()));
         };
-        let (sender, lines) = mpsc::channel();
+        let (sender, received) = mpsc::channel();
         let answers = thread::Builder::new()
             .name("bough-oracle answers".to_owned())
             .spawn(move || {
-                for line in BufReader::new(output).lines() {
-                    let Ok(line) = line else { break };
-                    if sender.send(line).is_err() {
+                let mut reader = BufReader::new(output);
+                loop {
+                    let mut text = String::new();
+                    // The end of the output, or output that is not UTF-8, ends
+                    // the reader; the pool finds the channel closed.
+                    let Ok(1..) = reader.read_line(&mut text) else {
+                        break;
+                    };
+                    let piece = if text.ends_with('\n') {
+                        text.pop();
+                        if text.ends_with('\r') {
+                            text.pop();
+                        }
+                        Output::Line(text)
+                    } else {
+                        Output::Unfinished(text)
+                    };
+                    if sender.send(piece).is_err() {
                         break;
                     }
                 }
@@ -596,7 +741,7 @@ impl Process {
             (Ok(answers), Ok(errors)) => Ok(Process {
                 child,
                 input: Some(input),
-                lines,
+                output: received,
                 standard_error,
                 readers: vec![answers, errors],
             }),
@@ -633,13 +778,15 @@ impl Process {
         status
     }
 
-    /// The error for a process that exited while answering `program`.
-    fn died(mut self, program: &str) -> Error {
+    /// The error for a process that exited while answering `program`, having
+    /// written `unfinished_answer` of its answer.
+    fn died(mut self, program: &str, unfinished_answer: String) -> Error {
         let status = self.stop();
         Error::Died {
             program: program.to_owned(),
             status,
             standard_error: self.standard_error(),
+            unfinished_answer,
         }
     }
 
@@ -667,6 +814,8 @@ impl Drop for Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Barrier;
 
     #[test]
     fn skip_skips_without_asking_for_ghc() {
@@ -771,20 +920,167 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Leaves a lock file that nobody has touched for twice the stale time.
+    fn abandon(path: &Path) {
+        let abandoned = fs::File::create(path).unwrap();
+        abandoned
+            .set_modified(SystemTime::now() - 2 * BUILD_LOCK.stale)
+            .unwrap();
+    }
+
     #[test]
     fn a_build_lock_nobody_touches_is_taken_over() {
         let directory = lock_directory("lock-stale");
         let path = directory.join("build.lock");
-        let abandoned = fs::File::create(&path).unwrap();
-        abandoned
-            .set_modified(SystemTime::now() - 2 * STALE_LOCK)
-            .unwrap();
-        drop(abandoned);
+        abandon(&path);
         let started = Instant::now();
         let lock = BuildLock::acquire(path.clone()).unwrap();
-        assert!(started.elapsed() < STALE_LOCK);
+        assert!(started.elapsed() < BUILD_LOCK.stale);
         drop(lock);
         assert!(!path.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_holder_that_outlives_the_stale_time_keeps_its_lock() {
+        // Short times, so that the first holder lives three stale times
+        // while its heartbeat keeps the lock fresh and a second one waits.
+        let timing = LockTiming {
+            heartbeat: Duration::from_millis(50),
+            stale: Duration::from_millis(600),
+            patience: Duration::from_secs(60),
+            poll: Duration::from_millis(10),
+        };
+        let directory = lock_directory("lock-heartbeat");
+        let path = directory.join("build.lock");
+        let first = BuildLock::acquire_with(path.clone(), timing).unwrap();
+        let (acquired, second_acquired) = mpsc::channel();
+        let waiting = {
+            let path = path.clone();
+            thread::spawn(move || {
+                let second = BuildLock::acquire_with(path, timing).unwrap();
+                acquired.send(Instant::now()).unwrap();
+                drop(second);
+            })
+        };
+        thread::sleep(3 * timing.stale);
+        assert!(
+            second_acquired.try_recv().is_err(),
+            "the second holder took the lock of a live one"
+        );
+        let released = Instant::now();
+        drop(first);
+        assert!(second_acquired.recv().unwrap() >= released);
+        waiting.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_waiter_late_to_break_an_abandoned_lock_leaves_the_new_holders_lock() {
+        // Two waiters find the lock abandoned. The first breaks it and takes
+        // the lock; the second, a moment behind, must leave the first's lock.
+        let directory = lock_directory("lock-late-break");
+        let path = directory.join("build.lock");
+        abandon(&path);
+        let first = BuildLock::acquire(path.clone()).unwrap();
+        assert!(!break_abandoned(&path, BUILD_LOCK.stale));
+        assert_eq!(fs::read_to_string(&path).unwrap(), first.token);
+        drop(first);
+        assert!(!path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_holder_removes_only_its_own_lock() {
+        let directory = lock_directory("lock-own");
+        let path = directory.join("build.lock");
+        let lock = BuildLock::acquire(path.clone()).unwrap();
+        // As if another holder had taken the lock over.
+        fs::write(&path, "another holder\n").unwrap();
+        drop(lock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "another holder\n");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn waiters_that_race_for_an_abandoned_lock_hold_it_one_at_a_time() {
+        let timing = LockTiming {
+            poll: Duration::from_millis(1),
+            ..BUILD_LOCK
+        };
+        let directory = lock_directory("lock-race");
+        let path = directory.join("build.lock");
+        let holders = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        for _ in 0..20 {
+            abandon(&path);
+            let start = Barrier::new(8);
+            thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| {
+                        start.wait();
+                        let lock = BuildLock::acquire_with(path.clone(), timing).unwrap();
+                        let now = holders.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(2));
+                        holders.fetch_sub(1, Ordering::SeqCst);
+                        drop(lock);
+                    });
+                }
+            });
+        }
+        assert_eq!(most.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A pool whose processes run `sh -c script` in place of the oracle.
+    #[cfg(unix)]
+    fn pretend_oracle(script: &str) -> Oracle {
+        Oracle {
+            arguments: vec![OsString::from("-c"), OsString::from(script)],
+            ..Oracle::with_binary(PathBuf::from("/bin/sh"))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_exits_in_the_middle_of_an_answer_died_and_says_what_it_wrote() {
+        let oracle =
+            pretend_oracle("read program; echo 'dying on purpose' >&2; printf 'OK [[0,'; exit 4");
+        let outcome = oracle.answer_line("please die");
+        assert_eq!(
+            outcome,
+            Err(Error::Died {
+                program: "please die".to_owned(),
+                status: "exit status: 4".to_owned(),
+                standard_error: "dying on purpose\n".to_owned(),
+                unfinished_answer: "OK [[0,".to_owned(),
+            })
+        );
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains("unfinished answer: OK [[0,"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_off_the_protocol_names_the_program_and_stops_the_process() {
+        let oracle =
+            pretend_oracle("read program; echo 'out of step' >&2; echo 'NOT AN ANSWER'; read next");
+        let outcome = oracle.answer_line("a program");
+        let Err(Error::Malformed {
+            program,
+            answer,
+            standard_error,
+        }) = &outcome
+        else {
+            panic!("expected a malformed answer, got {outcome:?}");
+        };
+        assert_eq!(program, "a program");
+        assert_eq!(answer.line, "NOT AN ANSWER");
+        assert_eq!(standard_error, "out of step\n");
+        assert!(oracle.idle_process_ids().is_empty());
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains("program: a program"), "{message}");
+        assert!(message.contains("standard error: out of step"), "{message}");
     }
 }

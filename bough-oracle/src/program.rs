@@ -3,9 +3,11 @@
 //! A [`Program`] prints, through [`Display`](fmt::Display), as one line in the
 //! syntax of Haskell's derived `Read` for `Oracle.Program.Program`, which is
 //! what the oracle process reads. The Rust names are spelled out; each
-//! variant's documentation names the Haskell constructor it prints as.
-//! Negative numbers print in parentheses, as `Read` needs them in an
-//! argument.
+//! variant's documentation names the Haskell constructor it prints as. A
+//! negative number prints in parentheses, `Lit (-5)`, as `Show` writes it and
+//! as the Haskell Report's `Read` requires of an argument. GHC's derived
+//! `Read` accepts it bare as well, so the oracle would not notice a missing
+//! pair; this module's tests hold the printer to them.
 //!
 //! Closures cannot cross a process boundary, so every function is an
 //! [`Expression`] that the oracle and the engine evaluate the same way: 64-bit

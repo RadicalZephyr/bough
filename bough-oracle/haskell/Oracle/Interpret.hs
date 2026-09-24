@@ -14,11 +14,13 @@
 -- node is bound to a concrete term, a cell loop to @Hold v0 (MkStream sts)
 -- []@ and a stream loop to @MkStream occs@, starting from a cell that never
 -- steps (initial value the type's zero) and a stream that never fires.
--- Each round interprets the whole scope again and takes the steps or events
--- of each loop's definition as its next iterate. The loops of one scope
--- iterate together, and the answer is the round whose iterates reproduce
--- themselves. After 'maxRounds' rounds the answer is @ERR@. A loop inside a
--- construct body is solved each time the body runs.
+-- Each round interprets the whole program again and takes the steps or
+-- events of each loop's definition as its next iterate. Every loop iterates
+-- in the same rounds: the top level's, and those of each construct body's
+-- run, one set of iterates per run. A body's loops are never solved on
+-- their own inside a round, where the loops around them may still be far
+-- from their answer. The answer is the round whose iterates reproduce
+-- themselves.
 --
 -- The fixed point from a never-stepping start is the semantics for
 -- well-founded loops: those whose back edge is a read before the instant
@@ -26,6 +28,15 @@
 -- instant (split, defer). A back edge through a steps view is a same-instant
 -- cycle, which the text diverges on and the iteration may still settle;
 -- the generator must not produce one.
+--
+-- A round settles at least one more instant of a well-founded loop, or one
+-- more loop where loops read one another within an instant, so the rounds
+-- a loop needs grow with the instants its answer chains through: the
+-- counter over n transactions needs n + 1. The rounds allowed grow with the
+-- loops too ('roundsAllowed'), with room for every loop that settles; past
+-- them the answer is @ERR@. A loop whose iterates keep growing, such as a
+-- stream loop through defer with no filter to stop it (finding F22), never
+-- reaches them, and the caller's time limit ends it instead.
 module Oracle.Interpret
   ( -- * The protocol
     respond
@@ -37,11 +48,11 @@ module Oracle.Interpret
   , Observation (..)
   , Value (..)
   , OracleError (..)
-  , maxRounds
+  , roundsAllowed
   , render
   ) where
 
-import Control.DeepSeq (force)
+import Control.DeepSeq (NFData (..), deepseq, force)
 import Control.Exception
   ( AsyncException (..), Exception, SomeAsyncException (..), SomeException
   , catch, displayException, evaluate, fromException, throw, throwIO )
@@ -49,6 +60,9 @@ import Control.Monad (foldM, forM_, unless, when, zipWithM_)
 import Data.IntMap.Lazy (IntMap)
 import qualified Data.IntMap.Lazy as IntMap
 import Data.List (intercalate)
+import Data.Map.Lazy (Map)
+import qualified Data.Map.Lazy as Map
+import Data.Maybe (isJust)
 import Text.Read (readMaybe)
 import Reactive.Sodium.Denotational (Stream (..), Cell (..), Reactive (..), T, S, C)
 import qualified Reactive.Sodium.Denotational as D
@@ -127,6 +141,15 @@ instance Show Value where
     showsPrec d (VList ns) = showParen (d > 10) (showString "VList " . showsPrec 11 ns)
     showsPrec _ (VStream _) = showString "<stream>"
     showsPrec _ (VCell _) = showString "<cell>"
+
+-- | Forces a first-order value whole. A token is left as it is: loops are
+-- first-order, and only their iterates are forced.
+instance NFData Value where
+    rnf (VInt n) = rnf n
+    rnf (VBool b) = rnf b
+    rnf (VList ns) = rnf ns
+    rnf (VStream _) = ()
+    rnf (VCell _) = ()
 
 -- | What the answer carries for one observed node, cut to the window.
 data Observation
@@ -464,9 +487,16 @@ data LoopMode
     Knot
   deriving (Eq, Show)
 
--- | The most rounds one scope's loops iterate before the answer is @ERR@.
-maxRounds :: Int
-maxRounds = 200
+-- | The rounds the loops may take before the answer is @ERR@, given the
+-- size of the largest state a round has made ('stateSize'): 200, and two
+-- for every loop, step, event and body run in it. A round settles at least
+-- one more instant of a well-founded loop, so a loop that settles needs
+-- about a round for each step or event its answer chains through, and
+-- these rounds leave it room twice over. A loop that never settles and
+-- stays small, such as a same-instant cycle that counts up at one instant,
+-- is stopped by them.
+roundsAllowed :: Int -> Int
+roundsAllowed size = 200 + 2 * size
 
 -- | A node at run time.
 data Node = NStream (Stream Value) | NCell (Cell Value) | NClose
@@ -475,6 +505,25 @@ data Node = NStream (Stream Value) | NCell (Cell Value) | NClose
 -- events.
 data Iterate = CellIterate (C Value) | StreamIterate (S Value)
   deriving (Eq)
+
+instance NFData Iterate where
+    rnf (CellIterate c) = rnf c
+    rnf (StreamIterate s) = rnf s
+
+-- | The iterates one round starts from: those of a scope's loops, by node,
+-- and those of each run of a construct body that has loops, by construct
+-- node and instant, with the runs of that body's own constructs inside. A
+-- loop that a state lacks is at its start, a cell that never steps and
+-- holds its type's zero or a stream that never fires, and so is every loop
+-- of a run that it lacks.
+data State = State (IntMap Iterate) (Map (Int, T) State)
+
+instance NFData State where
+    rnf (State loops runs) = rnf loops `seq` rnf runs
+
+-- | The state every loop starts from.
+emptyState :: State
+emptyState = State IntMap.empty Map.empty
 
 -- | Where a scope's definitions are interpreted.
 data Context = Context
@@ -490,8 +539,6 @@ data Context = Context
     -- ^ The creation time of this scope's nodes.
   , contextEvent :: Maybe Value
     -- ^ The construct's event, in a body.
-  , contextPath :: [String]
-    -- ^ Where this scope is, for messages: empty at the top level.
   }
 
 -- | Interprets a checked program: the observations of its observed nodes,
@@ -512,16 +559,15 @@ interpret mode program@(Program window inputs defs observed schedule) = do
             , contextLocalTypes = IntMap.empty
             , contextTime = B.buildTime
             , contextEvent = Nothing
-            , contextPath = []
             }
-        nodes = solveScope top defs
+        nodes = solve top defs
     return (map (observe window . (nodes IntMap.!)) observed)
   where
     inputStream k (Input ty coalescing) = case coalescing of
         Nothing -> B.input (sends k)
         Just e -> B.inputCoalescing (\x y -> coerce ty (evaluateE bare [x, y] e)) (sends k)
     sends k = [ ([n], valueOf v) | (n, transaction) <- zip [1 ..] schedule, (i, v) <- transaction, i == k ]
-    bare = Context mode IntMap.empty [] IntMap.empty IntMap.empty Nothing IntMap.empty B.buildTime Nothing []
+    bare = Context mode IntMap.empty [] IntMap.empty IntMap.empty Nothing IntMap.empty B.buildTime Nothing
 
 -- | A node cut to the window.
 observe :: Window -> Node -> Observation
@@ -534,54 +580,161 @@ observe window node = case (node, window) of
   where
     fromFirst = filter ((>= [1]) . fst)
 
--- | The nodes of one scope, its loops solved.
-solveScope :: Context -> [Def] -> IntMap Node
-solveScope context defs
-    | null loops = fst (interpretScope context defs (Iterates IntMap.empty))
-    | contextMode context == Knot = fst (interpretScope context defs Knotted)
-    | otherwise = go 1 (IntMap.fromList [ (i, zero kind ty) | (i, (kind, ty)) <- loops ])
+-- | The top level's nodes, every loop solved.
+--
+-- Every loop iterates in the same rounds, those of the top level and those
+-- of every run of a construct body alike. Each round interprets the
+-- program once, each body run once, with every loop bound to its iterate
+-- in the round's state, and the next state holds the steps or events of
+-- each loop's definition. The answer is the round whose state reproduces
+-- itself. Each new state is forced whole, so that no round holds on to the
+-- one before it.
+solve :: Context -> [Def] -> IntMap Node
+solve context defs = case contextMode context of
+    Knot -> fst (scopeRound context defs Knotted)
+    FixedPoint
+        | hasLoops defs -> go 1 0 emptyState
+        | otherwise -> fst (scopeRound context defs (Iterates emptyState))
   where
-    loops = [ (i, declaration) | (i, d) <- zip [0 ..] defs, Just declaration <- [loopDeclaration d] ]
-    closers = IntMap.fromList [ (j, r) | Close j r <- defs ]
-    zero isCell ty
-        | isCell = CellIterate (zeroValue ty, [])
-        | otherwise = StreamIterate []
-    go :: Int -> IntMap Iterate -> IntMap Node
-    go round' iterates
-        | round' > maxRounds = throw (OracleError (located context
-            ("the loops did not converge in " ++ show maxRounds ++ " rounds")))
-        | otherwise =
-            let (nodes, here) = interpretScope context defs (Iterates iterates)
-                next = IntMap.map (iterateOf . resolve here) closers
-            in if next == iterates then nodes else go (round' + 1) next
-    iterateOf (NCell c) = CellIterate (D.steps c)
-    iterateOf (NStream s) = StreamIterate (D.occs s)
-    iterateOf NClose = throw (OracleError "a loop is closed by a Close")
+    go :: Int -> Int -> State -> IntMap Node
+    go round' largest state =
+        let (nodes, next) = scopeRound context defs (Iterates state)
+            largest' = max largest (stateSize next)
+            changing = changes [] defs state next
+        in next `deepseq` case changing of
+            [] -> nodes
+            _ | round' >= roundsAllowed largest' -> throw (OracleError (unsettled round' changing))
+              | otherwise -> go (round' + 1) largest' next
+
+-- | The message for loops that did not converge, naming the first few that
+-- still change.
+unsettled :: Int -> [String] -> String
+unsettled rounds changing =
+    "the loops did not converge in " ++ show rounds ++ " rounds; still changing: "
+        ++ intercalate "; " (take 3 changing)
+        ++ (if length changing > 3 then "; and " ++ show (length changing - 3) ++ " more" else "")
 
 -- | How the loop nodes of a scope are bound in one interpretation.
-data Binding = Iterates (IntMap Iterate) | Knotted
+data Binding
+  = -- | To concrete terms that hold their iterates in this state.
+    Iterates State
+  | -- | To their own definitions, lazily: the text's knot.
+    Knotted
 
--- | One interpretation of a scope's definitions, and the context they were
--- interpreted in.
-interpretScope :: Context -> [Def] -> Binding -> (IntMap Node, Context)
-interpretScope context defs binding = (nodes, here)
+-- | One interpretation of a scope's definitions: its nodes, and the state
+-- the next round starts from. That state holds the steps or events of each
+-- loop's definition, and the next state of each run of a construct body
+-- that has loops. With 'Iterates', each body run is interpreted once, and
+-- the construct's event and the next state share it; with 'Knotted', the
+-- text's Execute runs the body at each event.
+scopeRound :: Context -> [Def] -> Binding -> (IntMap Node, State)
+scopeRound context defs binding = (nodes, next)
   where
-    nodes = IntMap.fromList (zip [0 ..] (map define defs'))
-    defs' = zip [0 ..] defs
+    indexed = zip [0 ..] defs
+    nodes = IntMap.fromList [ (i, define i def) | (i, def) <- indexed ]
     here = case contextLocal context of
         Nothing -> context { contextTop = nodes }
         Just _ -> context { contextLocal = Just nodes }
     closers = IntMap.fromList [ (j, r) | Close j r <- defs ]
-    define (i, def) = case def of
-        CLoop _ -> bound i
-        SLoop _ -> bound i
+    define i def = case def of
+        CLoop ty -> bound i (True, ty)
+        SLoop ty -> bound i (False, ty)
         Close _ _ -> NClose
-        _ -> materialize (interpretDef here i def)
-    bound i = case binding of
+        SConstruct body r -> materialize (NStream (construct i body r))
+        _ -> materialize (interpretDef here def)
+    bound i declaration = case binding of
         Knotted -> resolve here (closers IntMap.! i)
-        Iterates iterates -> case iterates IntMap.! i of
+        Iterates (State loops _) -> case IntMap.findWithDefault (startOf declaration) i loops of
             CellIterate c -> NCell (B.concrete c)
             StreamIterate s -> NStream (MkStream s)
+    construct i body r = case binding of
+        Knotted -> B.construct (streamAt here r) (\a -> Reactive (\t ->
+            fst (runBody here i (contentsAt here r) body a t Knotted)))
+        Iterates _ -> B.construct (streamAt here r) (\_ -> Reactive (\t ->
+            fst (runs IntMap.! i Map.! t)))
+    -- Each construct's body runs of this round, by instant. The map needs
+    -- every event of the construct's stream at once, which a round can
+    -- give: with the loops bound to their iterates, nothing a construct
+    -- emits feeds back into the stream it runs on.
+    runs = IntMap.fromList
+        [ (i, Map.fromList
+            [ (t, runBody here i (contentsAt here r) body a t (Iterates (runState (i, t))))
+            | (t, a) <- D.occs (streamAt here r) ])
+        | (i, SConstruct body r) <- indexed ]
+    runState key = case binding of
+        Iterates (State _ states) -> Map.findWithDefault emptyState key states
+        Knotted -> emptyState
+    next = State
+        (IntMap.map (iterateOf . resolve here) closers)
+        (Map.fromList
+            [ ((i, t), state)
+            | (i, SConstruct (Body bodyDefs _) _) <- indexed
+            , hasLoops bodyDefs
+            , (t, (_, state)) <- Map.toList (runs IntMap.! i) ])
+    iterateOf (NCell c) = CellIterate (D.steps c)
+    iterateOf (NStream s) = StreamIterate (D.occs s)
+    iterateOf NClose = throw (OracleError "a loop is closed by a Close")
+
+-- | Whether a scope, or a construct body in it, declares a loop.
+hasLoops :: [Def] -> Bool
+hasLoops = any declares
+  where
+    declares (SConstruct (Body defs _) _) = hasLoops defs
+    declares def = isJust (loopDeclaration def)
+
+-- | A loop's iterate at the start: a cell that never steps and holds its
+-- type's zero, or a stream that never fires.
+startOf :: (Bool, Ty) -> Iterate
+startOf (True, ty) = CellIterate (zeroValue ty, [])
+startOf (False, _) = StreamIterate []
+
+-- | The loops whose iterates differ between two states of one scope, each
+-- named with the scope it is in and where it first differs: "node 1 at
+-- [3]", or "node 2, body at [1], node 0 at [1,0]" for a loop of a body run.
+-- A loop or a body run that a state lacks is at its start.
+changes :: [String] -> [Def] -> State -> State -> [String]
+changes path defs (State loops runs) (State loops' runs') =
+    [ intercalate ", " (path ++ ["node " ++ show i ++ " " ++ place])
+    | (i, declaration) <- declared
+    , Just place <- [difference (iterateIn loops i declaration) (iterateIn loops' i declaration)] ]
+    ++ concat
+        [ changes (path ++ ["node " ++ show i, "body at " ++ show t]) (bodyDefs i) (runIn runs key) (runIn runs' key)
+        | key@(i, t) <- Map.keys (Map.union runs runs') ]
+  where
+    declared = [ (i, declaration) | (i, def) <- zip [0 ..] defs, Just declaration <- [loopDeclaration def] ]
+    iterateIn m i declaration = IntMap.findWithDefault (startOf declaration) i m
+    runIn m key = Map.findWithDefault emptyState key m
+    bodyDefs i = case drop i defs of
+        SConstruct (Body inner _) _ : _ -> inner
+        _ -> throw (OracleError ("node " ++ show i ++ " ran a body and is not a construct"))
+
+-- | Where two iterates of one loop first differ, if they do: "at [3]", or
+-- "before its first step" for a cell whose value before its steps differs.
+difference :: Iterate -> Iterate -> Maybe String
+difference (CellIterate (a, sts)) (CellIterate (b, uts))
+    | a /= b = Just "before its first step"
+    | otherwise = ("at " ++) . show <$> firstDifference sts uts
+difference (StreamIterate s) (StreamIterate u) = ("at " ++) . show <$> firstDifference s u
+difference _ _ = throw (OracleError "a loop's iterate changed from a cell to a stream")
+
+-- | The first time at which two lists of steps or events differ.
+firstDifference :: S Value -> S Value -> Maybe T
+firstDifference ((t, a) : rest) ((u, b) : rest')
+    | t == u && a == b = firstDifference rest rest'
+    | otherwise = Just (min t u)
+firstDifference ((t, _) : _) [] = Just t
+firstDifference [] ((u, _) : _) = Just u
+firstDifference [] [] = Nothing
+
+-- | How much a state holds: one for each loop, step, event and body run,
+-- over every body run. The rounds allowed grow with it.
+stateSize :: State -> Int
+stateSize (State loops runs) =
+    sum [ 1 + steps' iterate' | iterate' <- IntMap.elems loops ]
+        + sum [ 1 + stateSize run' | run' <- Map.elems runs ]
+  where
+    steps' (CellIterate (_, sts)) = length sts
+    steps' (StreamIterate events) = length events
 
 -- | The same node as a concrete term: the text observes a term only through
 -- @occs@ and @steps@, so the two cannot be told apart, and the concrete one
@@ -591,10 +744,10 @@ materialize (NStream s) = NStream (MkStream (D.occs s))
 materialize (NCell c) = NCell (let ~(initial, sts) = D.steps c in Hold initial (MkStream sts) [])
 materialize NClose = NClose
 
--- | The denotation of node i. Loops and closes are bound by
--- 'interpretScope'.
-interpretDef :: Context -> Int -> Def -> Node
-interpretDef context i def = case def of
+-- | The denotation of a node. Loops, closes and constructs are bound by
+-- 'scopeRound'.
+interpretDef :: Context -> Def -> Node
+interpretDef context def = case def of
     SInput k -> NStream (contextInputs context IntMap.! k)
     CInput k e -> NCell (created (B.hold (contextInputs context IntMap.! k)
         (coerce (contextInputTypes context !! k) (expression [] e))))
@@ -624,9 +777,7 @@ interpretDef context i def = case def of
     SSteps r -> NStream (B.steps (cell r))
     SStepsWithCurrent r -> NStream (created (B.stepsWithCurrent (cell r)))
     SSwitch r -> NStream (B.switchStream (B.mapCell (cell r) asStream))
-    SConstruct body r ->
-        let closure = runBody context i (contents' r) body
-        in NStream (B.construct (stream r) (\a -> Reactive (closure a)))
+    SConstruct _ _ -> throw (OracleError "a construct reached interpretDef")
     CHold e r -> NCell (created (B.hold (stream r) (coerce (contents' r) (expression [] e))))
     CHoldStream r0 r -> NCell (created (B.hold (stream r) (VStream (stream r0))))
     CHoldCell r0 r -> NCell (created (B.hold (stream r) (VCell (cell r0))))
@@ -648,39 +799,34 @@ interpretDef context i def = case def of
     created :: Reactive a -> a
     created r = run r (contextTime context)
     expression arguments e = evaluateE context arguments e
-    stream r = case resolve context r of
-        NStream s -> s
-        _ -> throw (OracleError (show r ++ " is not a stream"))
-    cell r = case resolve context r of
-        NCell c -> c
-        _ -> throw (OracleError (show r ++ " is not a cell"))
-    contents' r = case typeOf context r >>= contents of
-        Just ty -> ty
-        Nothing -> throw (OracleError (show r ++ " has no type"))
+    stream = streamAt context
+    cell = cellAt context
+    contents' = contentsAt context
 
--- | The closure of a construct: given an event and its instant @t@, a new
--- scope whose nodes are created at @t@, its loops solved, and what it
--- emits.
-runBody :: Context -> Int -> Ty -> Body -> Value -> T -> Value
-runBody outer i event (Body defs result) = \a t ->
-    let start = outer
-            { contextLocal = Just IntMap.empty
-            , contextLocalTypes = bodyTypes
-            , contextTime = t
-            , contextEvent = Just a
-            , contextPath = contextPath outer ++ ["node " ++ show i, "body at " ++ show t]
-            }
-        here = start { contextLocal = Just (solveScope start defs) }
-    in case result of
+-- | One run of construct node i's body for the event a at its instant t: a
+-- scope of its own, whose nodes are created at t, interpreted once with
+-- the loops bound as given. Returns what the body emits, and the state its
+-- loops' next round starts from.
+runBody :: Context -> Int -> Ty -> Body -> Value -> T -> Binding -> (Value, State)
+runBody outer i event (Body defs result) a t binding = (emitted, next)
+  where
+    scope = outer
+        { contextLocal = Just IntMap.empty
+        , contextLocalTypes = bodyTypes
+        , contextTime = t
+        , contextEvent = Just a
+        }
+    (nodes, next) = scopeRound scope defs binding
+    here = scope { contextLocal = Just nodes }
+    emitted = case result of
         RValue e -> VInt (evaluateE here [] e)
         RNode r -> case resolve here r of
             NStream s -> VStream s
             NCell c -> VCell c
             NClose -> throw (OracleError "a body emits a Close")
-  where
     bodyTypes = case checkScope (bodyScope typeScope event) defs of
         Right types -> IntMap.fromList (zip [0 ..] types)
-        Left message -> throw (OracleError message)
+        Left message -> throw (OracleError ("node " ++ show i ++ ": " ++ message))
     typeScope = TypeScope
         { typeInputs = contextInputTypes outer
         , typeTop = contextTopTypes outer
@@ -717,12 +863,6 @@ evaluateE context arguments = go
         | k < length arguments = number (arguments !! k)
         | otherwise = throw (OracleError ("argument " ++ show k ++ " is not bound"))
 
--- | A message with the scope it arose in: "node 2, body at [1]: ...".
-located :: Context -> String -> String
-located context text = case contextPath context of
-    [] -> text
-    path -> intercalate ", " path ++ ": " ++ text
-
 -- | The node a reference names in a context.
 resolve :: Context -> Ref -> Node
 resolve context ref = case ref of
@@ -730,6 +870,24 @@ resolve context ref = case ref of
     Local j -> maybe (throw (OracleError "Local at the top level")) (find j) (contextLocal context)
   where
     find i nodes = maybe (throw (OracleError (show ref ++ " does not exist"))) id (IntMap.lookup i nodes)
+
+-- | The stream a reference names in a context.
+streamAt :: Context -> Ref -> Stream Value
+streamAt context r = case resolve context r of
+    NStream s -> s
+    _ -> throw (OracleError (show r ++ " is not a stream"))
+
+-- | The cell a reference names in a context.
+cellAt :: Context -> Ref -> Cell Value
+cellAt context r = case resolve context r of
+    NCell c -> c
+    _ -> throw (OracleError (show r ++ " is not a cell"))
+
+-- | What the stream a reference names carries, or what its cell holds.
+contentsAt :: Context -> Ref -> Ty
+contentsAt context r = case typeOf context r >>= contents of
+    Just ty -> ty
+    Nothing -> throw (OracleError (show r ++ " has no type"))
 
 -- | The type of the node a reference names in a context.
 typeOf :: Context -> Ref -> Maybe Ty

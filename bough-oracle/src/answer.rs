@@ -340,8 +340,14 @@ mod tests {
     #[test]
     fn errors_and_timeouts_parse() {
         assert_eq!(
-            Answer::parse("ERR the loops did not converge in 200 rounds").unwrap(),
-            Answer::Error("the loops did not converge in 200 rounds".to_owned())
+            Answer::parse(
+                "ERR the loops did not converge in 204 rounds; still changing: node 1 at [1]"
+            )
+            .unwrap(),
+            Answer::Error(
+                "the loops did not converge in 204 rounds; still changing: node 1 at [1]"
+                    .to_owned()
+            )
         );
         assert_eq!(Answer::parse("ERR").unwrap(), Answer::Error(String::new()));
         assert_eq!(Answer::parse("TIMEOUT").unwrap(), Answer::Timeout);
