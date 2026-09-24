@@ -17,7 +17,11 @@
 //! an accumulator reading itself through a read-through cell over its
 //! forward, two loops reading each other lifted over their forwards with a
 //! steps view, a stream loop through a hold, and a state loop with a
-//! fixed-size state. Later stages widen it.
+//! fixed-size state; and from stage 4 child transactions: a split of a
+//! fixed-size array, whose iterator allocates nothing, and a defer, merged
+//! at child index 0, with a hold and listeners in the children, and a
+//! countdown loop through a defer that goes up to three child levels deep.
+//! Later stages widen it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
@@ -151,13 +155,28 @@ fn steady_state_transactions_do_not_allocate() {
                 (joined, joined_view),
                 (last, window),
             );
+
+            // Stage 4: an array's iterator allocates nothing, so what the
+            // split keeps between children is the capture's own stack.
+            let items = numbers.map(|x| [x, x + 1, x + 2]).split(b);
+            let later = numbers.defer(b);
+            let children = items
+                .merge(b, later, |i, l| i.wrapping_mul(31).wrapping_add(l))
+                .share(b);
+            let last_child = children.hold(b, 0u64);
+            let (down, down_loop) = b.stream_loop::<u64>();
+            let again = down.filter(|n| *n > 1).map(|n| n - 1).defer(b);
+            let countdown = numbers.map(|x| x % 4).or_else(b, again).share(b);
+            down_loop.close(b, countdown);
+            let counted_down = countdown.accumulate(b, 0u64, |n, t| t.wrapping_add(n));
+            let stage4 = (children, last_child, countdown, counted_down);
             (
                 (numbers_in, bumps_in, open_in),
                 (total, both, merged),
-                (stage2, stage3),
+                (stage2, stage3, stage4),
             )
         });
-    let (stage2, stage3) = later;
+    let (stage2, stage3, stage4) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
     let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
     let (heard, recorder) = tally();
@@ -196,6 +215,22 @@ fn steady_state_transactions_do_not_allocate() {
     let (windows, on_window) = tally();
     graph
         .listen_steps(window, move |w| on_window.set(w[3]))
+        .keep();
+
+    let (children, last_child, countdown, counted_down) = stage4;
+    let (child_events, on_child) = tally();
+    graph
+        .listen(children, move |c| {
+            on_child.set(on_child.get().wrapping_add(c))
+        })
+        .keep();
+    let (last_children, on_last_child) = tally();
+    graph
+        .listen_steps(last_child, move |c| on_last_child.set(*c))
+        .keep();
+    let (countdowns, on_countdown) = tally();
+    graph
+        .listen(countdown, move |_| on_countdown.set(on_countdown.get() + 1))
         .keep();
 
     let drive = |graph: &mut Graph, i: u64| {
@@ -253,4 +288,8 @@ fn steady_state_transactions_do_not_allocate() {
     assert_eq!(joins.get(), *graph.sample(joined));
     assert_eq!(windows.get(), graph.sample(window)[3]);
     assert!(*graph.sample(acc_fwd) > 0 && *graph.sample(last) > 0);
+    // The stage 4 listeners heard every child.
+    assert!(child_events.get() > 0);
+    assert_eq!(last_children.get(), *graph.sample(last_child));
+    assert!(countdowns.get() > 0 && *graph.sample(counted_down) > 0);
 }

@@ -503,3 +503,109 @@ fn every_shuffle_seed_gives_the_same_loops_values_and_events() {
         interleavings.len()
     );
 }
+
+/// Stage 4's child transactions under one seed: two splits and a defer
+/// that share child indices, merged; a split fed by its own children
+/// through a stream loop, three levels deep; a countdown loop through a
+/// defer; a hold stepping in the children, read by a snapshot in later
+/// children and by a map_cell with a steps view; and an accumulator over
+/// the countdown. Listeners on every stream and cell. Each child instant is
+/// shuffled as any transaction is, by its own serial.
+fn run_children(seed: Option<u64>) -> Run {
+    let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
+        let (a, a_in) = b.input::<u64>();
+        let (c, c_in) = b.input::<u64>();
+        let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
+        let a = a.share(b);
+        let c = c.share(b);
+        let d = d.share(b);
+
+        let ones = a.map(|x| [x, x + 1]).split(b);
+        let twos = c.map(|x| [x % 7, x % 5, x % 3]).split(b);
+        let pairs = ones.merge(b, twos, |o, t| o * 100 + t).share(b);
+        let later = d.defer(b);
+        let joined = pairs.merge(b, later, |p, l| p * 1000 + l).share(b);
+
+        let (fwd, fwd_loop) = b.stream_loop::<Vec<u64>>();
+        let items = fwd.split(b).share(b);
+        let again = items.filter(|n| *n < 100).map(|n| vec![n * 10, n * 10 + 1]);
+        let definition = a.map(|x| vec![x % 3 + 1, x % 3 + 2]).or_else(b, again);
+        fwd_loop.close(b, definition);
+
+        let (down, down_loop) = b.stream_loop::<u64>();
+        let back = down.filter(|n| *n > 1).map(|n| n - 1).defer(b);
+        let countdown = c.map(|x| x % 5).or_else(b, back).share(b);
+        down_loop.close(b, countdown);
+
+        let held = joined.hold(b, 0u64);
+        let seen = items.snapshot(held, |i, h| i + h).share(b);
+        let doubled = held.map_cell(b, |h| h * 2);
+        let doubled_steps = doubled.steps(b).share(b);
+        let total = countdown.accumulate(b, 0u64, |n, t| t + n);
+        let inputs: [Input<u64>; 3] = [a_in, c_in, d_in];
+        (
+            inputs,
+            [pairs, joined, items, countdown, seen, doubled_steps],
+            [held, doubled, total],
+        )
+    });
+    graph.set_shuffle_seed(seed);
+
+    let log: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+    let order: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let add = |log: &Rc<RefCell<Vec<Vec<String>>>>| {
+        log.borrow_mut().push(Vec::new());
+        log.borrow().len() - 1
+    };
+    let listener = |id: usize, tag: &'static str| {
+        let (log, order) = (log.clone(), order.clone());
+        move |v: &u64| {
+            log.borrow_mut()[id].push(format!("{tag} {v}"));
+            order.borrow_mut().push(id);
+        }
+    };
+    for stream in streams {
+        for _ in 0..2 {
+            let on = listener(add(&log), "event");
+            graph.listen(stream, move |v| on(&v)).keep();
+        }
+    }
+    for cell in cells {
+        graph.listen_cell(cell, listener(add(&log), "cell")).keep();
+        graph.listen_steps(cell, listener(add(&log), "step")).keep();
+    }
+    for sends in schedule() {
+        graph.transaction(|tx| {
+            for (input, value) in sends {
+                tx.send(inputs[input], value);
+            }
+        });
+    }
+    let samples = cells.iter().map(|c| *graph.sample(*c)).collect();
+    let per_listener = log.borrow().clone();
+    let interleaving = order.borrow().clone();
+    Run {
+        per_listener,
+        samples,
+        interleaving,
+    }
+}
+
+#[test]
+fn every_shuffle_seed_gives_the_same_children_and_events() {
+    let plain = run_children(None);
+    assert!(plain.per_listener.iter().all(|events| !events.is_empty()));
+    let mut interleavings = std::collections::BTreeSet::new();
+    interleavings.insert(plain.interleaving.clone());
+    for seed in 0..24 {
+        let shuffled = run_children(Some(seed));
+        assert_eq!(shuffled.per_listener, plain.per_listener, "seed {seed}");
+        assert_eq!(shuffled.samples, plain.samples, "seed {seed}");
+        interleavings.insert(shuffled.interleaving);
+    }
+    assert!(
+        interleavings.len() >= 20,
+        "the shuffle moved dispatch order ({} distinct interleavings of 25)",
+        interleavings.len()
+    );
+}

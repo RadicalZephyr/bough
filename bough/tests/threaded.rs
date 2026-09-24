@@ -161,3 +161,36 @@ fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
     assert_eq!(log, [10, 21, 32]);
     assert_eq!(*heard.lock().unwrap(), [0, 1, 2, 3]);
 }
+
+/// Child transactions in a Threaded graph: a split whose elements feed a
+/// loop through a defer, which halves each element above 1 one child level
+/// down, and an accumulator over both. split requires the mode to accept
+/// the iterator and the elements, defer the event, which Vec<u64>, its
+/// iterator and u64 satisfy. Built on one thread, driven and sampled on
+/// another, whose children run there too. Send [4, 1]: 4 at [1,0], 2 at
+/// [1,0,0], 1 at [1,0,0,0], then 1 at [1,1].
+#[test]
+fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
+    let (mut graph, (lists_in, events, total)) = Graph::build_threaded(|b| {
+        let (lists, lists_in) = b.input::<Vec<u64>>();
+        let (halves, halves_loop) = b.stream_loop::<u64>();
+        let again = halves.filter(|n| *n > 1).map(|n| n / 2).defer(b);
+        let events = lists.split(b).or_else(b, again).share(b);
+        halves_loop.close(b, events);
+        let total = events.accumulate(b, 0u64, |n, t| t + n);
+        (lists_in, events, total)
+    });
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let writer = heard.clone();
+    graph
+        .listen(events, move |n| writer.lock().unwrap().push(n))
+        .keep();
+    let driver = thread::spawn(move || {
+        graph.send(lists_in, vec![4, 1]);
+        let first = *graph.sample(total);
+        graph.send(lists_in, vec![3]);
+        (first, *graph.sample(total))
+    });
+    assert_eq!(driver.join().unwrap(), (8, 12));
+    assert_eq!(*heard.lock().unwrap(), [4, 2, 1, 1, 3, 1]);
+}

@@ -28,6 +28,14 @@ fn the_smoke_graph_runs_in_every_mode() {
     // ticks = 2, tick_steps = 2; running = 2 + 1 = 3; entries = [10, 21],
     // two entries. So 2 + 2 + 3 + 2 = 9.
     //
-    // Each mode gives 26 + 241 + 9, and the host has both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9));
+    // Stage 4. Build: the constant's steps_with_current fires 3 at [0],
+    // split as [3, 3] into [0,0] and [0,1], so `zero` sums to 6 before
+    // build returns. n = 1: the split of [1, 2] and the defer of 1 merge
+    // at [1,0] into 1 * 10 + 1, and 2 follows at [1,1], which `children`
+    // holds; the countdown fires 1 and stops, so `counted` = 1. n = 2: 22
+    // at [3,0], then 3 at [3,1]; the countdown fires 2 at [3] and 1 at
+    // [3,0], so `counted` = 1 + 2 + 1. So 3 + 4 + 6 = 13.
+    //
+    // Each mode gives 26 + 241 + 9 + 13, and the host has both modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13));
 }

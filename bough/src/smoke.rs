@@ -86,13 +86,31 @@ macro_rules! smoke_graph {
             entries_loop.close(b, appended);
             let entry_count = entries.map_cell(b, |e| e.len() as u32);
             let stage3 = (ticks, tick_steps, running, entry_count);
+
+            // Stage 4: a split of an array and a defer, merged at child
+            // index 0; a countdown loop through a defer; and a split of a
+            // steps_with_current, whose children run in transaction zero.
+            let pieces = n.map(|v| [v, v + 1]).split(b);
+            let later = n.defer(b);
+            let children = pieces.merge(b, later, |p, l| p * 10 + l).hold(b, 0u32);
+            let (down, down_loop) = b.stream_loop::<u32>();
+            let again = down.filter(|v| *v > 1).map(|v| v - 1).defer(b);
+            let countdown = n.or_else(b, again).share(b);
+            down_loop.close(b, countdown);
+            let counted = countdown.accumulate(b, 0u32, |v, c| c + v);
+            let zero = three
+                .steps_with_current(b)
+                .map(|t| [t, t])
+                .split(b)
+                .accumulate(b, 0u32, |t, s| s + t);
+            let stage4 = ([children, counted, zero], countdown);
             (
                 (n_in, words_in, level_in, digits_in),
                 (total, words, out, merged),
-                (stage2, stage3),
+                (stage2, stage3, stage4),
             )
         });
-        let (stage2, (ticks, tick_steps, running, entry_count)) = later;
+        let (stage2, (ticks, tick_steps, running, entry_count), (stage4, countdown)) = later;
         let (
             (scaled, pair, six, count, labels),
             (pair_steps, current, seen, gated),
@@ -103,6 +121,12 @@ macro_rules! smoke_graph {
             25,
             "steps_with_current fired in transaction zero"
         );
+        assert_eq!(
+            *graph.sample(stage4[2]),
+            6,
+            "transaction zero's children ran"
+        );
+        graph.listen(countdown, |_| ()).keep();
         graph.listen_cell(mixed, |_| ()).keep();
         graph.listen_steps(log, |_| ()).keep();
         let _ = graph.try_listen_cell(length, |_| ());
@@ -140,7 +164,8 @@ macro_rules! smoke_graph {
             .map(|c| *graph.sample(*c))
             .sum::<u32>()
             + *graph.sample(entry_count);
-        stage1 + cells + states + loops
+        let children = stage4.iter().map(|c| *graph.sample(*c)).sum::<u32>();
+        stage1 + cells + states + loops + children
     }};
 }
 
