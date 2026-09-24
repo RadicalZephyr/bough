@@ -1,4 +1,5 @@
-//! Stream nodes: coalescing inputs, fused chains, merges.
+//! Stream nodes: coalescing inputs, fused chains, merges, and the stream
+//! views of a cell.
 
 use core::any::Any;
 
@@ -106,6 +107,46 @@ where
 {
     const OPS: Ops<M> = Ops {
         eval: eval_merge::<M, S, T, F>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
+/// `steps` and, with `CURRENT`, `steps_with_current`: a stream node over one
+/// cell, its one dependency, that fires when the cell steps with a clone of
+/// the cell's value after the instant. `steps_with_current` also fires at
+/// its creation instant; a creation and a step at one instant are one
+/// event carrying the value after it, the semantics' `coalesce (flip
+/// const)` in `Value`, because the node runs once.
+pub(crate) struct StepsNode<A, const CURRENT: bool>(Marker<A>);
+
+fn eval_steps<M, A, const CURRENT: bool>(_: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+where
+    M: Mode,
+    A: Clone + 'static,
+{
+    let cell = b.store.relations[me as usize].deps[0];
+    let tx = b.tx;
+    let fires = b.store.hot[cell as usize].fired == tx
+        || (CURRENT && b.store.hot[me as usize].created == tx);
+    if !fires {
+        return;
+    }
+    // The mutable phase runs what the value after the instant reads and
+    // computes read-through values after the instant; the shared phase
+    // reads it. Every steps view calls prepare, whatever its cell is, so
+    // no flag fixed at materialization decides whether there is work.
+    b.prepare(cell);
+    let v = b.post::<A>(cell).clone();
+    b.put_event(me, v);
+}
+
+impl<M, A, const CURRENT: bool> NodeOps<M> for StepsNode<A, CURRENT>
+where
+    M: Mode,
+    A: Clone + 'static,
+{
+    const OPS: Ops<M> = Ops {
+        eval: eval_steps::<M, A, CURRENT>,
         ..Ops::<M>::DEFAULT
     };
 }

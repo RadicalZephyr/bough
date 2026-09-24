@@ -77,15 +77,17 @@ fn a_marked_cell_that_did_not_step_keeps_its_memo_and_stays_quiet() {
     // Updates (MapC (*2) (Hold 0 (Filter (> 5) s))) = [([2], 18)]. Marking
     // reaches the map_cell at both instants; only the second is a step.
     let (calls, count) = counter();
-    let (mut graph, (numbers_in, doubled)) = Graph::build(move |b| {
+    let (mut graph, (numbers_in, doubled, view)) = Graph::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let big = numbers.filter(|n| *n > 5).hold(b, 0u32);
         let doubled = big.map_cell(b, move |n| {
             count.set(count.get() + 1);
             n * 2
         });
-        (numbers_in, doubled)
+        (numbers_in, doubled, doubled.steps(b))
     });
+    let (view_seen, on_view) = recorder();
+    graph.listen(view, on_view).keep();
     let (steps_seen, mut on_steps) = recorder();
     graph.listen_steps(doubled, move |v| on_steps(*v)).keep();
     let (cell_seen, mut on_cell) = recorder();
@@ -100,25 +102,27 @@ fn a_marked_cell_that_did_not_step_keeps_its_memo_and_stays_quiet() {
         let after = graph.statistics();
         assert_eq!(
             after.ordered - before.ordered,
-            2,
-            "the hold and the map_cell"
+            3,
+            "the hold, the map_cell and the steps view"
         );
-        assert_eq!(after.evaluations - before.evaluations, 2);
+        assert_eq!(after.evaluations - before.evaluations, 3);
         assert_eq!(after.commits - before.commits, 0, "nothing stepped");
         assert_eq!(after.listener_calls - before.listener_calls, 0);
     }
+    assert!(view_seen.borrow().is_empty());
     assert!(steps_seen.borrow().is_empty());
     assert_eq!(*cell_seen.borrow(), [0]);
     assert_eq!(*graph.sample(doubled), 0);
     assert_eq!(calls.get(), 1, "the memo survived a marking without a step");
 
     graph.send(numbers_in, 9);
+    assert_eq!(*view_seen.borrow(), [18]);
     assert_eq!(*steps_seen.borrow(), [18]);
     assert_eq!(*cell_seen.borrow(), [0, 18]);
     assert_eq!(
         calls.get(),
         2,
-        "one call for the step, shared by both listeners"
+        "one call for the step, by the steps view, promoted for the listeners"
     );
 }
 

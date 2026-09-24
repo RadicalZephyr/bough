@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 
 use crate::Build;
 use crate::engine::nodes::read::{ReadFn, ReadNode};
+use crate::engine::nodes::stream::StepsNode;
 use crate::engine::{Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
 use crate::source::Node;
@@ -191,7 +192,10 @@ impl<A: 'static> Cell<A> {
     ///
     /// The new cell steps whenever this one does, so its listeners fire on
     /// every step, and a read during a transaction sees the value from
-    /// before the instant, as every cell read does.
+    /// before the instant, as every cell read does. A [`steps`](Cell::steps)
+    /// view computes the value after the instant during the instant, and
+    /// that value becomes the memo at commit, so the view and the listeners
+    /// share one call per step.
     pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> Cell<B>
     where
         M: Mode + Accepts<F> + Accepts<B>,
@@ -215,23 +219,48 @@ impl<A: Clone + 'static> Cell<A> {
     /// from I/O code, [`Graph::listen_steps`](crate::Graph::listen_steps) is
     /// the same view. It does not exist on a [`State`], whose new value does
     /// not exist until commit.
+    ///
+    /// The node clones the value after the instant into its slot. For a
+    /// read-through cell that value is computed from its inputs' values
+    /// after the instant and kept, and at commit it becomes the cell's
+    /// memo, so the cell's function runs once per step, however many steps
+    /// views and listeners the cell has.
     pub fn steps<M>(self, build: &mut Build<M>) -> Stream<A>
     where
         M: Mode + Accepts<A>,
     {
-        todo!()
+        Stream::from_token(steps_node::<M, A, false>(self, build))
     }
 
     /// Sodium's `value`: fires once at its creation instant with the
     /// post-instant value, then on every step like [`steps`](Cell::steps),
     /// with the same warning. From I/O code,
     /// [`Graph::listen_cell`](crate::Graph::listen_cell) is the same view.
+    ///
+    /// Built in the build closure, it fires in transaction zero, so a hold
+    /// built there over it starts the graph at the cell's value. A creation
+    /// and a step in one instant are one event, carrying the value after
+    /// the step.
     pub fn steps_with_current<M>(self, build: &mut Build<M>) -> Stream<A>
     where
         M: Mode + Accepts<A>,
     {
-        todo!()
+        Stream::from_token(steps_node::<M, A, true>(self, build))
     }
+}
+
+/// The node of `steps` and `steps_with_current`: a stream node whose one
+/// dependency is the cell, and which has no program of its own.
+fn steps_node<M, A, const CURRENT: bool>(cell: Cell<A>, build: &mut Build<M>) -> Token
+where
+    M: Mode + Accepts<A>,
+    A: Clone + 'static,
+{
+    let input = build.check(cell.token);
+    let data = Data::Slot(<M as Accepts<A>>::erase(Erase::Slot));
+    let ops = &<StepsNode<A, CURRENT> as NodeOps<M>>::OPS;
+    let n = build.materialize(Kind::Stream, data, Box::new([]), ops, &[input], 0);
+    build.token(n)
 }
 
 impl<A: 'static> Cell<Cell<A>> {

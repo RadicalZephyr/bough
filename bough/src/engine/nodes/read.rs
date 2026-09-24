@@ -4,8 +4,13 @@
 //! and the evaluation loop settles it without user code: it steps iff one
 //! of its inputs stepped. Its function runs when the cell is read, into
 //! the memo, a `OnceCell` holding the value before the instant, so that a
-//! read through `&Build` can fill it. At commit a cell that stepped clears
-//! its memo; a cell that was marked and did not step keeps it (F4).
+//! read through `&Build` can fill it; and when a steps view asks for the
+//! value after the instant, into the post-instant value, from its inputs'
+//! values after the instant. At commit a cell that stepped promotes that
+//! value into the memo, since the value after instant t is the value
+//! before t + 1, or clears the memo if nothing computed it; a cell that
+//! was marked and did not step keeps its memo (F4). So the function runs
+//! once per step even with a steps view and a listener on one cell.
 
 use core::any::Any;
 use core::cell::OnceCell;
@@ -21,6 +26,10 @@ use crate::mode::{Carrier, Mode};
 pub(crate) trait ReadFn<V, R>: 'static {
     /// The function of the inputs' values before the instant.
     fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R;
+
+    /// The function of the inputs' values after the instant. Every input
+    /// has been prepared.
+    fn posts<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R;
 }
 
 macro_rules! read_fn {
@@ -31,6 +40,10 @@ macro_rules! read_fn {
         {
             fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R {
                 self($(b.value::<$v>(inputs[$i])),+)
+            }
+
+            fn posts<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R {
+                self($(b.post::<$v>(inputs[$i])),+)
             }
         }
     };
@@ -73,6 +86,31 @@ where
     })
 }
 
+/// The value after the instant of a cell that stepped, computed from its
+/// inputs' values after the instant for a steps view, and kept beside the
+/// memo until commit. The memo itself still holds the value before the
+/// instant, which a snapshot in the same instant may read.
+fn post_read<M, V, R, F>(b: &mut Build<M>, me: u32)
+where
+    M: Mode,
+    V: 'static,
+    R: 'static,
+    F: ReadFn<V, R>,
+{
+    let v = {
+        let b: &Build<M> = b;
+        let Data::ReadThrough { f, .. } = &b.store.data[me as usize] else {
+            unreachable!("bough engine: node {me} is not a read-through cell")
+        };
+        let f = f
+            .get()
+            .downcast_ref::<F>()
+            .expect("bough engine: function type");
+        f.posts(b, &b.store.relations[me as usize].deps)
+    };
+    memo_mut::<M, R>(&mut b.store.data[me as usize]).post_value = Some(v);
+}
+
 /// A cell that stepped, at commit. The value after the instant, if a steps
 /// view computed it, is the value before the next instant, so it becomes
 /// the memo; otherwise the memo is cleared and the next read computes it.
@@ -96,6 +134,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         value: value_read::<M, V, R, F>,
+        compute_post: post_read::<M, V, R, F>,
         settle_memo: settle_read::<M, R>,
         ..Ops::<M>::DEFAULT
     };
