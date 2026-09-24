@@ -52,6 +52,7 @@ use alloc::vec::Vec;
 use crate::Build;
 use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
+use crate::engine::nodes::construct::ConstructNode;
 use crate::engine::nodes::split::{DeferNode, SplitNode};
 use crate::engine::nodes::stream::{ChainNode, MergeNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
@@ -522,13 +523,89 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     /// build context, so graph can be constructed at runtime. Its results
     /// are ordinary events: tokens on their way to a hold and a
     /// [`Cell::switch_stream`] or [`Cell::switch_cell`], or plain values.
+    ///
+    /// `f` runs in the middle of the transaction t of the event, and what
+    /// it builds exists from t on, t included: a hold built over a stream
+    /// that fires at t holds that event after t, a
+    /// [`steps_with_current`](Cell::steps_with_current) fires at t, and a
+    /// switch starts at t from the inner its outer held before t, moving
+    /// after t if the outer steps at t. A [`sample`](Cell::sample) inside
+    /// `f` reads the value before t, as every read during a transaction
+    /// does. The new nodes run at t once `f` has returned and this node has
+    /// fired, each after what it depends on, so they may depend on this
+    /// node's own events, through a loop.
+    ///
+    /// Tokens created inside `f` flow out as data. An input built there
+    /// reaches I/O code as an event, and since a listener has no graph
+    /// access, I/O code attaches listeners and sends to it after
+    /// [`Graph::send`](crate::Graph::send) returns: receive, then wire.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// // Each event opens a counter of its own: an input and a hold over it.
+    /// let (mut graph, (open_in, opened)) = Graph::build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         (bumps_in, count)
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // receive
+    /// let (bumps_in, count) = received.borrow()[0];
+    /// graph.send(bumps_in, 5); // then wire
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    ///
+    /// Each run of `f` is a scope, as the build closure is: a loop declared
+    /// in it must close in it, under the rule [`Build::cell_loop`] states,
+    /// and a loop left open is a panic when `f` returns. So are a close,
+    /// and a switch's first link, that would make a same-instant cycle, the
+    /// switch's at the end of the transaction's new nodes. Each of these
+    /// panics poisons the graph, as does a panic in `f` itself, and so
+    /// does a run that swaps its build context for another graph's.
+    ///
+    /// A run allocates the nodes it builds; with no collection yet, they
+    /// live as long as the graph. A construct whose chain does not fire
+    /// costs what a chain node costs.
+    ///
+    /// The event waits in the node's slot for its consumer, and keeps
+    /// there until the next event if nothing consumes it, so the mode must
+    /// accept its type; a `Threaded` graph refuses a construct of `Rc`s:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
+    /// });
+    /// ```
     fn construct<M, B, F>(self, build: &mut Build<M>, f: F) -> Stream<B>
     where
-        M: Mode + Accepts<Self> + Accepts<F>,
+        M: Mode + Accepts<Self> + Accepts<F> + Accepts<B>,
         B: 'static,
         F: FnMut(&mut Build<M>, Self::Event) -> B + 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Slot(<M as Accepts<B>>::erase(Erase::Slot));
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<F>>::erase(Erase::Value(f)),
+        ]);
+        let ops = &<ConstructNode<Self, F, B> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
+        build.set_reach(n, cells);
+        Stream::from_token(build.token(n))
     }
 }
 

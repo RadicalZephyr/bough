@@ -5,6 +5,7 @@
 use core::marker::PhantomData;
 
 pub(crate) mod cell;
+pub(crate) mod construct;
 pub(crate) mod read;
 pub(crate) mod split;
 pub(crate) mod stream;

@@ -27,8 +27,12 @@
 //! its first child, and the children run depth first before `send`
 //! returns. Stage 5 adds the switches, `switch_cell`, over cells and over
 //! states, and `switch_stream`, whose selection is not a dependency; each
-//! follows the inner its outer selects and moves at commit. Every other
-//! operation still has a `todo!()` body. The examples in the documentation
+//! follows the inner its outer selects and moves at commit. Stage 6 adds
+//! [`construct`](Source::construct), which runs a closure with the build
+//! context at each event of a stream, in the middle of its transaction:
+//! what the closure builds exists from that instant on, and each run is a
+//! scope that must close the loops it declares. Every other operation
+//! still has a `todo!()` body. The examples in the documentation
 //! that call only working operations run, the rest compile, and the
 //! guarantees the RFDs make are fixed by `compile_fail` doc tests.
 //!
