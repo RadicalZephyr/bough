@@ -20,9 +20,9 @@
 //! `accumulate_mut` and `scan`, read-through cells with `map_cell` and
 //! `lift`, and the stream views `steps` and `steps_with_current`, with
 //! [`State`] and [`CellRef`]. Stage 3 adds loops, `cell_loop` with
-//! [`CellLoop`] and `stream_loop` with [`StreamLoop`], closed under the
-//! rule that the dependency graph stays acyclic. Every other operation
-//! still has a `todo!()` body. The examples
+//! [`CellLoop`], `state_loop` with [`StateLoop`] and `stream_loop` with
+//! [`StreamLoop`], closed under the rule that the dependency graph stays
+//! acyclic. Every other operation still has a `todo!()` body. The examples
 //! in the documentation that call only working operations run, the rest
 //! compile, and the guarantees the RFDs make are fixed by `compile_fail`
 //! doc tests.
@@ -94,7 +94,7 @@ mod source;
 mod token;
 mod trace;
 
-pub use build::{Build, CellLoop, StreamLoop};
+pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;

@@ -412,8 +412,8 @@ impl<M: Mode> Graph<M> {
     /// The number of live nodes: how the no-leak requirement is asserted.
     ///
     /// Every materializer creates one node, however long its chain;
-    /// `input_cell` creates two, the input and the hold over it. A cell
-    /// loop's forward is a node of its own besides its definition; a
+    /// `input_cell` creates two, the input and the hold over it. A cell or
+    /// state loop's forward is a node of its own besides its definition; a
     /// stream loop's forward is the one node its definition's chain is
     /// fused into.
     pub fn live_nodes(&self) -> usize {

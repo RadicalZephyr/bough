@@ -572,3 +572,71 @@ fn a_stream_loop_left_open_panics_when_the_build_ends() {
         let _held = forward.hold(b, 0u32);
     });
 }
+
+// ----------------------------------------------------------- state loops
+
+/// An in-place accumulator closes a state loop and reads its own forward
+/// by snapshot, as another reader does. GHC (`state loop`, the in-place
+/// accumulator as the accumulator it is observationally):
+/// `([],[([1],[10]),([2],[10,21]),([3],[10,21,32])])`.
+#[test]
+fn an_in_place_accumulator_closes_a_state_loop_read_by_snapshot() {
+    let (mut graph, (ticks_in, log, lengths, total)) = Graph::build(|b| {
+        let (log, log_loop) = b.state_loop::<Vec<u32>>();
+        let (ticks, ticks_in) = b.input::<u32>();
+        let ticks = ticks.share(b);
+        let definition = ticks
+            .snapshot(log, |t, l| t * 10 + l.len() as u32)
+            .accumulate_mut(b, Vec::new(), |entry, l: &mut Vec<u32>| l.push(entry));
+        log_loop.close(b, definition);
+        let lengths = ticks.snapshot(log, |_, l| l.len() as u32).hold(b, 99u32);
+        // A read-through cell over the forward is a State as well.
+        let total = log.map_cell(b, |l| l.iter().sum::<u32>());
+        (ticks_in, log, lengths, total)
+    });
+    let (steps, mut on_step) = recorder();
+    graph.listen_steps(log, move |l| on_step(l.clone())).keep();
+    let (totals, mut on_total) = recorder();
+    graph.listen_cell(total, move |t| on_total(*t)).keep();
+    for t in [1, 2, 3] {
+        graph.send(ticks_in, t);
+    }
+    assert_eq!(*steps.borrow(), [vec![10], vec![10, 21], vec![10, 21, 32]]);
+    assert_eq!(*totals.borrow(), [0, 10, 31, 63]);
+    assert_eq!(*graph.sample(log), [10, 21, 32]);
+    assert_eq!(*graph.sample(lengths), 2, "read before the third entry");
+}
+
+/// A state loop closes with a Cell too; its forward still only reads, and
+/// a lift with it is a State.
+#[test]
+fn a_state_loop_closes_with_a_cell_and_its_forward_only_reads() {
+    let (mut graph, (ticks_in, count, scaled)) = Graph::build(|b| {
+        let (count, count_loop) = b.state_loop::<u32>();
+        let (ticks, ticks_in) = b.input::<()>();
+        let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
+        count_loop.close(b, next);
+        let (factor, _factor_in) = b.input_cell(3u32);
+        let scaled: bough::State<u32> = (count, factor).lift(b, |c, f| c * f);
+        (ticks_in, count, scaled)
+    });
+    for _ in 0..4 {
+        graph.send(ticks_in, ());
+    }
+    assert_eq!(*graph.sample(count), 4);
+    assert_eq!(*graph.sample(scaled), 12);
+}
+
+#[test]
+#[should_panic(expected = "same-instant cycle: node 1 (Loop) -> node 2 (ReadThrough) -> node 1")]
+fn a_state_loop_closed_with_a_map_cell_of_its_forward_is_refused() {
+    let _ = Graph::build(|b| {
+        let (log, log_loop) = b.state_loop::<Vec<u32>>(); // node 1
+        let longer = log.map_cell(b, |l| {
+            let mut l = l.clone();
+            l.push(0);
+            l
+        }); // node 2
+        log_loop.close(b, longer);
+    });
+}

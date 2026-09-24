@@ -4,13 +4,14 @@ use alloc::boxed::Box;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::cell::CellRef;
 use crate::engine::nodes::cell::HoldNode;
 use crate::engine::nodes::stream::CoalescingInput;
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::slot::InputSlot;
 use crate::source::Source;
-use crate::token::{Cell, Input, Stream, Token, TokenRef};
+use crate::token::{Cell, Input, State, Stream, Token, TokenRef};
 use crate::trace::Trace;
 
 /// The next graph id. Ids start at 1, so a token that names no graph never
@@ -205,12 +206,54 @@ impl<M: Mode> Build<M> {
     /// A loop must close in the scope that declared it: the build closure,
     /// or one run of a `construct` closure. A loop still open when that
     /// scope ends is a panic there, and so is sampling the forward token
-    /// before the loop is closed, since there is no value to return.
+    /// before the loop is closed, since there is no value to return. A
+    /// definition that is a [`State`] closes a
+    /// [`state_loop`](Build::state_loop) instead.
     pub fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
         let token = self.loop_node();
         (
             Cell::from_token(token),
             CellLoop {
+                token,
+                event: PhantomData,
+            },
+        )
+    }
+
+    /// Declares a loop whose definition is a [`State`]: the state of an
+    /// in-place accumulator, or a read-through cell over one. The forward
+    /// token is a `State` too, so no stream view of it can exist, which
+    /// such a definition could not give a value after the instant to. It
+    /// may also close with a [`Cell`], giving a forward that only reads.
+    ///
+    /// ```
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (names_in, members)) = Graph::build(|b| {
+    ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
+    ///     let (names, names_in) = b.input::<String>();
+    ///     // A name joins once: the snapshot reads the members before the instant.
+    ///     let joined = names
+    ///         .snapshot(members, |name, m| (!m.contains(&name)).then_some(name))
+    ///         .filter_map(|name| name)
+    ///         .accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+    ///     members_loop.close(b, joined);
+    ///     (names_in, members)
+    /// });
+    /// graph.send(names_in, "ada".to_string());
+    /// graph.send(names_in, "ada".to_string());
+    /// graph.send(names_in, "grace".to_string());
+    /// assert_eq!(*graph.sample(members), ["ada", "grace"]);
+    /// ```
+    ///
+    /// The rule is the one [`cell_loop`](Build::cell_loop) states: the
+    /// dependency graph stays acyclic, and a read of a cell's value from
+    /// before the instant is not a dependency.
+    pub fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
+        let token = self.loop_node();
+        (
+            State::from_token(token),
+            StateLoop {
                 token,
                 event: PhantomData,
             },
@@ -324,6 +367,55 @@ impl<A: 'static> CellLoop<A> {
     /// dependency would close a cycle, naming the cycle's nodes.
     pub fn close<M: Mode>(self, build: &mut Build<M>, definition: Cell<A>) {
         build.close_cell_loop(self.token, definition.token);
+    }
+}
+
+/// The closer of a state loop, from [`Build::state_loop`], which checks
+/// the rule [`Build::cell_loop`] states. Consumed by
+/// [`close`](StateLoop::close), so a loop cannot close twice.
+///
+/// Its forward is a [`State`], which has no stream view:
+///
+/// ```compile_fail,E0599
+/// use bough::{Graph, Source};
+///
+/// let (_graph, _) = Graph::build(|b| {
+///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
+///     let _joins = members.steps(b); // error: no method named `steps` found for struct `State`
+/// });
+/// ```
+///
+/// A cell loop's forward is a [`Cell`], which has, so a cell loop closes
+/// only with a `Cell`:
+///
+/// ```compile_fail,E0308
+/// use bough::{Graph, Source};
+///
+/// let (_graph, _) = Graph::build(|b| {
+///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
+///     let (names, _names_in) = b.input::<String>();
+///     let joined = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+///     members_loop.close(b, joined); // error: expected `Cell<Vec<String>>`, found `State<Vec<String>>`
+/// });
+/// ```
+pub struct StateLoop<A> {
+    token: Token,
+    event: PhantomData<fn() -> A>,
+}
+
+impl<A: 'static> StateLoop<A> {
+    /// Defines the loop: the forward token becomes `definition`, a
+    /// [`State`] or a [`Cell`]. As with [`CellLoop::close`], the forward's
+    /// node depends on the definition from now on and reads through to it.
+    ///
+    /// Panics if the loop was declared in another scope, and if the new
+    /// dependency would close a cycle, naming the cycle's nodes.
+    pub fn close<M, C>(self, build: &mut Build<M>, definition: C)
+    where
+        M: Mode,
+        C: CellRef<Value = A>,
+    {
+        build.close_cell_loop(self.token, definition.token());
     }
 }
 
