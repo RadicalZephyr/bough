@@ -30,9 +30,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::{Data, Kind, Ops};
+use super::nodes::stream::{ChainNode, OpenLoopNode};
+use super::{Data, Kind, NodeOps, Ops};
 use crate::build::Build;
-use crate::mode::Mode;
+use crate::mode::{Accepts, Erase, Mode};
+use crate::source::Source;
 use crate::token::Token;
 
 /// The relation a path check walks.
@@ -107,6 +109,46 @@ impl<M: Mode> Build<M> {
         self.close_in_scope(l);
         self.refuse_cycle(l, d);
         self.link(d, l);
+    }
+
+    /// A stream loop's forward: a stream node whose program panics if run,
+    /// with no data until close creates its slot, open in the current
+    /// scope.
+    pub(crate) fn stream_loop_node(&mut self) -> Token {
+        let n = self.materialize(
+            Kind::Stream,
+            Data::Empty,
+            Box::new([]),
+            &<OpenLoopNode as NodeOps<M>>::OPS,
+            &[],
+            0,
+        );
+        self.open_loop(n);
+        self.token(n)
+    }
+
+    /// Closes a stream loop: the definition's chain is fused into the node
+    /// the forward names, as `node` fuses a chain into a new one. The slot
+    /// is created here, through the mode's `Accepts` for the event type,
+    /// since it keeps an event nobody consumed between transactions.
+    pub(crate) fn close_stream_loop<S>(&mut self, forward: Token, definition: S)
+    where
+        M: Accepts<S> + Accepts<S::Event>,
+        S: Source,
+        S::Event: 'static,
+    {
+        let l = self.check(forward);
+        let (dependency, cells) = self.chain_reach(&definition);
+        self.close_in_scope(l);
+        self.refuse_cycle(l, dependency);
+        let n = l as usize;
+        self.store.data[n] = Data::Slot(<M as Accepts<S::Event>>::erase(Erase::Slot));
+        self.store.parts[n] = Some(Box::new([<M as Accepts<S>>::erase(Erase::Value(
+            definition,
+        ))]));
+        self.store.ops[n] = &<ChainNode<S> as NodeOps<M>>::OPS;
+        self.link(dependency, l);
+        self.set_reach(l, cells);
     }
 
     /// Takes a forward's node off the current scope's open loops. A loop

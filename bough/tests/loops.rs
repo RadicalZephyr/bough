@@ -433,3 +433,142 @@ fn sampling_a_read_through_cell_over_an_open_forward_panics() {
         count_loop.close(b, next);
     });
 }
+
+// ----------------------------------------------------------- stream loops
+
+/// A stream loop through a hold of its own forward, read by snapshot. The
+/// snapshot reads the hold as it was before the instant, so the dependency
+/// graph has no cycle and the loop needs no split or defer. GHC (`stream
+/// through hold`, a stream fixed point): `[1] 1, [2] 3, [3] 6, [4] 16`, and
+/// the hold steps with each.
+#[test]
+fn a_stream_loop_through_a_hold_read_by_snapshot_needs_no_split_or_defer() {
+    let (mut graph, (ticks_in, sums, last)) = Graph::build(|b| {
+        let (sums, sums_loop) = b.stream_loop::<u32>();
+        let sums = sums.share(b);
+        let last = sums.hold(b, 0u32);
+        let (ticks, ticks_in) = b.input::<u32>();
+        sums_loop.close(b, ticks.snapshot(last, |t, l| t + l));
+        (ticks_in, sums, last)
+    });
+    let (events, on_event) = recorder();
+    graph.listen(sums, on_event).keep();
+    let (steps, mut on_step) = recorder();
+    graph.listen_steps(last, move |v| on_step(*v)).keep();
+    for t in [1, 2, 3, 10] {
+        graph.send(ticks_in, t);
+    }
+    assert_eq!(*events.borrow(), [1, 3, 6, 16]);
+    assert_eq!(*steps.borrow(), [1, 3, 6, 16]);
+}
+
+/// The forward is linear: its one consumer takes each event, so an event
+/// type without `Clone` goes around the loop.
+#[test]
+fn a_stream_loop_moves_its_events_without_clone() {
+    struct Coin(u32);
+    let (mut graph, (minted_in, purse)) = Graph::build(|b| {
+        let (coins, coins_loop) = b.stream_loop::<Coin>();
+        let purse = coins.accumulate(b, 0u32, |coin, total| total + coin.0);
+        let (minted, minted_in) = b.input::<u32>();
+        coins_loop.close(b, minted.snapshot(purse, |n, p| Coin(n + p)));
+        (minted_in, purse)
+    });
+    for n in [1, 1, 5] {
+        graph.send(minted_in, n);
+    }
+    // Coins of 1, 1 + 1 and 5 + 3.
+    assert_eq!(*graph.sample(purse), 11);
+}
+
+/// The definition fires in transaction zero, and a hold of the forward,
+/// created before the definition, takes the event there, as `Hold 0
+/// (MapS (+100) (Value (Constant 5) [0])) [0]` steps to 105 at `[0]`.
+#[test]
+fn a_stream_loop_whose_definition_fires_in_transaction_zero() {
+    let (graph, held) = Graph::build(|b| {
+        let (forward, forward_loop) = b.stream_loop::<u32>();
+        let held = forward.hold(b, 0u32);
+        let start = b.constant(5u32).steps_with_current(b);
+        forward_loop.close(b, start.map(|n| n + 100));
+        held
+    });
+    assert_eq!(*graph.sample(held), 105);
+}
+
+#[test]
+fn a_stream_loop_is_one_node_its_definition_is_fused_into() {
+    let (graph, _total) = Graph::build(|b| {
+        let (sums, sums_loop) = b.stream_loop::<u32>();
+        let total = sums.hold(b, 0u32);
+        let (numbers, _numbers_in) = b.input::<u32>();
+        let chain = numbers
+            .map(|n| n * 2)
+            .filter(|n| *n > 0)
+            .snapshot(total, |n, t| n + t);
+        sums_loop.close(b, chain);
+        total
+    });
+    assert_eq!(
+        graph.live_nodes(),
+        3,
+        "the forward with the chain fused in, the hold, the input"
+    );
+}
+
+/// A chain whose events come from the forward, directly or through
+/// anything that depends on it, a hold's steps included, is a same-instant
+/// cycle, refused at close with its nodes.
+#[test]
+fn stream_loops_whose_chain_depends_on_the_forward_are_refused() {
+    let itself = panic_message(|| {
+        Graph::build(|b| {
+            let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
+            forward_loop.close(b, forward.map(|n| n + 1));
+        })
+    });
+    assert!(
+        itself.contains("same-instant cycle: node 1 (Stream) -> node 1"),
+        "{itself}"
+    );
+
+    let merged = panic_message(|| {
+        Graph::build(|b| {
+            let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
+            let (ticks, _ticks_in) = b.input::<u32>(); // node 2
+            let both = ticks.or_else(b, forward.map(|n| n + 1)); // node 3
+            forward_loop.close(b, both.filter(|n| *n < 10));
+        })
+    });
+    assert!(
+        merged.contains("same-instant cycle: node 1 (Stream) -> node 3 (Stream) -> node 1"),
+        "{merged}"
+    );
+
+    let steps = panic_message(|| {
+        Graph::build(|b| {
+            let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
+            let (ticks, _ticks_in) = b.input::<u32>(); // node 2
+            let last = forward.hold(b, 0u32); // node 3
+            let last_steps = last.steps(b); // node 4
+            let both = ticks.or_else(b, last_steps); // node 5
+            forward_loop.close(b, both);
+        })
+    });
+    assert!(
+        steps.contains(
+            "same-instant cycle: node 1 (Stream) -> node 3 (Hold) -> node 4 (Stream) \
+             -> node 5 (Stream) -> node 1"
+        ),
+        "{steps}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "a loop declared in this scope was never closed")]
+fn a_stream_loop_left_open_panics_when_the_build_ends() {
+    let _ = Graph::build(|b| {
+        let (forward, _forward_loop) = b.stream_loop::<u32>();
+        let _held = forward.hold(b, 0u32);
+    });
+}

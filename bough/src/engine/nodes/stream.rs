@@ -1,5 +1,5 @@
-//! Stream nodes: coalescing inputs, fused chains, merges, and the stream
-//! views of a cell.
+//! Stream nodes: coalescing inputs, open stream loops, fused chains,
+//! merges, and the stream views of a cell.
 
 use core::any::Any;
 
@@ -45,8 +45,27 @@ where
     };
 }
 
-/// `node` and `share`: the fused chain, whose event goes in the slot. The
-/// chain's adapters are inlined into one monomorphized `pull`.
+/// A stream loop's forward before close: a stream node with no data and a
+/// program that panics if run. Nothing runs it: the forward has no
+/// dependency until close, so marking never reaches it, and a scope ends
+/// with a panic, before its new-node phase, if a loop declared in it is
+/// still open. Close replaces the program with the definition's chain.
+pub(crate) struct OpenLoopNode;
+
+fn eval_open_loop<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, me: u32) {
+    panic!("bough engine: stream loop {me} ran before it was closed")
+}
+
+impl<M: Mode> NodeOps<M> for OpenLoopNode {
+    const OPS: Ops<M> = Ops {
+        eval: eval_open_loop::<M>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
+/// `node`, `share` and a closed stream loop: the fused chain, whose event
+/// goes in the slot. The chain's adapters are inlined into one
+/// monomorphized `pull`.
 pub(crate) struct ChainNode<S>(Marker<S>);
 
 fn eval_chain<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)

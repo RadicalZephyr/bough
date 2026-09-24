@@ -19,9 +19,10 @@
 //! `sample`. Stage 2 adds the cells: the accumulators `accumulate`,
 //! `accumulate_mut` and `scan`, read-through cells with `map_cell` and
 //! `lift`, and the stream views `steps` and `steps_with_current`, with
-//! [`State`] and [`CellRef`]. Stage 3 adds cell loops, `cell_loop` and
-//! [`CellLoop`], closed under the rule that the dependency graph stays
-//! acyclic. Every other operation still has a `todo!()` body. The examples
+//! [`State`] and [`CellRef`]. Stage 3 adds loops, `cell_loop` with
+//! [`CellLoop`] and `stream_loop` with [`StreamLoop`], closed under the
+//! rule that the dependency graph stays acyclic. Every other operation
+//! still has a `todo!()` body. The examples
 //! in the documentation that call only working operations run, the rest
 //! compile, and the guarantees the RFDs make are fixed by `compile_fail`
 //! doc tests.

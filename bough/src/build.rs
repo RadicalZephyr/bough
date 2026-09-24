@@ -218,9 +218,42 @@ impl<M: Mode> Build<M> {
     }
 
     /// Declares a stream loop: a linear forward stream, and the closer that
-    /// later defines it with any chain.
+    /// later defines it with any chain. Close fuses the chain into the
+    /// forward's own node, so a stream loop adds no node to its definition.
+    ///
+    /// ```
+    /// use bough::{Graph, Source};
+    ///
+    /// // A running total, fed back through a hold that a snapshot reads.
+    /// let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    ///     let (sums, sums_loop) = b.stream_loop::<u32>();
+    ///     let total = sums.hold(b, 0u32);
+    ///     let (numbers, numbers_in) = b.input::<u32>();
+    ///     sums_loop.close(b, numbers.snapshot(total, |n, t| n + t));
+    ///     (numbers_in, total)
+    /// });
+    /// graph.send(numbers_in, 2);
+    /// graph.send(numbers_in, 3);
+    /// assert_eq!(*graph.sample(total), 5);
+    /// ```
+    ///
+    /// The rule is the one [`cell_loop`](Build::cell_loop) states: the
+    /// dependency graph stays acyclic, and a read of a cell's value from
+    /// before the instant is not a dependency. So the definition above may
+    /// snapshot a hold of the forward, and a loop through such a read needs
+    /// no `split` or `defer`. A loop through a `split` or a `defer` is legal
+    /// too, since their output fires in a later child instant. A chain
+    /// whose events come from the forward itself, or from anything that
+    /// depends on it, a hold's `steps` included, is refused at close.
     pub fn stream_loop<A: 'static>(&mut self) -> (Stream<A>, StreamLoop<A>) {
-        todo!()
+        let token = self.stream_loop_node();
+        (
+            Stream::from_token(token),
+            StreamLoop {
+                token,
+                event: PhantomData,
+            },
+        )
     }
 
     /// Declares that `node` keeps every token in `on` alive, for a closure
@@ -294,19 +327,44 @@ impl<A: 'static> CellLoop<A> {
     }
 }
 
-/// The closer of a stream loop.
+/// The closer of a stream loop, from [`Build::stream_loop`]. Its
+/// [`close`](StreamLoop::close) checks the rule [`Build::cell_loop`]
+/// states: the dependency graph stays acyclic, and a read of a cell's
+/// value from before the instant is not a dependency. Consumed by `close`,
+/// so a loop cannot close twice.
 pub struct StreamLoop<A> {
     token: Token,
     event: PhantomData<fn() -> A>,
 }
 
 impl<A: 'static> StreamLoop<A> {
-    /// Defines the loop: the forward stream becomes `definition`.
+    /// Defines the loop: the forward stream becomes `definition`. The
+    /// chain is fused into the forward's node, which depends on the chain's
+    /// source from now on and reads the cells it snapshots or gates on as
+    /// they were before each instant.
+    ///
+    /// The node's slot is created here and keeps an event nobody consumed
+    /// between transactions, so the mode must accept the event type; a
+    /// `Threaded` graph refuses a loop of `Rc`s here:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (_counts, counts_loop) = b.stream_loop::<Rc<u32>>();
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     counts_loop.close(b, numbers.map(Rc::new)); // error: Rc is not Send
+    /// });
+    /// ```
+    ///
+    /// Panics if the loop was declared in another scope, and if the chain's
+    /// source is the forward or depends on it, naming the cycle's nodes.
     pub fn close<M, S>(self, build: &mut Build<M>, definition: S)
     where
-        M: Mode + Accepts<S>,
+        M: Mode + Accepts<S> + Accepts<A>,
         S: Source<Event = A>,
     {
-        todo!()
+        build.close_stream_loop(self.token, definition);
     }
 }
