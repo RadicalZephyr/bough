@@ -645,6 +645,44 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
     );
 }
 
+/// Relink's first pass reads the committed selection of every switch the
+/// instant queued, and moves it; its second pass checks the moves for
+/// cycles. At [1] the middle of a switch of a switch selects a map_cell
+/// computed from the top switch, a cycle the second pass would refuse; the
+/// first pass reads the top's new selection through the middle's and goes
+/// around it, which recursed until the stack overflowed and aborted the
+/// process, in every order. The read's cycle detection over the switches
+/// it passes meets the middle one again and panics, which poisons the
+/// graph.
+#[test]
+fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
+    for seed in SEEDS {
+        let (mut graph, (sel_in, top)) = Graph::build(|b| {
+            let (sel, sel_in) = b.input::<()>(); // node 1
+            let one = b.constant(1u32); // node 2
+            let first = b.constant(one); // node 3
+            let (forward, closer) = b.cell_loop::<u32>(); // node 4
+            let computed = forward.map_cell(b, move |_| one); // node 5
+            let outer = sel.map(move |_| computed).hold(b, first); // node 6
+            let middle = outer.switch_cell(b); // node 7
+            let top = middle.switch_cell(b); // node 8
+            closer.close(b, top);
+            (sel_in, top)
+        });
+        graph.set_shuffle_seed(seed);
+        assert_eq!(*graph.sample(top), 1);
+        let message = panic_message(|| graph.send(sel_in, ()));
+        assert!(
+            message.contains(
+                "a same-instant cycle through a switch_cell read before its first link or its \
+                 move at commit, at node 7"
+            ),
+            "{message}"
+        );
+        assert_poisoned(&mut graph, sel_in, top);
+    }
+}
+
 /// A switch whose first link would close a cycle is refused where it links,
 /// at the end of the build.
 #[test]
