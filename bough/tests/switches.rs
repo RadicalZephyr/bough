@@ -1299,6 +1299,76 @@ fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
     }
 }
 
+/// Switches whose outers step in child instants: a hold of a split. Each
+/// child is a switch instant, whose commit moves the switch before the
+/// next child. The switch_cell steps at [1,0] to c2, which stepped at [1],
+/// and at [1,1] to a constant; at [2] c1 steps while deselected, and [2,0]
+/// selects it. The switch_stream's selections and inners are splits of
+/// one instant too, so child n carries element n of each: at each child it
+/// forwards the stream selected before that child. The engine does not
+/// show child instants, so the tests place each value at its top-level
+/// transaction. Stage5.hs, with F7's sorted Split:
+///
+/// ```text
+/// children: steps sw: (1,[([0],1),([1,0],20),([1,1],3),([2,0],5),([3,0],21)])
+/// children: samples: [1,3,5,21]
+/// children: switch_stream: [([1,0],'a'),([1,1],'z'),([2,0],'c')]
+/// ```
+#[test]
+fn switches_move_at_each_child_instant() {
+    let (steps, samples) = every_order(|order| {
+        let (mut graph, (x1_in, x2_in, lists_in, log, sw, cells)) = Graph::build(|b| {
+            let (c1, x1_in) = b.input_cell(1u32);
+            let (c2, x2_in) = b.input_cell(2u32);
+            let c3 = b.constant(3u32);
+            let (lists, lists_in) = b.input::<Vec<Cell<u32>>>();
+            let outer = lists.split(b).hold(b, c1);
+            let sw = outer.switch_cell(b);
+            (x1_in, x2_in, lists_in, log_steps(b, sw), sw, [c1, c2, c3])
+        });
+        let [c1, c2, c3] = cells;
+        let lists = move |cells: Vec<Cell<u32>>| -> Send {
+            Box::new(move |tx| tx.send(lists_in, cells.clone()))
+        };
+        let schedule = [
+            vec![send(x2_in, 20), lists(vec![c2, c3])],
+            vec![send(x1_in, 5), lists(vec![c1])],
+            vec![send(x2_in, 21), lists(vec![c2])],
+        ];
+        let (logs, samples) = drive(&mut graph, order, &schedule, &[log], &[sw]);
+        (logs[0].clone(), samples[0].clone())
+    });
+    assert_eq!(steps, [(0, 1), (1, 20), (1, 3), (2, 5), (3, 21)]);
+    assert_eq!(samples, [1, 3, 5, 21]);
+
+    let events = every_order(|order| {
+        let (mut graph, (inputs, picks_in, log, streams)) = Graph::build(|b| {
+            let (a, a_in) = b.input::<Vec<char>>();
+            let (z, z_in) = b.input::<Vec<char>>();
+            let a = a.split(b).share(b);
+            let z = z.split(b).share(b);
+            let (picks, picks_in) = b.input::<Vec<Shared<char>>>();
+            let outer = picks.split(b).hold(b, a);
+            let out = outer.switch_stream(b);
+            ([a_in, z_in], picks_in, log_events(b, out), [a, z])
+        });
+        let [a, z] = streams;
+        let chars = move |i: usize, text: &'static str| -> Send {
+            let input = inputs[i];
+            Box::new(move |tx| tx.send(input, text.chars().collect()))
+        };
+        let picks = move |streams: Vec<Shared<char>>| -> Send {
+            Box::new(move |tx| tx.send(picks_in, streams.clone()))
+        };
+        let schedule = [
+            vec![chars(0, "ab"), chars(1, "yz"), picks(vec![z, a])],
+            vec![chars(0, "c"), chars(1, "x"), picks(vec![z])],
+        ];
+        drive::<char, ()>(&mut graph, order, &schedule, &[log], &[]).0
+    });
+    assert_eq!(events[0], [(1, 'a'), (1, 'z'), (2, 'c')]);
+}
+
 /// A switch_cell over states: a State with no stream view, whose listeners
 /// run on every step, at switch instants included, and a map_cell over it
 /// is a State too. The step at [0] has no reader: a State has no steps
