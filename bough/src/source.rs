@@ -257,8 +257,14 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     }
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output
-    /// per event. The output goes in the node's slot, so the mode must
-    /// accept its type; a `Threaded` graph refuses an `Rc` output here:
+    /// per event.
+    ///
+    /// The state is private to the node and is updated when the node runs,
+    /// at most once per transaction, so `f` always reads the state from
+    /// before the instant, as the semantics' snapshot of a hold would.
+    ///
+    /// The output goes in the node's slot, so the mode must accept its
+    /// type; a `Threaded` graph refuses an `Rc` output here:
     ///
     /// ```compile_fail,E0277
     /// use bough::{Graph, Source};
@@ -269,10 +275,6 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
     /// ```
-    ///
-    /// The state is private to the node and is updated when the node runs,
-    /// at most once per transaction, so `f` always reads the state from
-    /// before the instant, as the semantics' snapshot of a hold would.
     fn scan<M, S, B, F>(self, build: &mut Build<M>, initial: S, f: F) -> Stream<B>
     where
         M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<B>,

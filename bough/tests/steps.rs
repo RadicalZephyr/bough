@@ -244,3 +244,26 @@ fn promotion_runs_each_function_of_a_read_through_chain_once_per_step() {
     assert_eq!(map_calls.get(), 2, "once per step of the map_cell");
     assert_eq!(lift_calls.get(), 3, "once per step of the lift");
 }
+
+#[test]
+fn a_lift_whose_inputs_step_in_transaction_zero_is_promoted_there() {
+    // A sample in the build fills the memo with the value before
+    // transaction zero; both inputs step there, the steps view computes
+    // the value after it, and commit replaces the memo with that value.
+    let (calls, count) = counter();
+    let (graph, (lifted, current)) = Graph::build(move |b| {
+        let (x, _x_in) = b.input_cell(2u32);
+        let (y, _y_in) = b.input_cell(3u32);
+        let x = x.steps_with_current(b).hold(b, 0u32);
+        let y = y.steps_with_current(b).hold(b, 0u32);
+        let lifted = (x, y).lift(b, move |x, y| {
+            count.set(count.get() + 1);
+            x * 10 + y
+        });
+        assert_eq!(*lifted.sample(b), 0);
+        let current = lifted.steps_with_current(b).hold(b, 99u32);
+        (lifted, current)
+    });
+    assert_eq!((*graph.sample(current), *graph.sample(lifted)), (23, 23));
+    assert_eq!(calls.get(), 2, "the sample in the build, then the step");
+}

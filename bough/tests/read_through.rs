@@ -148,6 +148,8 @@ fn a_read_through_cell_read_during_a_transaction_gives_the_value_before_it() {
                 .hold(b, (0u32, 0u32));
             (numbers_in, probe_in, tripled, seen)
         });
+        let (stepped, mut on) = recorder();
+        graph.listen_steps(tripled, move |t| on(*t)).keep();
         graph.transaction(|tx| {
             if numbers_first {
                 tx.send(numbers_in, 5);
@@ -162,6 +164,8 @@ fn a_read_through_cell_read_during_a_transaction_gives_the_value_before_it() {
             (5, 3),
             "numbers first: {numbers_first}"
         );
+        // The listener ran after commit cleared the memo the snapshot filled.
+        assert_eq!(*stepped.borrow(), [15]);
         assert_eq!(*graph.sample(tripled), 15);
         assert_eq!(calls.get(), 2, "once before the instant, once after");
         graph.send(probe_in, ());

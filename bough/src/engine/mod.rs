@@ -69,9 +69,10 @@ pub(crate) const IN_PROGRESS: u32 = u32::MAX;
 /// output the child scheduler fired. Started nodes are never ordered.
 pub(crate) const START: u32 = u32::MAX;
 
-/// What a node is, which decides how the evaluation loop, `value` and
-/// commit treat it. Stage 1 creates the first six; the rest are here so
-/// that the evaluation loop and the data plane need no rewrite later.
+/// What a node is, which decides how the evaluation loop, `value`,
+/// `prepare`, `post` and commit treat it. Stage 1 creates the first six
+/// and stage 2 the next two; the rest are here so that the evaluation loop
+/// and the data plane need no rewrite later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Index 0.

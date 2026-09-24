@@ -12,9 +12,10 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 
 /// Anything that names a cell: a [`Cell`], or a [`State`].
 ///
-/// Every operation that reads a cell's value takes either: `sample`,
-/// `snapshot`, `gate`, `lift`, and on [`Graph`](crate::Graph) `sample`,
-/// `listen_cell` and `listen_steps` and their `try_` forms. Each reads the
+/// Every operation that reads a cell's value takes either: `snapshot`,
+/// `gate`, `lift`, and on [`Graph`](crate::Graph) `sample`, `listen_cell`
+/// and `listen_steps` and their `try_` forms; `sample` and `map_cell` exist
+/// on both, and `map_cell` over a `State` is a `State`. Each reads the
 /// value from before the instant, or the committed value after it, and
 /// both kinds of cell have those. The stream views `steps` and
 /// `steps_with_current` exist on `Cell` alone: they carry the value after
