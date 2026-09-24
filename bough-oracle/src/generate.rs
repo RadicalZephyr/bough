@@ -1,4 +1,4 @@
-//! Random well-typed programs in the subset of stages 1 to 4, and a reducer
+//! Random well-typed programs in the subset of stages 1 to 5, and a reducer
 //! that shrinks a failing program further than proptest can.
 //!
 //! [`programs`] draws a recipe and interprets it into a [`Program`]: one to
@@ -55,6 +55,36 @@
 //! between two splits, or a split and a defer, which fire in one instant and
 //! share child indices, and merges them downstream.
 //!
+//! # Switches
+//!
+//! A switch step makes the tokens to switch among, an outer that selects
+//! among them, and the switch. A `switch_stream` switches among two to four
+//! shared streams, a `switch_cell` among two to four cells of integers, or
+//! `State`s, which gives a `State`. The outer is mostly a hold of a pick,
+//! whose selector is a stream the step takes, now and then deferred or
+//! split so that the switch moves in child instants; a map_cell of a cell,
+//! which steps whenever that cell does; or a constant, which never
+//! switches. One switch step in four takes its selector and its tokens from
+//! one shared stream, so that it switches in an instant in which both the
+//! new inner and the old one fire. Nested switches switch among switches: a
+//! `switch_cell` of `switch_cell`s, and a `switch_stream` among shared
+//! `switch_stream`s. A switch loop is a stream loop through a
+//! `switch_stream`'s selection, which is legal because the selection is
+//! read before the instant (finding F14), or a cell loop read by a snapshot
+//! that selects for a switch whose output closes it. Later steps use a
+//! switch's output like any node: a steps view of a `switch_cell`, a share
+//! of a `switch_stream`, which a later switch may follow.
+//!
+//! A `switch_cell` depends on its outer; a `switch_stream`'s outer is only
+//! watched (finding F14), so a loop through its selection is legal. A
+//! switch depends on the cell or stream it follows, which is known only at
+//! run time, so for [`Reach`] and [`well_founded`] every token its outer
+//! may select is a dependency of the switch. A token downstream of the
+//! switch through a loop would be a same-instant cycle when selected, and
+//! no generated program has one. This is conservative: two switches that
+//! could each select a cell depending on the other, but never both at once,
+//! make a legal program (finding F46), which the generator never makes.
+//!
 //! The recipe observes a random subset of the nodes that can be observed:
 //! every cell, every shared stream, and every linear stream nothing
 //! consumes; the builder gives a chain a `node` to listen to.
@@ -76,7 +106,7 @@ use crate::build::{self, NodeType, Scalar};
 use crate::program::{Definition, Expression, Input, Program, Reference, Type, Value, Window};
 
 /// At most this many definitions.
-pub const MAX_DEFINITIONS: usize = 48;
+pub const MAX_DEFINITIONS: usize = 64;
 
 /// How many definitions closing a loop may add, at most: a source, a
 /// snapshot, a filter, a cell, a conversion to booleans, and the `Close`.
@@ -131,6 +161,12 @@ enum Kind {
     Countdown,
     CellCountdown,
     SplitLoop,
+    // Switches.
+    SwitchStream,
+    SwitchCell,
+    SwitchState,
+    NestedSwitch,
+    SwitchLoop,
 }
 
 /// One step of a recipe: its kind and the choices it makes.
@@ -204,6 +240,11 @@ fn kind() -> impl Strategy<Value = Kind> {
         3 => Just(Kind::Countdown),
         2 => Just(Kind::CellCountdown),
         2 => Just(Kind::SplitLoop),
+        7 => Just(Kind::SwitchStream),
+        7 => Just(Kind::SwitchCell),
+        4 => Just(Kind::SwitchState),
+        4 => Just(Kind::NestedSwitch),
+        4 => Just(Kind::SwitchLoop),
     ]
 }
 
@@ -542,6 +583,38 @@ impl Step {
             1 + ((self.pick(5) >> 8) % 2) as i64,
         )
     }
+
+    /// A pick's index, which the semantics take `mod` the number of
+    /// choices: mostly the event itself, which the inputs' small values make
+    /// visit every choice, or the random tree made to read the event.
+    fn index(&self) -> Expression {
+        match (self.pick(5) >> 12) % 6 {
+            0..=2 => Argument,
+            3 => Argument + literal(self.literal),
+            4 => literal(self.literal) - Argument * literal(2),
+            _ => {
+                let e = specialize(&self.tree, 1);
+                if mentions(&e, &Argument) {
+                    e
+                } else {
+                    Argument + e
+                }
+            }
+        }
+    }
+
+    /// The same step with its choices moved, for one of several parts of a
+    /// pattern that each take a step's choices.
+    fn varied(&self, part: u32) -> Step {
+        let mut step = self.clone();
+        step.picks.rotate_left(part as usize % 6);
+        for pick in &mut step.picks {
+            *pick = pick.rotate_left(7 * part);
+        }
+        step.template = step.template.rotate_left(3 * part);
+        step.literal = (step.literal + i64::from(part)).rem_euclid(10) - 3;
+        step
+    }
 }
 
 /// A function of two arguments, made to read both.
@@ -588,6 +661,10 @@ enum Slot {
         scalar: Scalar,
         state: bool,
     },
+    /// A pick's tokens, consumed at once by the hold made with it.
+    Tokens,
+    /// A cell of tokens, which only a switch reads.
+    Outer,
     /// A `Close`.
     Closed,
 }
@@ -636,15 +713,32 @@ fn type_of(scalar: Scalar) -> Type {
 
 /// The top-level nodes a definition depends on, as [`Reach`] counts them:
 /// what it consumes and the cells it reads through, but not a snapshot's
-/// or a gate's cell or a `Sample`.
-fn dependencies(definition: &Definition) -> Vec<usize> {
+/// or a gate's cell or a `Sample`. A `switch_cell` depends on its outer, and
+/// a switch on every token its outer may select, among the `definitions`
+/// before it; a `switch_stream`'s outer is read before the instant, and is
+/// no dependency.
+fn dependencies(definitions: &[Definition], definition: &Definition) -> Vec<usize> {
     let mut nodes = Vec::new();
     let mut add = |reference: &Reference| {
         if let Reference::TopLevel(node) = reference {
             nodes.push(*node);
         }
     };
+    let candidates = |outer: &Reference| match outer {
+        Reference::TopLevel(outer) => build::switch_candidates(definitions, *outer),
+        Reference::Local(_) => Vec::new(),
+    };
     match definition {
+        Definition::PickStream { source, .. }
+        | Definition::PickCell { source, .. }
+        | Definition::HoldStream { source, .. }
+        | Definition::HoldCell { source, .. } => add(source),
+        Definition::MapPickCell { cell, .. } => add(cell),
+        Definition::SwitchCell(outer) => {
+            add(outer);
+            candidates(outer).iter().for_each(add);
+        }
+        Definition::SwitchStream(outer) => candidates(outer).iter().for_each(add),
         Definition::Map { source, .. }
         | Definition::Filter { source, .. }
         | Definition::FilterMap { source, .. }
@@ -692,7 +786,7 @@ impl Draft {
             }
         } else {
             let mut reach = Reach::default();
-            for node in dependencies(&definition) {
+            for node in dependencies(&self.definitions, &definition) {
                 reach.depends |= self.reach[node].depends;
             }
             for node in references(&definition) {
@@ -730,7 +824,9 @@ impl Draft {
     fn scalar(&self, node: usize) -> Scalar {
         match self.slots[node] {
             Slot::Stream { scalar, .. } | Slot::Cell { scalar, .. } => scalar,
-            Slot::Lists | Slot::Closed => unreachable!("bough-oracle: node {node} has no scalar"),
+            Slot::Lists | Slot::Tokens | Slot::Outer | Slot::Closed => {
+                unreachable!("bough-oracle: node {node} has no scalar")
+            }
         }
     }
 
@@ -1136,6 +1232,32 @@ impl Draft {
             Kind::Countdown => self.countdown(step),
             Kind::CellCountdown => self.cell_countdown(step),
             Kind::SplitLoop => self.split_loop(step),
+            Kind::SwitchStream => {
+                let switch = self.switch_stream(step, 0);
+                if step.pick(4) % 3 == 0 {
+                    self.push_stream(Definition::Share(top(switch)), self.scalar(switch));
+                }
+            }
+            Kind::SwitchCell | Kind::SwitchState => {
+                let state = step.kind == Kind::SwitchState;
+                let switch = self.switch_cell(step, state, 0);
+                if !state {
+                    match step.pick(4) % 5 {
+                        0 => {
+                            self.push_stream(Definition::Steps(top(switch)), Scalar::Integer);
+                        }
+                        1 => {
+                            self.push_stream(
+                                Definition::StepsWithCurrent(top(switch)),
+                                Scalar::Integer,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Kind::NestedSwitch => self.nested_switch(step),
+            Kind::SwitchLoop => self.switch_loop(step),
         }
     }
 
@@ -1286,6 +1408,14 @@ impl Draft {
             reach.depends & closing == 0,
             "bough-oracle: a loop closes only with a definition that does not depend on it"
         );
+        if let (Slot::Cell { state: meant, .. }, Slot::Cell { state, .. }) =
+            (self.slots[forward], self.slots[definition])
+        {
+            assert_eq!(
+                meant, state,
+                "bough-oracle: a cell loop closes with a definition of the kind it was meant to be"
+            );
+        }
         self.push(
             Definition::Close {
                 forward,
@@ -1311,7 +1441,11 @@ impl Draft {
     }
 
     /// Closes an open loop: with the most recent node that fits it, reads
-    /// it and does not depend on it, or with a definition made for it.
+    /// it and does not depend on it, or with a definition made for it. A
+    /// cell loop meant to be a `State` closes with a `State`, and one meant
+    /// to be a `Cell` with a `Cell`, so that what the draft says it is holds
+    /// from its declaration: a switch lists the loop among `State`s or
+    /// among `Cell`s before it closes.
     fn close_loop(&mut self, forward: usize, step: &Step) {
         let closing = bit(forward);
         let (want, cell) = match self.slots[forward] {
@@ -1322,7 +1456,7 @@ impl Draft {
         let candidates: Vec<usize> = (forward + 1..self.slots.len())
             .filter(|&node| {
                 let fits = match self.slots[node] {
-                    Slot::Cell { scalar, state } => cell && scalar == want.0 && (want.1 || !state),
+                    Slot::Cell { scalar, state } => cell && scalar == want.0 && want.1 == state,
                     Slot::Stream {
                         scalar,
                         shared,
@@ -1830,6 +1964,504 @@ impl Draft {
         self.close(forward, shared);
     }
 
+    // ----- switches -----
+
+    /// A new stream of an input of the scalar, converted when no input
+    /// carries it.
+    fn input_of(&mut self, choice: usize, scalar: Scalar) -> usize {
+        let matching: Vec<usize> = (0..self.inputs.len())
+            .filter(|&k| self.scalars[k] == scalar)
+            .collect();
+        let node = match recent(&matching, choice) {
+            Some(k) => self.push_stream(Definition::Input(k), scalar),
+            None => self.input_stream(choice),
+        };
+        if self.scalar(node) == scalar {
+            return node;
+        }
+        let converted = match scalar {
+            Scalar::Integer => Definition::Map {
+                function: Argument,
+                source: top(node),
+            },
+            Scalar::Boolean => Definition::MapTo {
+                value: Value::Boolean(choice % 2 == 0),
+                source: top(node),
+            },
+        };
+        self.push_stream(converted, scalar)
+    }
+
+    /// A new share, of a linear stream of the scalar that nothing consumed
+    /// and that depends on none of the loops in `avoid`, most recent first,
+    /// or of an input's stream.
+    fn new_share(&mut self, choice: usize, scalar: Scalar, avoid: u128) -> usize {
+        let linear: Vec<usize> = (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Stream {
+                        scalar: s,
+                        shared: false,
+                        consumed: false,
+                    } if s == scalar
+                ) && self.reach[node].depends & avoid == 0
+            })
+            .collect();
+        let source = match recent(&linear, choice) {
+            Some(node) => node,
+            None => self.input_of(choice, scalar),
+        };
+        self.push_stream(Definition::Share(top(source)), scalar)
+    }
+
+    /// The shared streams, of one scalar or any, that depend on none of the
+    /// loops in `avoid`.
+    fn shares(&self, scalar: Option<Scalar>, avoid: u128) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Stream { scalar: s, shared: true, .. }
+                        if scalar.is_none_or(|want| want == s)
+                ) && self.reach[node].depends & avoid == 0
+            })
+            .collect()
+    }
+
+    /// Two to four shared streams of one scalar, the given one or any, for
+    /// a `switch_stream` to switch among, that depend on none of the loops
+    /// in `avoid`: shares made before, most recent first, and now and then,
+    /// or when too few are left, new ones.
+    fn stream_candidates(
+        &mut self,
+        step: &Step,
+        scalar: Option<Scalar>,
+        avoid: u128,
+    ) -> Vec<usize> {
+        let count = 2 + step.pick(5) % 3;
+        let first = match recent(&self.shares(scalar, avoid), step.pick(1)) {
+            Some(node) if step.pick(1) % 4 != 0 => node,
+            _ => self.new_share(step.pick(1), scalar.unwrap_or(Scalar::Integer), avoid),
+        };
+        let scalar = self.scalar(first);
+        let mut candidates = vec![first];
+        for k in 1..count {
+            let choice = step.pick(1 + k) >> 4;
+            let left: Vec<usize> = self
+                .shares(Some(scalar), avoid)
+                .into_iter()
+                .filter(|node| !candidates.contains(node))
+                .collect();
+            let next = match recent(&left, choice) {
+                Some(node) if choice % 4 != 0 => node,
+                _ => self.new_share(choice, scalar, avoid),
+            };
+            candidates.push(next);
+        }
+        candidates
+    }
+
+    /// A new cell of integers, a `State` when `state`, that depends on none
+    /// of the loops in `avoid`: a constant, an input cell or a hold of a
+    /// stream; or an accumulator in place of a stream.
+    fn new_cell(&mut self, step: &Step, choice: usize, state: bool, avoid: u128) -> usize {
+        let value = literal((choice % 10) as i64 - 3);
+        if state {
+            let source = self.stream_avoiding(choice, None, avoid);
+            return self.push_cell(
+                Definition::AccumulateMut {
+                    initial: value,
+                    function: step.accumulator(),
+                    source: top(source),
+                },
+                Scalar::Integer,
+                true,
+            );
+        }
+        let cell = match choice % 3 {
+            0 => self.push_cell(Definition::Constant(value), Scalar::Integer, false),
+            1 => self.input_cell(choice, value),
+            _ => {
+                let source = self.stream_avoiding(choice, None, avoid);
+                let scalar = self.scalar(source);
+                self.push_cell(
+                    Definition::Hold {
+                        initial: value,
+                        source: top(source),
+                    },
+                    scalar,
+                    false,
+                )
+            }
+        };
+        match self.scalar(cell) {
+            Scalar::Integer => cell,
+            Scalar::Boolean => self.convert_cell(cell, Scalar::Integer),
+        }
+    }
+
+    /// Two to four cells of integers, `State`s when `state`, for a
+    /// `switch_cell` to switch among, that depend on none of the loops in
+    /// `avoid`: cells made before, most recent first, and now and then, or
+    /// when too few are left, new ones.
+    fn cell_candidates(&mut self, step: &Step, state: bool, avoid: u128) -> Vec<usize> {
+        let count = 2 + step.pick(5) % 3;
+        let mut candidates: Vec<usize> = Vec::new();
+        for k in 0..count {
+            let choice = step.pick(1 + k) >> 4;
+            let left: Vec<usize> = (0..self.slots.len())
+                .filter(|&node| {
+                    matches!(
+                        self.slots[node],
+                        Slot::Cell { scalar: Scalar::Integer, state: s } if s == state
+                    ) && self.reach[node].depends & avoid == 0
+                        && !candidates.contains(&node)
+                })
+                .collect();
+            let next = match recent(&left, choice) {
+                Some(node) if choice % 4 != 0 => node,
+                _ => self.new_cell(step, choice, state, avoid),
+            };
+            candidates.push(next);
+        }
+        candidates
+    }
+
+    /// Two to four shares of maps of a shared stream, which fire exactly
+    /// when it does: `x * 10 + k` for the k-th.
+    fn echo_streams(&mut self, step: &Step, shared: usize) -> Vec<usize> {
+        let count = 2 + step.pick(5) % 3;
+        (0..count)
+            .map(|k| {
+                let mapped = self.push_stream(
+                    Definition::Map {
+                        function: Argument * literal(10) + literal(k as i64),
+                        source: top(shared),
+                    },
+                    Scalar::Integer,
+                );
+                self.push_stream(Definition::Share(top(mapped)), Scalar::Integer)
+            })
+            .collect()
+    }
+
+    /// Two to four cells that step exactly when a shared stream fires:
+    /// holds of maps of it, or accumulators in place of it for `State`s.
+    fn echo_cells(&mut self, step: &Step, shared: usize, state: bool) -> Vec<usize> {
+        let count = 2 + step.pick(5) % 3;
+        (0..count)
+            .map(|k| {
+                let k = k as i64;
+                if state {
+                    self.push_cell(
+                        Definition::AccumulateMut {
+                            initial: literal(k),
+                            function: (SecondArgument + Argument * literal(10) + literal(k))
+                                .modulo(1000),
+                            source: top(shared),
+                        },
+                        Scalar::Integer,
+                        true,
+                    )
+                } else {
+                    let mapped = self.push_stream(
+                        Definition::Map {
+                            function: Argument * literal(10) + literal(k),
+                            source: top(shared),
+                        },
+                        Scalar::Integer,
+                    );
+                    self.push_cell(
+                        Definition::Hold {
+                            initial: literal(k),
+                            source: top(mapped),
+                        },
+                        Scalar::Integer,
+                        false,
+                    )
+                }
+            })
+            .collect()
+    }
+
+    /// The stream a pick reads: a stream to consume that depends on none of
+    /// the loops in `avoid`, now and then deferred or split, so that the
+    /// switch moves in child instants.
+    fn selector(&mut self, step: &Step, avoid: u128) -> usize {
+        let source = self.stream_avoiding(step.pick(3) >> 8, None, avoid);
+        match (step.pick(4) >> 8) % 6 {
+            0 => {
+                let scalar = self.scalar(source);
+                self.push_stream(Definition::Defer(top(source)), scalar)
+            }
+            1 => self.split(step, 0, source),
+            _ => source,
+        }
+    }
+
+    /// The initial token of a hold of tokens: one of the candidates, or now
+    /// and then one of none, `other`, which the switch starts from and
+    /// never selects again.
+    fn initial_token(step: &Step, candidates: &[usize], other: impl FnOnce() -> usize) -> usize {
+        match (step.pick(3) >> 16) % 6 {
+            0 => other(),
+            choice => candidates[choice % candidates.len()],
+        }
+    }
+
+    /// A `switch_stream` among the candidates, over a hold of a pick of
+    /// them whose selector is `selector`, or one made for it; or now and
+    /// then, when no selector is given, over a constant of one. Returns the
+    /// switch.
+    fn switch_stream_over(
+        &mut self,
+        step: &Step,
+        candidates: &[usize],
+        selector: Option<usize>,
+        avoid: u128,
+    ) -> usize {
+        let scalar = self.scalar(candidates[0]);
+        let outer = if selector.is_none() && step.pick(2) % 8 == 0 {
+            self.push(Definition::ConstantStream(top(candidates[0])), Slot::Outer)
+        } else {
+            let selector = match selector {
+                Some(selector) => selector,
+                None => self.selector(step, avoid),
+            };
+            let pick = self.push(
+                Definition::PickStream {
+                    index: step.index(),
+                    streams: candidates.iter().map(|&c| top(c)).collect(),
+                    source: top(selector),
+                },
+                Slot::Tokens,
+            );
+            let choice = step.pick(0) >> 8;
+            let initial =
+                Draft::initial_token(step, candidates, || self.new_share(choice, scalar, avoid));
+            self.push(
+                Definition::HoldStream {
+                    initial: top(initial),
+                    source: top(pick),
+                },
+                Slot::Outer,
+            )
+        };
+        self.push_stream(Definition::SwitchStream(top(outer)), scalar)
+    }
+
+    /// A `switch_cell` among the candidates, `State`s when `state`: over a
+    /// hold of a pick of them whose selector is `selector`, or one made for
+    /// it; or now and then, when no selector is given, over a map_cell of a
+    /// cell to them, which steps whenever that cell does, or over a
+    /// constant of one. Returns the switch.
+    fn switch_cell_over(
+        &mut self,
+        step: &Step,
+        candidates: &[usize],
+        state: bool,
+        selector: Option<usize>,
+        avoid: u128,
+    ) -> usize {
+        let cells: Vec<Reference> = candidates.iter().map(|&c| top(c)).collect();
+        let outer = match (selector, step.pick(2) % 8) {
+            (None, 0) => self.push(Definition::ConstantCell(cells[0]), Slot::Outer),
+            (None, 1 | 2) => {
+                let readable: Vec<usize> = self
+                    .cells(None, false)
+                    .into_iter()
+                    .filter(|&cell| self.reach[cell].depends & avoid == 0)
+                    .collect();
+                let cell = match recent(&readable, step.pick(3) >> 8) {
+                    Some(cell) => cell,
+                    None => self.input_cell(step.pick(3), literal(0)),
+                };
+                self.push(
+                    Definition::MapPickCell {
+                        index: step.index(),
+                        cells,
+                        cell: top(cell),
+                    },
+                    Slot::Outer,
+                )
+            }
+            (selector, _) => {
+                let selector = match selector {
+                    Some(selector) => selector,
+                    None => self.selector(step, avoid),
+                };
+                let pick = self.push(
+                    Definition::PickCell {
+                        index: step.index(),
+                        cells,
+                        source: top(selector),
+                    },
+                    Slot::Tokens,
+                );
+                let choice = step.pick(0) >> 8;
+                let initial = Draft::initial_token(step, candidates, || {
+                    self.new_cell(step, choice, state, avoid)
+                });
+                self.push(
+                    Definition::HoldCell {
+                        initial: top(initial),
+                        source: top(pick),
+                    },
+                    Slot::Outer,
+                )
+            }
+        };
+        self.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state)
+    }
+
+    /// A `switch_stream` among two to four shared streams that depend on
+    /// none of the loops in `avoid`. One in four takes its streams and its
+    /// selector from one shared stream, so that it switches at an instant
+    /// at which the old stream and the new one both fire. Returns the
+    /// switch.
+    fn switch_stream(&mut self, step: &Step, avoid: u128) -> usize {
+        if step.pick(0) % 4 == 0 {
+            let source = self.stream_avoiding(step.pick(1), None, avoid);
+            let shared = self.shared(source);
+            let candidates = self.echo_streams(step, shared);
+            let selector = if step.pick(2) % 2 == 0 {
+                shared
+            } else {
+                self.adapter(Kind::Map, step, shared)
+            };
+            self.switch_stream_over(step, &candidates, Some(selector), avoid)
+        } else {
+            let candidates = self.stream_candidates(step, None, avoid);
+            self.switch_stream_over(step, &candidates, None, avoid)
+        }
+    }
+
+    /// A `switch_cell` among two to four cells of integers, `State`s when
+    /// `state`, that depend on none of the loops in `avoid`. One in four
+    /// takes its cells and its selector from one shared stream, so that it
+    /// switches at an instant at which the old cell and the new one both
+    /// step. Returns the switch.
+    fn switch_cell(&mut self, step: &Step, state: bool, avoid: u128) -> usize {
+        if step.pick(0) % 4 == 0 {
+            let source = self.stream_avoiding(step.pick(1), None, avoid);
+            let shared = self.shared(source);
+            let candidates = self.echo_cells(step, shared, state);
+            let selector = if step.pick(2) % 2 == 0 {
+                shared
+            } else {
+                self.adapter(Kind::Map, step, shared)
+            };
+            self.switch_cell_over(step, &candidates, state, Some(selector), avoid)
+        } else {
+            let candidates = self.cell_candidates(step, state, avoid);
+            self.switch_cell_over(step, &candidates, state, None, avoid)
+        }
+    }
+
+    /// Nested switches: a `switch_cell` among two or three `switch_cell`s,
+    /// or a `switch_stream` among shares of two or three `switch_stream`s,
+    /// each inner switch with choices of its own.
+    fn nested_switch(&mut self, step: &Step) {
+        let count = 2 + step.pick(1) % 2;
+        let top_step = step.varied(7);
+        if step.pick(0) % 2 == 0 {
+            let state = step.pick(2) % 4 == 0;
+            let inner: Vec<usize> = (1..=count)
+                .map(|part| self.switch_cell(&step.varied(part as u32), state, 0))
+                .collect();
+            let switch = self.switch_cell_over(&top_step, &inner, state, None, 0);
+            if !state && step.pick(3) % 2 == 0 {
+                self.push_stream(Definition::Steps(top(switch)), Scalar::Integer);
+            }
+        } else {
+            let mut inner: Vec<usize> = Vec::new();
+            for part in 1..=count {
+                let switch = self.switch_stream(&step.varied(part as u32), 0);
+                let scalar = self.scalar(switch);
+                inner.push(self.push_stream(Definition::Share(top(switch)), scalar));
+            }
+            let scalar = self.scalar(inner[0]);
+            inner.retain(|&shared| self.scalar(shared) == scalar);
+            if inner.len() < 2 {
+                inner.push(self.new_share(step.pick(4), scalar, 0));
+            }
+            self.switch_stream_over(&top_step, &inner, None, 0);
+        }
+    }
+
+    /// A loop through a switch's selection: a stream loop whose events
+    /// select, through a hold, the stream a `switch_stream` follows from the
+    /// next instant on, the switch's events closing the loop, which is
+    /// legal because the selection is read before the instant (finding
+    /// F14); or a cell loop that a snapshot reads to select for a
+    /// `switch_cell`, which closes it, or for a `switch_stream`, a hold of
+    /// whose events closes it.
+    fn switch_loop(&mut self, step: &Step) {
+        match step.pick(0) % 3 {
+            0 => {
+                let forward = self.declare_stream_loop();
+                let closing = bit(forward);
+                let candidates = if step.pick(1) % 2 == 0 {
+                    let ticks = self.stream_avoiding(step.pick(2), None, closing);
+                    let ticks = self.shared(ticks);
+                    self.echo_streams(step, ticks)
+                } else {
+                    self.stream_candidates(step, Some(Scalar::Integer), closing)
+                };
+                let out = self.push_stream(Definition::Share(top(forward)), Scalar::Integer);
+                let selector = if step.pick(3) % 2 == 0 {
+                    out
+                } else {
+                    self.adapter(Kind::Map, step, out)
+                };
+                let switch = self.switch_stream_over(step, &candidates, Some(selector), closing);
+                self.close(forward, switch);
+            }
+            1 => {
+                let forward = self.declare_cell_loop(Scalar::Integer, false);
+                let closing = bit(forward);
+                let candidates = self.cell_candidates(step, false, closing);
+                let ticks = self.stream_avoiding(step.pick(2), None, closing);
+                let selector = self.push_stream(
+                    Definition::Snapshot {
+                        function: step.binary(),
+                        source: top(ticks),
+                        cell: top(forward),
+                    },
+                    Scalar::Integer,
+                );
+                let switch =
+                    self.switch_cell_over(step, &candidates, false, Some(selector), closing);
+                self.close(forward, switch);
+            }
+            _ => {
+                let forward = self.declare_cell_loop(Scalar::Integer, false);
+                let closing = bit(forward);
+                let candidates = self.stream_candidates(step, Some(Scalar::Integer), closing);
+                let ticks = self.stream_avoiding(step.pick(2), None, closing);
+                let selector = self.push_stream(
+                    Definition::Snapshot {
+                        function: step.binary(),
+                        source: top(ticks),
+                        cell: top(forward),
+                    },
+                    Scalar::Integer,
+                );
+                let switch = self.switch_stream_over(step, &candidates, Some(selector), closing);
+                let held = self.push_cell(
+                    Definition::Hold {
+                        initial: literal(step.literal),
+                        source: top(switch),
+                    },
+                    Scalar::Integer,
+                    false,
+                );
+                self.close(forward, held);
+            }
+        }
+    }
+
     /// The nodes that can be observed: every cell, every shared stream, and
     /// every linear stream nothing consumed.
     fn observable(&self) -> Vec<usize> {
@@ -1839,7 +2471,7 @@ impl Draft {
                 Slot::Stream {
                     shared, consumed, ..
                 } => shared || !consumed,
-                Slot::Lists | Slot::Closed => false,
+                Slot::Lists | Slot::Tokens | Slot::Outer | Slot::Closed => false,
             })
             .collect()
     }
@@ -2025,7 +2657,7 @@ pub fn well_founded(program: &Program) -> bool {
                 definition: Reference::TopLevel(node),
             } if *node < n && *forward < n => next[*node].push(*forward),
             _ => {
-                for node in dependencies(definition) {
+                for node in dependencies(&program.definitions, definition) {
                     if node < n {
                         next[node].push(index);
                     }
@@ -2331,6 +2963,33 @@ pub fn references(definition: &Definition) -> Vec<usize> {
             add(&Reference::TopLevel(*forward));
             add(definition);
         }
+        Definition::PickStream {
+            index,
+            streams: listed,
+            source,
+        }
+        | Definition::PickCell {
+            index,
+            cells: listed,
+            source,
+        } => {
+            listed.iter().for_each(&mut add);
+            add(source);
+            expressions.push(index);
+        }
+        Definition::HoldStream { initial, source } | Definition::HoldCell { initial, source } => {
+            add(initial);
+            add(source);
+        }
+        Definition::MapPickCell { index, cells, cell } => {
+            cells.iter().for_each(&mut add);
+            add(cell);
+            expressions.push(index);
+        }
+        Definition::ConstantStream(token)
+        | Definition::ConstantCell(token)
+        | Definition::SwitchStream(token)
+        | Definition::SwitchCell(token) => add(token),
         _ => {}
     }
     for expression in expressions {
@@ -2474,6 +3133,41 @@ fn rename(definition: &Definition, map: &dyn Fn(usize) -> usize) -> Definition {
             forward: map(*forward),
             definition: r(definition),
         },
+        Definition::PickStream {
+            index,
+            streams,
+            source,
+        } => Definition::PickStream {
+            index: e(index),
+            streams: streams.iter().map(r).collect(),
+            source: r(source),
+        },
+        Definition::PickCell {
+            index,
+            cells,
+            source,
+        } => Definition::PickCell {
+            index: e(index),
+            cells: cells.iter().map(r).collect(),
+            source: r(source),
+        },
+        Definition::HoldStream { initial, source } => Definition::HoldStream {
+            initial: r(initial),
+            source: r(source),
+        },
+        Definition::HoldCell { initial, source } => Definition::HoldCell {
+            initial: r(initial),
+            source: r(source),
+        },
+        Definition::ConstantStream(stream) => Definition::ConstantStream(r(stream)),
+        Definition::ConstantCell(cell) => Definition::ConstantCell(r(cell)),
+        Definition::MapPickCell { index, cells, cell } => Definition::MapPickCell {
+            index: e(index),
+            cells: cells.iter().map(r).collect(),
+            cell: r(cell),
+        },
+        Definition::SwitchStream(outer) => Definition::SwitchStream(r(outer)),
+        Definition::SwitchCell(outer) => Definition::SwitchCell(r(outer)),
         other => other.clone(),
     }
 }
@@ -2622,6 +3316,9 @@ fn same_type(a: NodeType, b: NodeType) -> bool {
     match (a, b) {
         (NodeType::Stream(a), NodeType::Stream(b)) => a == b,
         (NodeType::Cell { value: a, .. }, NodeType::Cell { value: b, .. }) => a == b,
+        (NodeType::Tokens(a), NodeType::Tokens(b)) | (NodeType::Outer(a), NodeType::Outer(b)) => {
+            a == b
+        }
         _ => false,
     }
 }
@@ -2683,6 +3380,9 @@ fn expressions_mut(definition: &mut Definition) -> Vec<&mut Expression> {
         Definition::MapList {
             length, element, ..
         } => vec![length, element],
+        Definition::PickStream { index, .. }
+        | Definition::PickCell { index, .. }
+        | Definition::MapPickCell { index, .. } => vec![index],
         _ => Vec::new(),
     }
 }

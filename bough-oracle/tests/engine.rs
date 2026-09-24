@@ -11,15 +11,15 @@
 //! nodes, against the oracle's times; and every sample after a transaction.
 //!
 //! The random programs come from `bough_oracle::programs()`, in four tests
-//! that run in parallel. Most have loops, cell, state and stream loops, and
-//! child transactions, and some loops run through children; one in seven
-//! is a program of stages 1 and 2 alone. Each shard prints what its
-//! programs held and how many observed nodes had events in child
-//! transactions. `PROPTEST_CASES` sets how many programs in all, 1024
-//! unless set; `PROPTEST_RNG_SEED` fixes the seed, which a failure prints.
-//! A failing program is shrunk by proptest, then by `bough_oracle::reduce`
-//! to a program that fails the same way, and reported with its schedule and
-//! every observed node, the engine beside the oracle.
+//! that run in parallel. Most have loops, cell, state and stream loops,
+//! child transactions and switches, and some loops run through children or
+//! through a switch's selection; one in seven is a program of stages 1 and
+//! 2 alone. Each shard prints what its programs held and how many observed
+//! nodes had events in child transactions. `PROPTEST_CASES` sets how many
+//! programs in all, 1024 unless set; `PROPTEST_RNG_SEED` fixes the seed,
+//! which a failure prints. A failing program is shrunk by proptest, then by
+//! `bough_oracle::reduce` to a program that fails the same way, and reported
+//! with its schedule and every observed node, the engine beside the oracle.
 //!
 //! The fixed programs are the shapes RFD 1 asks for: counters, a loop
 //! capped by its own value, two loops that read each other, the
@@ -2405,7 +2405,7 @@ fn the_comparison_reads_child_times_into_their_external_transaction() {
     );
 }
 
-/// What kinds of loop and child transaction a program has.
+/// What kinds of loop, child transaction and switch a program has.
 #[derive(Clone, Copy, Debug, Default)]
 struct Census {
     loops: bool,
@@ -2418,13 +2418,76 @@ struct Census {
     children_in_loops: bool,
     /// A split or a defer, or a loop.
     loops_or_children: bool,
+    switch_streams: bool,
+    switch_cells: bool,
+    /// A switch_cell over States.
+    switch_states: bool,
+    /// A switch that may select a switch, or a share of one.
+    nested_switches: bool,
+    /// A pick whose selector is a defer or a split.
+    selectors_in_children: bool,
+    /// A loop closed with a switch, or with a hold of a switch_stream's
+    /// events: the generator's loops through a switch's selection, and any
+    /// other loop a switch closes.
+    loops_closed_with_switches: bool,
 }
 
 fn census(program: &Program) -> Census {
     let types = check(program).expect("a generated program passes check");
     let mut census = Census::default();
+    let definition = |reference: &Reference| match reference {
+        TopLevel(node) => program.definitions.get(*node),
+        Reference::Local(_) => None,
+    };
+    let is_switch = |reference: &Reference| match definition(reference) {
+        Some(Definition::SwitchCell(_) | Definition::SwitchStream(_)) => true,
+        Some(Share(source)) => {
+            matches!(definition(source), Some(Definition::SwitchStream(_)))
+        }
+        _ => false,
+    };
     for (node, definition) in program.definitions.iter().enumerate() {
         match definition {
+            Definition::SwitchStream(TopLevel(outer)) | Definition::SwitchCell(TopLevel(outer)) => {
+                if matches!(definition, Definition::SwitchStream(_)) {
+                    census.switch_streams = true;
+                } else {
+                    census.switch_cells = true;
+                    census.switch_states |= matches!(
+                        types[node],
+                        bough_oracle::NodeType::Cell { state: true, .. }
+                    );
+                }
+                census.nested_switches |=
+                    bough_oracle::switch_candidates(&program.definitions, *outer)
+                        .iter()
+                        .any(is_switch);
+            }
+            Close {
+                definition: TopLevel(closing),
+                ..
+            } => {
+                census.loops_closed_with_switches |= match program.definitions.get(*closing) {
+                    Some(Definition::SwitchStream(_) | Definition::SwitchCell(_)) => true,
+                    Some(Hold {
+                        source: TopLevel(held),
+                        ..
+                    }) => matches!(
+                        program.definitions.get(*held),
+                        Some(Definition::SwitchStream(_))
+                    ),
+                    _ => false,
+                };
+            }
+            Definition::PickStream { source, .. } | Definition::PickCell { source, .. } => {
+                census.selectors_in_children |= matches!(
+                    program.definitions.get(match source {
+                        TopLevel(node) => *node,
+                        Reference::Local(_) => usize::MAX,
+                    }),
+                    Some(Definition::Defer(_) | Definition::Split(_))
+                );
+            }
             Definition::CellLoop(_) => {
                 census.cell_loops = true;
                 census.state_loops |= matches!(
@@ -2448,8 +2511,8 @@ fn census(program: &Program) -> Census {
 
 /// Every generated program passes the builder's check and is well founded,
 /// and across a few hundred of them every definition kind of the subset
-/// occurs and every materialized kind is observed. Loops and child
-/// transactions are in most programs.
+/// occurs and every materialized kind is observed. Loops, child
+/// transactions and switches are in most programs.
 #[test]
 fn the_generator_makes_well_formed_programs_with_every_kind() {
     let mut runner = TestRunner::new(Config {
@@ -2460,7 +2523,7 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
     let mut defined = std::collections::BTreeSet::new();
     let mut observed = std::collections::BTreeSet::new();
     let (mut shared_diamonds, mut lifts, mut sizes, mut watched) = (0, 0, Vec::new(), 0);
-    let mut counts = [0_usize; 8];
+    let mut counts = [0_usize; 14];
     const PROGRAMS: usize = 400;
     for _ in 0..PROGRAMS {
         let program = strategy.new_tree(&mut runner).unwrap().current();
@@ -2503,6 +2566,12 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
             c.defers,
             c.children_in_loops,
             c.loops_or_children,
+            c.switch_streams,
+            c.switch_cells,
+            c.switch_states,
+            c.nested_switches,
+            c.selectors_in_children,
+            c.loops_closed_with_switches,
         ]) {
             *count += usize::from(has);
         }
@@ -2538,6 +2607,15 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "MapList",
         "Split",
         "Defer",
+        "PickStream",
+        "PickCell",
+        "HoldStream",
+        "HoldCell",
+        "ConstantStream",
+        "ConstantCell",
+        "MapPickCell",
+        "SwitchStream",
+        "SwitchCell",
     ];
     for kind in every {
         assert!(defined.contains(kind), "no {kind} in {PROGRAMS} programs");
@@ -2564,6 +2642,8 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "StreamLoop",
         "Split",
         "Defer",
+        "SwitchStream",
+        "SwitchCell",
     ] {
         assert!(
             observed.contains(kind),
@@ -2586,13 +2666,21 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         defers,
         guarded,
         either,
+        switch_streams,
+        switch_cells,
+        switch_states,
+        nested,
+        selectors_in_children,
+        loops_closed_with_switches,
     ] = counts;
     let mean = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
     eprintln!(
         "{PROGRAMS} programs, {mean:.1} definitions and {:.1} observed nodes on average, \
          {shared_diamonds} shares read twice or more; with loops {:.0}% (cell {:.0}%, state \
          {:.0}%, stream {:.0}%), splits {:.0}%, defers {:.0}%, a loop through children {:.0}%, \
-         a loop or children {:.0}%",
+         a loop or children {:.0}%; switch_streams {:.0}%, switch_cells {:.0}% (over States \
+         {:.0}%), nested switches {:.0}%, a selector in child instants {:.0}%, a loop closed \
+         with a switch {:.0}%",
         watched as f64 / PROGRAMS as f64,
         percent(loops),
         percent(cell_loops),
@@ -2602,6 +2690,26 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         percent(defers),
         percent(guarded),
         percent(either),
+        percent(switch_streams),
+        percent(switch_cells),
+        percent(switch_states),
+        percent(nested),
+        percent(selectors_in_children),
+        percent(loops_closed_with_switches),
+    );
+    // Switches of every kind are in many programs.
+    assert!(
+        percent(switch_streams) > 30.0 && percent(switch_cells) > 30.0,
+        "switch_streams in {switch_streams}, switch_cells in {switch_cells}"
+    );
+    assert!(
+        percent(switch_states) > 10.0
+            && percent(nested) > 10.0
+            && percent(selectors_in_children) > 10.0
+            && percent(loops_closed_with_switches) > 10.0,
+        "switch_cells over States in {switch_states}, nested switches in {nested}, selectors \
+         in child instants in {selectors_in_children}, loops closed with switches in \
+         {loops_closed_with_switches}"
     );
     // Loops and children are in most programs, and the first-order and
     // cell programs of stages 1 and 2 stay in the mix.
@@ -2620,7 +2728,8 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
 /// The reducer keeps what a failure needs and drops the rest, and every
 /// program it keeps passes the builder's check and, as the one it started
 /// from is, is well founded. The failure here is made up: an observed
-/// merge. The program found has loops, which the reducer cuts open.
+/// merge. The program found has loops, which the reducer cuts open, and
+/// switches, which it cuts away.
 #[test]
 fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
     let mut runner = TestRunner::new(Config {
@@ -2634,17 +2743,19 @@ fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
             .iter()
             .any(|&node| matches!(program.definitions[node], Merge { .. }))
     };
+    let has =
+        |program: &Program, kind: fn(&Definition) -> bool| program.definitions.iter().any(kind);
     let program = (0..1000)
         .map(|_| strategy.new_tree(&mut runner).unwrap().current())
-        .find(|program| observes_a_merge(program) && program.definitions.len() > 20)
-        .expect("a big program that observes a merge");
-    assert!(
-        program
-            .definitions
-            .iter()
-            .any(|definition| matches!(definition, CellLoop(_) | StreamLoop(_))),
-        "{program:?}"
-    );
+        .find(|program| {
+            observes_a_merge(program)
+                && program.definitions.len() > 20
+                && has(program, |d| matches!(d, CellLoop(_) | StreamLoop(_)))
+                && has(program, |d| {
+                    matches!(d, Definition::SwitchCell(_) | Definition::SwitchStream(_))
+                })
+        })
+        .expect("a big program with loops and switches that observes a merge");
     let reduced = reduce(&program, |candidate| {
         assert!(check(candidate).is_ok(), "{candidate:?}");
         assert!(bough_oracle::well_founded(candidate), "{candidate:?}");
