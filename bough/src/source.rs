@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 
 use crate::Build;
 use crate::cell::CellRef;
-use crate::engine::nodes::cell::HoldNode;
+use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
 use crate::engine::nodes::stream::{ChainNode, MergeNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
@@ -191,13 +191,26 @@ pub trait Source: Sized + 'static + sealed::Sealed {
 
     /// Sodium's `accum`: `hold initial (snapshot f self cell)`, with `f`
     /// reading the state by reference and returning the new state.
+    ///
+    /// The cell being snapshotted is the result itself, so `f` reads the
+    /// accumulator's value from before the instant, as every reader in the
+    /// transaction does.
     fn accumulate<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> Cell<S>
     where
         M: Mode + Accepts<Self> + Accepts<S> + Accepts<F>,
         S: Trace + 'static,
         F: Fn(Self::Event, &S) -> S + 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Cell(<M as Accepts<S>>::erase(Erase::Cell(initial)));
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<F>>::erase(Erase::Value(f)),
+        ]);
+        let ops = &<AccumulateNode<Self, S, F> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::Hold, data, parts, ops, &[dependency], COMMITS);
+        build.set_reach(n, cells);
+        Cell::from_token(build.token(n))
     }
 
     /// In-place accumulation: `f` mutates the state at commit, after every
@@ -215,12 +228,28 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         F: FnMut(Self::Event, &mut S) + 'static,
         Self::Event: 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::InPlace {
+            state: <M as Accepts<S>>::erase(Erase::Value(initial)),
+            pending: <M as Accepts<Self::Event>>::erase(Erase::Slot),
+        };
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<F>>::erase(Erase::Value(f)),
+        ]);
+        let ops = &<InPlaceNode<Self, S, F> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::InPlace, data, parts, ops, &[dependency], COMMITS);
+        build.set_reach(n, cells);
+        State::from_token(build.token(n))
     }
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output
     /// per event. The output goes in the node's slot, so the mode must
     /// accept its type.
+    ///
+    /// The state is private to the node and is updated when the node runs,
+    /// at most once per transaction, so `f` always reads the state from
+    /// before the instant, as the semantics' snapshot of a hold would.
     fn scan<M, S, B, F>(self, build: &mut Build<M>, initial: S, f: F) -> Stream<B>
     where
         M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<B>,
@@ -228,7 +257,17 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         B: 'static,
         F: Fn(Self::Event, &S) -> (B, S) + 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Slot(<M as Accepts<B>>::erase(Erase::Slot));
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<F>>::erase(Erase::Value(f)),
+            <M as Accepts<S>>::erase(Erase::Value(initial)),
+        ]);
+        let ops = &<ScanNode<Self, S, B, F> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
+        build.set_reach(n, cells);
+        Stream::from_token(build.token(n))
     }
 
     /// Explicit fan-out: a stream with any number of consumers, each of which

@@ -19,7 +19,7 @@ use crate::token::{Cell, State, Stream, TokenRef};
 /// Sealed: `Cell` and `State` are its only implementors, as the five token
 /// types are the only [`TokenRef`]s.
 ///
-/// ```no_run
+/// ```
 /// use bough::{Graph, Source};
 ///
 /// let (mut graph, (joins_in, members)) = Graph::build(|b| {

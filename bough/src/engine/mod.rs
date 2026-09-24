@@ -392,6 +392,25 @@ pub(crate) fn in_place<M: Mode, S: 'static>(d: &Data<M>) -> &S {
     }
 }
 
+/// An in-place accumulator's state and its pending event, both mutable.
+pub(crate) fn in_place_mut<M: Mode, S: 'static, E: 'static>(
+    d: &mut Data<M>,
+) -> (&mut S, &mut Option<E>) {
+    match d {
+        Data::InPlace { state, pending } => (
+            state
+                .get_mut()
+                .downcast_mut::<S>()
+                .expect("bough engine: state type"),
+            pending
+                .get_mut()
+                .downcast_mut::<Option<E>>()
+                .expect("bough engine: pending event type"),
+        ),
+        _ => panic!("bough engine: not an in-place accumulator"),
+    }
+}
+
 pub(crate) fn memo<M: Mode, A: 'static>(d: &Data<M>) -> &Memo<A> {
     match d {
         Data::ReadThrough { memo, .. } => memo
