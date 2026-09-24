@@ -25,10 +25,11 @@
 //! acyclic. Stage 4 adds child transactions: `split` emits the elements of
 //! an event in the children of its transaction, and `defer` the event in
 //! its first child, and the children run depth first before `send`
-//! returns. Every other operation still has a `todo!()` body. The examples
-//! in the documentation that call only working operations run, the rest
-//! compile, and the guarantees the RFDs make are fixed by `compile_fail`
-//! doc tests.
+//! returns. Stage 5 adds `switch_cell`, over cells and over states, which
+//! follows the inner its outer selects and moves at commit. Every other
+//! operation still has a `todo!()` body. The examples in the documentation
+//! that call only working operations run, the rest compile, and the
+//! guarantees the RFDs make are fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!

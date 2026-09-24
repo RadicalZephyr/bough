@@ -8,6 +8,7 @@ pub(crate) mod cell;
 pub(crate) mod read;
 pub(crate) mod split;
 pub(crate) mod stream;
+pub(crate) mod switch;
 
 /// The phantom every node marker carries: `Send`, `Sync` and `'static`
 /// whatever its type parameters are.

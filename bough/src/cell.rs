@@ -269,8 +269,83 @@ impl<A: 'static> Cell<Cell<A>> {
     /// read through on read. Its one piece of state is the inner it depends
     /// on, relinked at commit whenever the outer steps; it steps at creation
     /// and at every switch instant, even when the new inner is quiet.
+    ///
+    /// Its value is the selected inner's value, and it steps whenever the
+    /// current inner steps. At a switch instant the value it steps to is the
+    /// new inner's value after that instant, so a [`steps`](Cell::steps)
+    /// view there runs the new inner, and what it reads, at that instant,
+    /// before the instant's order would have. A switch built in the build
+    /// closure steps in transaction zero, where its steps view fires with
+    /// the value it starts with; one built later starts from the inner its
+    /// outer holds at that instant.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (english_in, choose_in, shown)) = Graph::build(|b| {
+    ///     let (english, english_in) = b.input_cell("hello".to_string());
+    ///     let french = b.constant("bonjour".to_string());
+    ///     let (choose, choose_in) = b.input::<bool>();
+    ///     let language = choose
+    ///         .map(move |fr| if fr { french } else { english })
+    ///         .hold(b, english);
+    ///     (english_in, choose_in, language.switch_cell(b))
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen_steps(shown, move |s| log.borrow_mut().push(s.clone())).keep();
+    /// graph.send(english_in, "hi".to_string()); // the current inner steps
+    /// graph.send(choose_in, true); // a switch to a quiet inner is a step
+    /// graph.send(english_in, "hey".to_string()); // deselected: no step
+    /// assert_eq!(*seen.borrow(), ["hi", "bonjour"]);
+    /// assert_eq!(graph.sample(shown), "bonjour");
+    /// ```
+    ///
+    /// The outer and the current inner are dependencies: a loop closed
+    /// through either at the same instant is refused, and so is a switch to
+    /// a cell that depends on the switch itself. The switch links the inner
+    /// its outer selects at its first evaluation, at the end of the
+    /// transaction that creates it, so its outer may be a loop that is not
+    /// closed yet. Its first link and every move to another inner check
+    /// that no cycle forms, and one that does is a panic that poisons the
+    /// graph, naming the cycle's nodes.
     pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> Cell<A> {
-        todo!()
+        Cell::from_token(build.switch_cell_node::<Cell<A>>(self.token))
+    }
+}
+
+impl<A: 'static> Cell<State<A>> {
+    /// [`switch_cell`](Cell::switch_cell) over states: the state the outer
+    /// cell currently selects. The result is a [`State`] too, with no
+    /// stream view, since the selected state's new value does not exist
+    /// until commit; its listeners on [`Graph`](crate::Graph) run on every
+    /// step, and every cell reader accepts it.
+    ///
+    /// ```
+    /// use bough::{Graph, Source, State};
+    ///
+    /// let (mut graph, (names_in, pick_in, current)) = Graph::build(|b| {
+    ///     let (names, names_in) = b.input::<String>();
+    ///     let names = names.share(b);
+    ///     let all = names.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
+    ///     let short = names
+    ///         .filter(|n| n.len() < 4)
+    ///         .accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
+    ///     let (pick, pick_in) = b.input::<bool>();
+    ///     let chosen = pick.map(move |s| if s { short } else { all }).hold(b, all);
+    ///     let current: State<Vec<String>> = chosen.switch_cell(b);
+    ///     (names_in, pick_in, current)
+    /// });
+    /// graph.send(names_in, "ada".to_string());
+    /// graph.send(names_in, "grace".to_string());
+    /// graph.send(pick_in, true);
+    /// assert_eq!(*graph.sample(current), ["ada"]);
+    /// ```
+    pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> State<A> {
+        State::from_token(build.switch_cell_node::<State<A>>(self.token))
     }
 }
 

@@ -104,13 +104,29 @@ macro_rules! smoke_graph {
                 .split(b)
                 .accumulate(b, 0u32, |t, s| s + t);
             let stage4 = ([children, counted, zero], countdown);
+
+            // Stage 5: a switch_cell between an input cell and a constant,
+            // with a steps view, and a switch_cell over states.
+            let picked = n
+                .map(move |v| if v % 2 == 0 { level } else { three })
+                .hold(b, level);
+            let switched = picked.switch_cell(b);
+            let switched_steps = switched.steps(b).hold(b, 0u32);
+            let logs = n
+                .map(move |v| if v % 2 == 0 { log } else { entries })
+                .hold(b, log);
+            let chosen_log = logs.switch_cell(b);
+            let chosen_length = chosen_log.map_cell(b, |l| l.len() as u32);
+            let stage5 = ([switched, switched_steps], chosen_log, chosen_length);
             (
                 (n_in, words_in, level_in, digits_in),
                 (total, words, out, merged),
-                (stage2, stage3, stage4),
+                (stage2, stage3, stage4, stage5),
             )
         });
-        let (stage2, (ticks, tick_steps, running, entry_count), (stage4, countdown)) = later;
+        let (stage2, (ticks, tick_steps, running, entry_count), (stage4, countdown), stage5) =
+            later;
+        let (switches, chosen_log, chosen_length) = stage5;
         let (
             (scaled, pair, six, count, labels),
             (pair_steps, current, seen, gated),
@@ -127,6 +143,7 @@ macro_rules! smoke_graph {
             "transaction zero's children ran"
         );
         graph.listen(countdown, |_| ()).keep();
+        graph.listen_steps(chosen_log, |_| ()).keep();
         graph.listen_cell(mixed, |_| ()).keep();
         graph.listen_steps(log, |_| ()).keep();
         let _ = graph.try_listen_cell(length, |_| ());
@@ -165,7 +182,9 @@ macro_rules! smoke_graph {
             .sum::<u32>()
             + *graph.sample(entry_count);
         let children = stage4.iter().map(|c| *graph.sample(*c)).sum::<u32>();
-        stage1 + cells + states + loops + children
+        let switches =
+            switches.iter().map(|c| *graph.sample(*c)).sum::<u32>() + *graph.sample(chosen_length);
+        stage1 + cells + states + loops + children + switches
     }};
 }
 

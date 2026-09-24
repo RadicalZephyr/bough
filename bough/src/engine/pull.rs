@@ -10,8 +10,9 @@ use crate::mode::Mode;
 impl<M: Mode> Build<M> {
     /// Makes sure `x` has run at this instant, running its dependencies
     /// first. The fallback for the two dynamic cases, a read of a node the
-    /// order has not reached yet (stage 5) and nodes created during this
-    /// transaction; the evaluation loop never calls it. A node in the order
+    /// order has not reached yet (a switch_cell's new inner, read after the
+    /// instant) and nodes created during this transaction; the evaluation
+    /// loop never calls it. A node in the order
     /// is found by marking's `pos` and the loop's cursor, and a pulled entry
     /// becomes node 0 so the loop skips it without a check. A node created
     /// during this transaction carries two stamps of its own.
@@ -71,7 +72,9 @@ impl<M: Mode> Build<M> {
     /// The value before the instant, the semantics' `at c t`. Committed
     /// values change only at commit, so every read during a transaction
     /// sees this. A cell loop's forward reads through to its definition,
-    /// and has no value before it is closed. Stage 5 adds the switch arm.
+    /// and has no value before it is closed. A switch_cell's is `at (at c
+    /// t) t`: two chases through its outer and no memo; it never reads its
+    /// own link, which exists for marking.
     pub(crate) fn value<A: 'static>(&self, i: u32) -> &A {
         let data = &self.store.data[i as usize];
         match self.store.hot[i as usize].kind {
@@ -81,6 +84,11 @@ impl<M: Mode> Build<M> {
                 .downcast_ref::<A>()
                 .expect("bough engine: cell type"),
             Kind::Loop => self.value::<A>(self.loop_target(i)),
+            Kind::SwitchCell => {
+                let outer = self.store.relations[i as usize].deps[0];
+                let inner = (self.store.ops[i as usize].inner)(self, outer, false);
+                self.value::<A>(self.check(inner))
+            }
             k => panic!("bough engine: node {i} ({k:?}) is not a cell"),
         }
     }
@@ -126,8 +134,16 @@ impl<M: Mode> Build<M> {
                     let target = self.loop_target(x);
                     self.prepare(target);
                 }
+                // The value after the instant is the value after it of the
+                // inner the outer holds after it: at a switch instant the
+                // new inner, which is not a dependency and may not have run
+                // yet. Preparing it runs it by memoized pull: the one read
+                // of the future.
                 Kind::SwitchCell => {
-                    todo!("stage 5: prepare the outer and the inner it selects after the instant")
+                    let outer = self.store.relations[x as usize].deps[0];
+                    self.prepare(outer);
+                    let inner = self.selected_after(x);
+                    self.prepare(inner);
                 }
                 // A stateful cell's value after the instant is the pending
                 // value its evaluation wrote. An in-place accumulator's is
@@ -164,7 +180,11 @@ impl<M: Mode> Build<M> {
             // Whether or not the loop stepped: its definition's value after
             // the instant is the definition's own value when it did not.
             Kind::Loop => self.post::<A>(self.loop_target(x)),
-            Kind::SwitchCell => todo!("stage 5: the value after the instant of the selected inner"),
+            // `normalize` and `chopBack` in the semantics: at a switch
+            // instant only the new inner counts. When the switch did not
+            // step, neither did its outer, whose value after the instant is
+            // then its value, the current inner, which did not step either.
+            Kind::SwitchCell => self.post::<A>(self.selected_after(x)),
             k => panic!("bough engine: node {x} ({k:?}) is not a cell"),
         }
     }
@@ -175,11 +195,11 @@ mod tests {
     use crate::build::Build;
     use crate::mode::Local;
 
-    /// The re-entry stamp. A cycle through reads after the instant cannot
-    /// be built in stage 2, since every node is created after its
-    /// dependencies; stage 5's switches can close one. So the cycle is
-    /// linked by hand, in an instant where neither cell is marked or new,
-    /// so that no pull runs and only `prepare` recurses.
+    /// The re-entry stamp, alone. Graph code closes a cycle through reads
+    /// after the instant only through a switch_cell (R10, in the switch
+    /// tests), where pull runs too. Here the cycle is linked by hand, in an
+    /// instant where neither cell is marked or new, so that no pull runs
+    /// and only `prepare` recurses.
     #[test]
     #[should_panic(expected = "a same-instant cycle through a read after the instant")]
     fn preparing_a_cell_again_while_it_is_being_prepared_panics() {

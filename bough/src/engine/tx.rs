@@ -308,7 +308,7 @@ impl<M: Mode> Build<M> {
                     self.set_fired(n);
                 }
             }
-            Kind::SwitchCell => todo!("stage 5: a switch_cell settles and links its inner"),
+            Kind::SwitchCell => self.settle_switch_cell(n),
             Kind::Stream | Kind::Hold | Kind::InPlace | Kind::SwitchStream | Kind::SplitCapture => {
                 // The program leaves the arena while it runs, so it can be
                 // handed the whole build context; its data stays behind.
@@ -338,18 +338,34 @@ impl<M: Mode> Build<M> {
                 (store.ops[n as usize].settle_memo)(&mut store.data[n as usize]);
             }
         }
+        self.relink();
+    }
+
+    /// Moves every queued switch to the inner its outer holds after commit,
+    /// reading the committed values, so after holds and memos. Two passes,
+    /// so that the outcome does not depend on the order the switches were
+    /// queued in, which the shuffle moves: every switch moves first, and
+    /// then each move is checked on the graph they made together. A check
+    /// after each move could see a cycle through an edge that a later move
+    /// of the same instant removes.
+    fn relink(&mut self) {
+        let mut moved = 0;
         let mut k = 0;
         while k < self.s.relinks.len() {
             let n = self.s.relinks[k];
-            self.relink(n);
+            if self.move_inner(n) {
+                self.s.relinks[moved] = n;
+                moved += 1;
+            }
             k += 1;
         }
-    }
-
-    /// Moves a switch to the inner its outer holds after commit.
-    fn relink(&mut self, n: u32) {
-        count!(self.s, relinks);
-        todo!("stage 5: relink switch {n}")
+        self.s.relinks.truncate(moved);
+        let mut k = 0;
+        while k < self.s.relinks.len() {
+            let n = self.s.relinks[k];
+            self.check_moved(n);
+            k += 1;
+        }
     }
 
     /// Listeners in evaluation order, after commit, with no graph access.

@@ -44,7 +44,7 @@ pub(crate) enum Walk {
     /// from the forward.
     Dependents,
     /// From a node to the nodes it depends on: at a switch's first link
-    /// and at relink, upstream from the new inner (stage 5).
+    /// and at relink, upstream from the new inner.
     Dependencies,
 }
 
@@ -178,6 +178,26 @@ impl<M: Mode> Build<M> {
                 "bough: closing this loop makes a same-instant cycle: {cycle}. A definition \
                  may reach its own forward token only through a read of a cell's value \
                  (snapshot, gate, sample), a switch_stream's selection, or a split or defer"
+            );
+        }
+    }
+
+    /// A switch depends on `inner` from now on: at its first evaluation, or
+    /// after a relink moved it there. Panics, naming the cycle's nodes in
+    /// the direction values flow, if `inner` already depends on the switch.
+    /// The walk goes upstream from the new inner, usually a small region,
+    /// since downstream of a switch is often the rest of the program.
+    pub(crate) fn refuse_switch_cycle(&mut self, inner: u32, switch: u32) {
+        if let Some(path) = self.path(inner, switch, Walk::Dependencies) {
+            let cycle = Cycle(
+                path.iter()
+                    .rev()
+                    .map(|&n| (n, self.store.hot[n as usize].kind))
+                    .collect(),
+            );
+            panic!(
+                "bough: switching closes a same-instant cycle: {cycle}. The cell a switch \
+                 selects may not depend on the switch at the same instant"
             );
         }
     }

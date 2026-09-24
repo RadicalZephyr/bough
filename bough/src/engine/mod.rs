@@ -73,9 +73,8 @@ pub(crate) const START: u32 = u32::MAX;
 
 /// What a node is, which decides how the evaluation loop, `value`,
 /// `prepare`, `post` and commit treat it. Stage 1 creates the first six,
-/// stage 2 the next two, stage 3 `Loop` and stage 4 the split pair; the
-/// switches are here so that the evaluation loop and the data plane need no
-/// rewrite later.
+/// stage 2 the next two, stage 3 `Loop`, stage 4 the split pair and stage 5
+/// the switches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Index 0.
@@ -106,7 +105,10 @@ pub(crate) enum Kind {
     /// The output side of `split` and `defer`: no dependencies; started by
     /// the child scheduler in a child instant, like an input by a send.
     SplitOutput,
-    /// `switch_cell`: settled in order, relinked at commit.
+    /// `switch_cell`: depends on its outer and on the inner the outer
+    /// selected before the instant, linked at its first evaluation; settled
+    /// in order without user code, read through on read, relinked at
+    /// commit.
     SwitchCell,
     /// `switch_stream`: reads its current inner; its outer is reach plus a
     /// watcher.

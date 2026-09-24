@@ -36,6 +36,14 @@ fn the_smoke_graph_runs_in_every_mode() {
     // at [3,0], then 3 at [3,1]; the countdown fires 2 at [3] and 1 at
     // [3,0], so `counted` = 1 + 2 + 1. So 3 + 4 + 6 = 13.
     //
-    // Each mode gives 26 + 241 + 9 + 13, and the host has both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13));
+    // Stage 5. Build: the switch links `level` and steps at its creation,
+    // so its steps view carries 1 into `switched_steps`; the state switch
+    // links the log. n = 1, odd: the switch moves to the constant, a quiet
+    // inner, and steps to 3; the state switch moves to the entries, [10].
+    // The transaction steps `level`, which is deselected. n = 2, even: the
+    // switch moves back to `level`, 2, and the state switch to the log,
+    // [1, 2]. So 2 + 2 + 2 = 6.
+    //
+    // Each mode gives 26 + 241 + 9 + 13 + 6, and the host has both modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 6));
 }
