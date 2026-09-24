@@ -123,9 +123,9 @@ mod program;
 
 pub use answer::{Answer, Datum, MalformedAnswer, Observation};
 pub use build::{
-    BuildError, Call, Chain, EngineMode, EngineObservation, EngineRun, Held, ListFn, Listened,
-    MAX_FUSED, NodeType, PickFn, Refusal, RunOptions, Scalar, check, evaluate, name, refusal, run,
-    switch_candidates,
+    BuildError, Call, Chain, ConstructFn, EngineMode, EngineObservation, EngineRun, Held, ListFn,
+    Listened, MAX_FUSED, NodeType, PickFn, Refusal, RunOptions, Scalar, body_references, check,
+    evaluate, name, refusal, run, switch_candidates,
 };
 pub use compare::{
     Engine, Expected, Failure, Report, SwitchCount, SwitchWatch, Switching, check_program, compare,

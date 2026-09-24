@@ -54,18 +54,19 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use Definition::{
-    Accumulate, AccumulateMut, CellLoop, Close, Constant, Filter, Hold, HoldCell, HoldStream,
-    InputCell, Lift, Map, MapCell, MapList, Merge, Once, PickCell, PickStream, Share, Snapshot,
-    Steps, StepsWithCurrent, StreamLoop, SwitchCell, SwitchStream,
+    Accumulate, AccumulateMut, CellLoop, Close, Constant, ConstantStream, Construct, Filter, Hold,
+    HoldCell, HoldStream, InputCell, Lift, Map, MapCell, MapList, Merge, Once, PickCell,
+    PickStream, Share, Snapshot, Steps, StepsWithCurrent, StreamLoop, SwitchCell, SwitchStream,
 };
-use Expression::{Argument, ArgumentAt, Literal, SecondArgument};
+use Expression::{Argument, ArgumentAt, ConstructEvent, Literal, Sample, SecondArgument};
 use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
-    Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
-    Program, Reference, Refusal, RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window,
-    check, check_program, compare, expected, guard_element, guard_filter, guard_map, programs,
-    reduce, refusal, run, watch_switches, with_same_instant_cycle, with_switch_cycle,
+    Answer, Body, BodyResult, Definition, Engine, Expected, Expression, Held, Input, NodeType,
+    Observation, Oracle, Program, Reference, Refusal, RunOptions, Scalar, SwitchCount, Switching,
+    Type, Value, Window, check, check_program, compare, expected, guard_element, guard_filter,
+    guard_map, programs, reduce, refusal, run, watch_switches, with_same_instant_cycle,
+    with_switch_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -2435,19 +2436,14 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
     };
     assert_eq!(
         refused(
-            vec![
-                Definition::Input(0),
-                Definition::Construct {
-                    body: bough_oracle::Body {
-                        definitions: vec![],
-                        result: bough_oracle::BodyResult::Value(Literal(1)),
-                    },
-                    source: TopLevel(0),
-                },
-            ],
-            vec![1]
+            vec![Definition::Literal {
+                event_type: Type::Integer,
+                events: vec![(vec![1], Value::Integer(1))],
+            }],
+            vec![0]
         ),
-        "node 1 (Construct): Construct is outside the subset of stages 1 to 5"
+        "node 0 (Literal): Literal is outside the subset: the engine cannot build a stream of \
+         given events"
     );
     assert_eq!(
         refused(
@@ -2926,8 +2922,8 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
     }
 }
 
-/// What the engine cannot switch among without `construct`, or the oracle
-/// would refuse, the builder refuses before building, naming the node.
+/// What the engine cannot switch among, or the oracle would refuse, the
+/// builder refuses before building, naming the node.
 #[test]
 fn the_builder_refuses_switches_it_cannot_build() {
     let refused = |definitions: Vec<Definition>, observe: Vec<usize>| {
@@ -2960,8 +2956,8 @@ fn the_builder_refuses_switches_it_cannot_build() {
             ],
             vec![0]
         ),
-        "node 2 (PickStream): N 0 is a linear stream; a cell of linear streams needs construct \
-         (stage 6), so a switch here follows a Share"
+        "node 2 (PickStream): N 0 is a linear stream; a pick may select a stream many times, so \
+         a switch here follows a Share"
     );
     assert_eq!(
         refused(
@@ -3104,6 +3100,369 @@ fn the_builder_refuses_switches_it_cannot_build() {
         f49.starts_with("node 4 (Constant): a Sample reads ")
             && f49.ends_with("through a loop closed with itself"),
         "{f49}"
+    );
+}
+
+/// A construct's body as the builder takes it.
+fn body(definitions: Vec<Definition>, result: BodyResult) -> Body {
+    Body {
+        definitions,
+        result,
+    }
+}
+
+/// The builder builds constructs as a user writes them. The chain before a
+/// construct gets a node, and the construct is that node's `construct`,
+/// whose closure builds the body with the build context it is handed, at
+/// the event's instant, and emits a value or a token: here a value, a cell,
+/// a linear stream, a State, and a shared stream, which a switch_stream in
+/// the body takes from a constant of a linear stream it built. Holds of the
+/// tokens feed a switch each. The values are worked out by hand: each body
+/// runs at [2] and [4], where `go` fires, and what it builds over `x`,
+/// which fires then too, takes x's event there; a switch_cell steps at the
+/// move to the new inner's value after the instant, dropping the old one's
+/// step, and a switch_stream forwards its old inner at the move and the new
+/// one after it.
+#[test]
+fn the_builder_builds_constructs_as_a_user_writes_them() {
+    let constructs = Program {
+        window: Window::FromFirstTransaction,
+        inputs: integers(3),
+        definitions: vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Definition::Input(1),
+            Share(TopLevel(2)),
+            Constant(Literal(0)),
+            // The event, and a hold's value before the instant: its initial.
+            Construct {
+                body: body(
+                    vec![Hold {
+                        initial: ConstructEvent,
+                        source: TopLevel(3),
+                    }],
+                    BodyResult::Value(ConstructEvent * Literal(100) + Sample(Reference::Local(0))),
+                ),
+                source: TopLevel(1),
+            },
+            // A hold of x plus the event, which takes x's event at [2].
+            Construct {
+                body: body(
+                    vec![
+                        Map {
+                            function: Argument + ConstructEvent,
+                            source: TopLevel(3),
+                        },
+                        Hold {
+                            initial: Literal(0),
+                            source: Reference::Local(0),
+                        },
+                    ],
+                    BodyResult::Node(Reference::Local(1)),
+                ),
+                source: TopLevel(1),
+            },
+            HoldCell {
+                initial: TopLevel(4),
+                source: TopLevel(6),
+            },
+            SwitchCell(TopLevel(7)),
+            // Linear screens from a first one.
+            Definition::Input(2),
+            Construct {
+                body: body(
+                    vec![Map {
+                        function: Argument + ConstructEvent * Literal(1000),
+                        source: TopLevel(3),
+                    }],
+                    BodyResult::Node(Reference::Local(0)),
+                ),
+                source: TopLevel(1),
+            },
+            HoldStream {
+                initial: TopLevel(9),
+                source: TopLevel(10),
+            },
+            SwitchStream(TopLevel(11)),
+            // States from the event on.
+            Construct {
+                body: body(
+                    vec![AccumulateMut {
+                        initial: ConstructEvent,
+                        function: SecondArgument + Argument,
+                        source: TopLevel(3),
+                    }],
+                    BodyResult::Node(Reference::Local(0)),
+                ),
+                source: TopLevel(1),
+            },
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(3),
+            },
+            HoldCell {
+                initial: TopLevel(14),
+                source: TopLevel(13),
+            },
+            SwitchCell(TopLevel(15)),
+            // Shared streams, from x itself.
+            Construct {
+                body: body(
+                    vec![
+                        Map {
+                            function: Argument * Literal(2),
+                            source: TopLevel(3),
+                        },
+                        ConstantStream(Reference::Local(0)),
+                        SwitchStream(Reference::Local(1)),
+                        Share(Reference::Local(2)),
+                    ],
+                    BodyResult::Node(Reference::Local(3)),
+                ),
+                source: TopLevel(1),
+            },
+            HoldStream {
+                initial: TopLevel(3),
+                source: TopLevel(17),
+            },
+            SwitchStream(TopLevel(18)),
+        ],
+        observe: vec![5, 8, 12, 16, 19],
+        schedule: vec![
+            vec![(1, Value::Integer(1)), (2, Value::Integer(7))],
+            vec![(0, Value::Integer(2)), (1, Value::Integer(3))],
+            vec![(1, Value::Integer(4))],
+            vec![
+                (0, Value::Integer(5)),
+                (1, Value::Integer(6)),
+                (2, Value::Integer(9)),
+            ],
+            vec![(1, Value::Integer(7))],
+        ],
+    };
+    let types = check(&constructs).unwrap();
+    assert_eq!(types[5], NodeType::Stream(Scalar::Integer));
+    assert_eq!(
+        [types[6], types[10], types[13], types[17]],
+        [
+            NodeType::Tokens(Held::Cells { state: false }),
+            NodeType::Tokens(Held::Linear(Scalar::Integer)),
+            NodeType::Tokens(Held::Cells { state: true }),
+            NodeType::Tokens(Held::Streams(Scalar::Integer)),
+        ]
+    );
+    assert_eq!(types[11], NodeType::Outer(Held::Linear(Scalar::Integer)));
+    let run = run_local(&constructs);
+    // Three inputs, two shares, a constant; five constructs, each over a
+    // share, so a node each; four holds of tokens and four switches; an
+    // accumulator. The first screen is the input's own node.
+    assert_eq!(run.live_nodes, 3 + 2 + 1 + 5 + 4 + 4 + 1);
+    let stream = |events: Vec<Vec<i64>>| bough_oracle::EngineObservation::Stream { events };
+    let cell = |registration: i64, steps: Vec<Vec<i64>>, samples: Vec<i64>| {
+        bough_oracle::EngineObservation::Cell {
+            registration: vec![registration],
+            steps_registration: vec![],
+            values: steps.clone(),
+            steps,
+            samples,
+        }
+    };
+    let expected = [
+        stream(vec![vec![], vec![202], vec![], vec![505], vec![]]),
+        cell(
+            0,
+            vec![vec![], vec![5], vec![6], vec![11], vec![12]],
+            vec![0, 5, 6, 11, 12],
+        ),
+        stream(vec![vec![7], vec![], vec![2004], vec![2006], vec![5007]]),
+        cell(
+            0,
+            vec![vec![1], vec![5], vec![9], vec![11], vec![18]],
+            vec![1, 5, 9, 11, 18],
+        ),
+        stream(vec![vec![1], vec![3], vec![8], vec![12], vec![14]]),
+    ];
+    assert_eq!(run.observations, expected);
+    // Every capture is declared, so collecting as every transaction opens
+    // changes nothing, in either mode.
+    let collecting = RunOptions {
+        collect_every_transaction: true,
+        ..RunOptions::default()
+    };
+    for run in [
+        bough_oracle::run::<Threaded>(&constructs, RunOptions::default()).unwrap(),
+        bough_oracle::run::<Local>(&constructs, collecting).unwrap(),
+        bough_oracle::run::<Threaded>(&constructs, collecting).unwrap(),
+    ] {
+        assert_eq!(run.observations, expected);
+    }
+}
+
+/// What the engine cannot build in a construct body, or the oracle would
+/// refuse, the builder refuses before building, naming the construct and
+/// the body's node.
+#[test]
+fn the_builder_refuses_constructs_it_cannot_build() {
+    let refused = |definitions: Vec<Definition>, observe: Vec<usize>| {
+        let program = program(integers(2), definitions, observe, &[]);
+        let error = run::<Local>(&program, RunOptions::default()).unwrap_err();
+        assert_eq!(check(&program).unwrap_err(), error);
+        error.to_string()
+    };
+    let construct = |definitions: Vec<Definition>, result: BodyResult| Construct {
+        body: body(definitions, result),
+        source: TopLevel(1),
+    };
+    // Node 0 is a linear stream, node 1 a Share, node 2 a cell.
+    let with = |built: Definition| {
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            InputCell {
+                input: 1,
+                initial: Literal(0),
+            },
+            built,
+        ]
+    };
+    let value = BodyResult::Value(ConstructEvent);
+    assert_eq!(
+        refused(
+            with(construct(vec![CellLoop(Type::Integer)], value.clone())),
+            vec![3]
+        ),
+        "node 3 (Construct): body node 0 (CellLoop): a loop in a construct body is outside the \
+         subset: the oracle builds a body's runs for events before its construct existed (F44), \
+         and a loop there may not settle"
+    );
+    assert_eq!(
+        refused(
+            with(construct(vec![Definition::Input(0)], value.clone())),
+            vec![3]
+        ),
+        "node 3 (Construct): body node 0 (Input): an input a construct body builds is outside \
+         the subset: I/O code would receive its token and wire it after the transaction"
+    );
+    assert_eq!(
+        refused(
+            with(construct(
+                vec![Hold {
+                    initial: Literal(0),
+                    source: TopLevel(0),
+                }],
+                value.clone()
+            )),
+            vec![3]
+        ),
+        "node 3 (Construct): body node 0 (Hold): N 0 is a linear stream, which a construct body \
+         cannot consume, since each run would consume it again; a body reads a Share"
+    );
+    assert_eq!(
+        refused(
+            with(construct(
+                vec![Definition::ToBoolean(TopLevel(2))],
+                BodyResult::Node(Reference::Local(0))
+            )),
+            vec![1]
+        ),
+        "node 3 (Construct): body result: Local 0 is a cell of booleans; a body emits a stream, \
+         or a cell of integers, for a switch to follow"
+    );
+    assert_eq!(
+        refused(
+            with(construct(
+                vec![
+                    Map {
+                        function: Argument,
+                        source: TopLevel(1),
+                    },
+                    Hold {
+                        initial: Literal(0),
+                        source: Reference::Local(0),
+                    },
+                ],
+                BodyResult::Node(Reference::Local(0))
+            )),
+            vec![1]
+        ),
+        "node 3 (Construct): body node 0 (Map): a linear stream has 2 consumers (body node 1, \
+         the result); only a Share may have more than one"
+    );
+    assert_eq!(
+        refused(
+            with(construct(
+                vec![],
+                BodyResult::Value(Sample(Reference::Local(0)))
+            )),
+            vec![1]
+        ),
+        "node 3 (Construct): body result: Local 0 does not name a node of this body defined \
+         before this one"
+    );
+    assert_eq!(
+        refused(with(Constant(ConstructEvent)), vec![3]),
+        "node 3 (Constant): CArg is used outside a construct body"
+    );
+    // A cell of linear streams has one switch_stream, and a body would
+    // build another at each run.
+    let screens = |switches: Vec<Definition>| {
+        let mut definitions = with(construct(
+            vec![Map {
+                function: Argument,
+                source: TopLevel(1),
+            }],
+            BodyResult::Node(Reference::Local(0)),
+        ));
+        definitions.push(Definition::Input(0));
+        definitions.push(HoldStream {
+            initial: TopLevel(4),
+            source: TopLevel(3),
+        });
+        definitions.extend(switches);
+        definitions
+    };
+    assert_eq!(
+        refused(
+            screens(vec![SwitchStream(TopLevel(5)), SwitchStream(TopLevel(5))]),
+            vec![6]
+        ),
+        "node 5 (HoldStream): a cell of linear streams has 2 switch_streams (node 6, node 7); it \
+         may have one"
+    );
+    assert_eq!(
+        refused(
+            screens(vec![construct(
+                vec![SwitchStream(TopLevel(5))],
+                BodyResult::Node(Reference::Local(0))
+            )]),
+            vec![1]
+        ),
+        "node 6 (Construct): body node 0 (SwitchStream): N 5 is a cell of linear streams of \
+         integers, which has one switch_stream, and a construct body would build one at every run"
+    );
+    // A hold of linear streams starts from a linear stream.
+    let mut shared_first = screens(vec![]);
+    shared_first[5] = HoldStream {
+        initial: TopLevel(1),
+        source: TopLevel(3),
+    };
+    assert_eq!(
+        refused(shared_first, vec![1]),
+        "node 5 (HoldStream): N 1 is a Share, and a cell of linear streams holds linear streams"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Hold {
+                    initial: Literal(0),
+                    source: Reference::Local(0),
+                }
+            ],
+            vec![1]
+        ),
+        "node 1 (Hold): Local 0 names a construct body's node, and this is the top level"
     );
 }
 

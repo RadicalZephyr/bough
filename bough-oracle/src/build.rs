@@ -1,6 +1,6 @@
 //! A [`Program`] built with the Bough API, and its schedule run on it.
 //!
-//! [`run`] checks that a program is in the subset stages 1 to 5 of the
+//! [`run`] checks that a program is in the subset stages 1 to 6 of the
 //! engine implement, builds it in one build closure the way a user would
 //! write it, registers listeners on the observed nodes, and runs the
 //! schedule: one `graph.transaction` per external transaction, with the
@@ -21,16 +21,17 @@
 //! and `StreamLoop` of integers or booleans, and `Close` (stage 3). `Split`
 //! and `Defer`, and `MapList`, the one node that carries lists, which only a
 //! `Split` may read (stage 4). The switches and the tokens they switch
-//! among, without `construct` (stage 5): `PickStream`, `PickCell`,
-//! `HoldStream`, `HoldCell`, `ConstantStream`, `ConstantCell`,
-//! `MapPickCell`, `SwitchStream` and `SwitchCell`. An expression may
-//! `Sample` a cell defined before it, which reads the cell in the build
-//! closure, before transaction zero, as the oracle's top level does; the
-//! engine has no value for a loop's forward before its `Close`, so a
-//! `Sample` may not read one that is still open, directly, through a
-//! read-through cell, or through a switch that may select it. Anything
-//! else, and anything the oracle would refuse, is a [`BuildError`] naming
-//! the node, from [`check`], before any node is built.
+//! among (stage 5): `PickStream`, `PickCell`, `HoldStream`, `HoldCell`,
+//! `ConstantStream`, `ConstantCell`, `MapPickCell`, `SwitchStream` and
+//! `SwitchCell`. And `Construct`, whose body holds any of these but loops
+//! and inputs (stage 6). An expression may `Sample` a cell defined before
+//! it, which at the top level reads the cell in the build closure, before
+//! transaction zero, as the oracle's top level does; the engine has no
+//! value for a loop's forward before its `Close`, so a `Sample` there may
+//! not read one that is still open, directly, through a read-through cell,
+//! or through a switch that may select it. Anything else, and anything the
+//! oracle would refuse, is a [`BuildError`] naming the node, from
+//! [`check`], before any node is built.
 //!
 //! [`check`] does not refuse a loop the engine refuses at its close, one
 //! whose definition depends on its own forward in the same instant, or a
@@ -68,15 +69,18 @@
 //! of tokens reads. The pick is compiled once per node type and token type
 //! rather than once per chain type (finding F36).
 //!
-//! The tokens are shared streams of integers or booleans, `Shared<i64>`,
-//! and cells of integers, `Cell<i64>` or `State<i64>`: `switch_stream`
-//! gives a `Stream<i64>`, `switch_cell` over cells a `Cell<i64>` and over
-//! `State`s a `State<i64>`. A cell of linear streams needs `construct`
-//! (stage 6), so a stream a switch may follow is a `Share`. The engine
-//! types a `Cell` and a `State` apart, so the cells one outer holds are all
-//! of one kind; and it has no switch over a `State` of cells, so a
-//! `MapPickCell` reads a `Cell`. A stream of tokens has one reader, a hold
-//! of them, and a cell of tokens is read by switches alone, never observed.
+//! The tokens are shared streams of integers or booleans, `Shared<i64>`;
+//! linear streams of them, `Stream<i64>`, which only a construct emits and
+//! a constant of one holds; and cells of integers, `Cell<i64>` or
+//! `State<i64>`. `switch_stream` gives a `Stream<i64>`, `switch_cell` over
+//! cells a `Cell<i64>` and over `State`s a `State<i64>`. A pick may select
+//! one token many times, so the streams it lists are `Share`s. A switch
+//! over linear streams takes their events, so a cell of them has one
+//! `switch_stream`. The engine types a `Cell` and a `State` apart, so the
+//! cells one outer holds are all of one kind; and it has no switch over a
+//! `State` of cells, so a `MapPickCell` reads a `Cell`. A stream of tokens
+//! has one reader, a hold of them, and a cell of tokens is read by switches
+//! alone, never observed.
 //!
 //! A pick's function and a `MapPickCell`'s capture the tokens they list,
 //! and the collector cannot see a closure's captures (RFD 3). A hold's
@@ -85,6 +89,36 @@
 //! would be collected before the pick selects it, which is then a stale
 //! token. So the builder declares, with `Build::depends`, that a pick's
 //! node and a `MapPickCell` keep every token they list.
+//!
+//! # Constructs
+//!
+//! A construct is `node.construct(b, f)`: like a pick, it gives the chain
+//! before it a node, so that it is compiled once per node type and result
+//! type rather than once per chain type (finding F36). Its closure builds
+//! the body with the build context it is handed, at the event's instant,
+//! with a builder of its own: the body's `Local` nodes are its nodes, and
+//! a top-level node it names is a token the closure captured when the
+//! construct was built. A `Sample` in the body reads, like every read
+//! during a transaction, the value before the instant, and a
+//! `ConstructEvent` is the event. The closure emits the body's result: an
+//! integer, or a token, a shared stream, a linear stream the body built, a
+//! cell or a `State`, which a hold of tokens keeps for a switch.
+//!
+//! A body runs again at every event, so it consumes only `Share`s of the
+//! top level, and switches over no top-level cell of linear streams, which
+//! may have one switch. The engine would build an input in a body, which
+//! I/O code would receive and wire after the transaction; the builder does
+//! not, since the schedule names the inputs it sends to. A body declares no
+//! loop: the oracle builds a body's runs for its source's events before the
+//! construct existed (finding F44), where a loop may not settle.
+//!
+//! The closure captures the tokens of every top-level node the body names,
+//! and those the bodies nested in it name, and the collector cannot see a
+//! closure's captures (RFD 3). A capture the construct's stream does not
+//! depend on, and that no other root reaches, would be collected before
+//! the closure's next run uses it: the stale token of finding F62. So the
+//! builder declares, with `Build::depends`, that the construct's node keeps
+//! every token its closure captured, as a user must.
 //!
 //! Expressions evaluate as the protocol says ([`evaluate`]): 64-bit
 //! wrapping arithmetic, `Modulo` as `rem_euclid`, a boolean read as 0 or 1,
@@ -137,9 +171,10 @@
 //! # Linearity
 //!
 //! A `Stream` has one consumer. [`check`] counts the consumers of every
-//! stream node, the observation included, and refuses a node other than a
-//! `Share` with more than one. Such a program is a generator's bug, not the
-//! engine's.
+//! stream node, the observation and a body's result included, and refuses
+//! a node other than a `Share` with more than one, and a cell of linear
+//! streams with more than one `switch_stream`. Such a program is a
+//! generator's bug, not the engine's.
 //!
 //! # Modes
 //!
@@ -162,7 +197,9 @@ use bough::{
     StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
 
-use crate::program::{Definition, Expression, Input, Program, Reference, Type, Value};
+use crate::program::{
+    Body, BodyResult, Definition, Expression, Input, Program, Reference, Type, Value,
+};
 
 // ----- the closures the builder stores -----
 
@@ -188,6 +225,9 @@ pub type CellFn<A, B> = Box<dyn Fn(&A) -> B + Send>;
 pub type ListFn = Box<dyn Fn(i64) -> Vec<i64> + Send>;
 /// A pick's function: an event to one of the tokens it lists.
 pub type PickFn<T> = Box<dyn Fn(i64) -> T + Send>;
+/// A construct's closure: the body built at the event's instant, and what
+/// it emits.
+pub type ConstructFn<M, B> = Box<dyn FnMut(&mut Build<M>, i64) -> B + Send>;
 /// A stream listener.
 pub type StreamSink = Box<dyn FnMut(i64) + Send>;
 /// A cell listener.
@@ -273,6 +313,15 @@ pub trait EngineMode: bough::Mode {
     fn constant_token<T: Trace + Send + 'static>(b: &mut Build<Self>, token: T) -> Cell<T>;
     /// `outer.switch_stream(b)` over shared streams.
     fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64>;
+    /// `outer.switch_stream(b)` over linear streams: the cell's one switch.
+    fn switch_linear(b: &mut Build<Self>, outer: Cell<Stream<i64>>) -> Stream<i64>;
+    /// `node.construct(b, f)`: a node, so that a construct is compiled once
+    /// per node type and result type, not once per chain type.
+    fn construct<S: Chain, B: Send + 'static>(
+        b: &mut Build<Self>,
+        node: S,
+        f: ConstructFn<Self, B>,
+    ) -> Stream<B>;
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut Build<Self>,
@@ -435,6 +484,16 @@ macro_rules! engine_mode {
             fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64> {
                 outer.switch_stream(b)
             }
+            fn switch_linear(b: &mut Build<Self>, outer: Cell<Stream<i64>>) -> Stream<i64> {
+                outer.switch_stream(b)
+            }
+            fn construct<S: Chain, B: Send + 'static>(
+                b: &mut Build<Self>,
+                node: S,
+                f: ConstructFn<Self, B>,
+            ) -> Stream<B> {
+                node.construct(b, f)
+            }
             fn map_cell<A: 'static, B: Send + 'static>(
                 b: &mut Build<Self>,
                 cell: Cell<A>,
@@ -503,10 +562,11 @@ engine_mode!(bough::Threaded, build_threaded, 1);
 
 // ----- expressions -----
 
-/// Evaluates an expression that [`check`] accepted and whose `Sample`s the
-/// builder replaced with the values they read: 64-bit wrapping arithmetic,
-/// `Modulo` as `rem_euclid` (Haskell's `mod` for a positive divisor),
-/// comparisons and `Not` as 0 or 1, `If` true when nonzero.
+/// Evaluates an expression that [`check`] accepted and whose `Sample`s and
+/// `ConstructEvent`s the builder replaced with the values they read: 64-bit
+/// wrapping arithmetic, `Modulo` as `rem_euclid` (Haskell's `mod` for a
+/// positive divisor), comparisons and `Not` as 0 or 1, `If` true when
+/// nonzero.
 ///
 /// Panics on `ConstructEvent`, on a `Sample`, and on an argument past the
 /// end of `arguments`, which `check` refuses.
@@ -535,8 +595,8 @@ pub fn evaluate(expression: &Expression, arguments: &[i64]) -> i64 {
         }
         Expression::ConstructEvent | Expression::Sample(_) => {
             unreachable!(
-                "bough-oracle: {expression} reached evaluation; check refuses CArg, and the \
-                 builder replaces every Sample with the value it reads"
+                "bough-oracle: {expression} reached evaluation; the builder replaces every CArg \
+                 with the construct's event and every Sample with the value it reads"
             )
         }
     }
@@ -590,6 +650,10 @@ impl Scalar {
 pub enum Held {
     /// Shared streams of the scalar: `Shared<i64>`, a boolean as 0 or 1.
     Streams(Scalar),
+    /// Linear streams of the scalar, `Stream<i64>`, which only a construct
+    /// emits: a cell of them has one `switch_stream`, which takes their
+    /// events.
+    Linear(Scalar),
     /// Cells of integers: `Cell<i64>`, or `State<i64>` when `state`.
     Cells {
         /// `State`s rather than `Cell`s.
@@ -601,6 +665,7 @@ impl fmt::Display for Held {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Held::Streams(scalar) => write!(formatter, "shared streams of {}", scalar.plural()),
+            Held::Linear(scalar) => write!(formatter, "linear streams of {}", scalar.plural()),
             Held::Cells { state: false } => formatter.write_str("cells of integers"),
             Held::Cells { state: true } => formatter.write_str("States of integers"),
         }
@@ -615,7 +680,8 @@ pub enum NodeType {
     /// A stream of lists of integers: a `MapList`, which only a `Split`
     /// reads.
     Lists,
-    /// A stream of tokens: a pick, which only a hold of tokens reads.
+    /// A stream of tokens: a pick, or a construct whose body emits a token,
+    /// which only a hold of tokens reads.
     Tokens(Held),
     /// A cell; `state` when it is a `State`, which has no stream view.
     Cell {
@@ -626,7 +692,8 @@ pub enum NodeType {
         state: bool,
     },
     /// A cell of tokens, a switch's outer: a hold or a constant of tokens,
-    /// or a `MapPickCell`. Only a switch reads it.
+    /// or a `MapPickCell`. Only a switch reads it, and only one a cell of
+    /// linear streams.
     Outer(Held),
     /// A `Close`, which makes no node.
     Closed,
@@ -695,23 +762,10 @@ pub fn name(definition: &Definition) -> String {
     text[..end].to_owned()
 }
 
-/// The top-level node a reference names, if it is one defined before
-/// `index`.
-fn earlier(reference: &Reference, index: usize) -> Result<usize, String> {
-    match reference {
-        Reference::TopLevel(node) if *node < index => Ok(*node),
-        Reference::TopLevel(node) => Err(format!(
-            "N {node} does not name a node defined before this one"
-        )),
-        Reference::Local(node) => Err(format!(
-            "Local {node} names a construct body's node, and the subset has no construct"
-        )),
-    }
-}
-
 /// The streams a definition consumes: what linearity counts. A `Close`
-/// names a stream for a stream loop and a cell for a cell loop, and
-/// [`check_linearity`] counts only the streams.
+/// names a stream for a stream loop and a cell for a cell loop, a hold of
+/// streams its initial stream besides its stream of streams, and
+/// [`check_linearity`] counts only the streams that are not a `Share`.
 pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
     match definition {
         Definition::Map { source, .. }
@@ -727,13 +781,15 @@ pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
         | Definition::MapList { source, .. }
         | Definition::PickStream { source, .. }
         | Definition::PickCell { source, .. }
-        | Definition::HoldStream { source, .. }
-        | Definition::HoldCell { source, .. } => vec![*source],
+        | Definition::HoldCell { source, .. }
+        | Definition::Construct { source, .. } => vec![*source],
+        Definition::HoldStream { initial, source } => vec![*source, *initial],
         Definition::Once(source)
         | Definition::Node(source)
         | Definition::Share(source)
         | Definition::Split(source)
-        | Definition::Defer(source) => vec![*source],
+        | Definition::Defer(source)
+        | Definition::ConstantStream(source) => vec![*source],
         Definition::Merge { left, right, .. } | Definition::OrElse { left, right } => {
             vec![*left, *right]
         }
@@ -742,12 +798,169 @@ pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
     }
 }
 
-/// The streams or cells a switch over the outer at `outer` may follow: a
-/// hold of tokens' initial token and every token its pick lists, a
-/// constant's token, or every cell a `MapPickCell` lists. Each is a
-/// potential dependency of the switch: a `switch_cell` depends on the cell
-/// it follows, and a `switch_stream` on the stream. Empty for a node that
-/// is not an outer.
+/// Every node a definition names in its own scope, top-level or local: its
+/// streams, its cells, the tokens it lists, a construct's source, and a
+/// `Close`'s loop and definition. Not what its expressions sample, nor what
+/// a construct's body names.
+pub(crate) fn named(definition: &Definition) -> Vec<Reference> {
+    match definition {
+        Definition::Map { source, .. }
+        | Definition::Filter { source, .. }
+        | Definition::FilterMap { source, .. }
+        | Definition::MapTo { source, .. }
+        | Definition::Scan { source, .. }
+        | Definition::Hold { source, .. }
+        | Definition::Accumulate { source, .. }
+        | Definition::AccumulateMut { source, .. }
+        | Definition::MapList { source, .. }
+        | Definition::Construct { source, .. } => vec![*source],
+        Definition::Snapshot { source, cell, .. } | Definition::Gate { source, cell } => {
+            vec![*source, *cell]
+        }
+        Definition::Once(node)
+        | Definition::Node(node)
+        | Definition::Share(node)
+        | Definition::Split(node)
+        | Definition::Defer(node)
+        | Definition::Steps(node)
+        | Definition::StepsWithCurrent(node)
+        | Definition::ToBoolean(node)
+        | Definition::ConstantStream(node)
+        | Definition::ConstantCell(node)
+        | Definition::SwitchStream(node)
+        | Definition::SwitchCell(node) => vec![*node],
+        Definition::Merge { left, right, .. } | Definition::OrElse { left, right } => {
+            vec![*left, *right]
+        }
+        Definition::MapCell { cell, .. } => vec![*cell],
+        Definition::Lift { cells, .. } => cells.clone(),
+        Definition::PickStream {
+            streams: listed,
+            source,
+            ..
+        }
+        | Definition::PickCell {
+            cells: listed,
+            source,
+            ..
+        } => listed.iter().chain([source]).copied().collect(),
+        Definition::HoldStream { initial, source } | Definition::HoldCell { initial, source } => {
+            vec![*initial, *source]
+        }
+        Definition::MapPickCell { cells, cell, .. } => {
+            cells.iter().chain([cell]).copied().collect()
+        }
+        Definition::Close {
+            forward,
+            definition,
+        } => vec![Reference::TopLevel(*forward), *definition],
+        Definition::Input(_)
+        | Definition::InputCell { .. }
+        | Definition::Never(_)
+        | Definition::Constant(_)
+        | Definition::Literal { .. }
+        | Definition::CellLoop(_)
+        | Definition::StreamLoop(_) => Vec::new(),
+    }
+}
+
+/// A definition's expressions, not those of a construct's body.
+pub(crate) fn expressions(definition: &Definition) -> Vec<&Expression> {
+    match definition {
+        Definition::InputCell { initial, .. } | Definition::Hold { initial, .. } => vec![initial],
+        Definition::Constant(value) => vec![value],
+        Definition::Map { function, .. }
+        | Definition::MapCell { function, .. }
+        | Definition::Snapshot { function, .. }
+        | Definition::Merge { function, .. }
+        | Definition::Lift { function, .. } => vec![function],
+        Definition::Filter { predicate, .. } => vec![predicate],
+        Definition::FilterMap { keep, function, .. } => vec![keep, function],
+        Definition::Scan {
+            initial,
+            output,
+            state,
+            ..
+        } => vec![initial, output, state],
+        Definition::Accumulate {
+            initial, function, ..
+        }
+        | Definition::AccumulateMut {
+            initial, function, ..
+        } => vec![initial, function],
+        Definition::MapList {
+            length, element, ..
+        } => vec![length, element],
+        Definition::PickStream { index, .. }
+        | Definition::PickCell { index, .. }
+        | Definition::MapPickCell { index, .. } => vec![index],
+        _ => Vec::new(),
+    }
+}
+
+/// The cells an expression samples, in order, with repeats.
+pub(crate) fn sampled(expression: &Expression, cells: &mut Vec<Reference>) {
+    match expression {
+        Expression::Sample(cell) => cells.push(*cell),
+        Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Maximum(a, b)
+        | Expression::Minimum(a, b)
+        | Expression::Equal(a, b)
+        | Expression::LessThan(a, b) => {
+            sampled(a, cells);
+            sampled(b, cells);
+        }
+        Expression::Modulo(a, _) | Expression::Not(a) => sampled(a, cells),
+        Expression::If(c, a, b) => {
+            sampled(c, cells);
+            sampled(a, cells);
+            sampled(b, cells);
+        }
+        _ => {}
+    }
+}
+
+/// Every top-level node a construct body reads: what its definitions name
+/// and sample, what its result names or samples, and the same of every
+/// body nested in it. Each once, in ascending order. The construct's
+/// closure captures these.
+pub fn body_references(body: &Body) -> Vec<usize> {
+    fn collect(body: &Body, nodes: &mut Vec<usize>) {
+        let mut references = Vec::new();
+        for definition in &body.definitions {
+            references.extend(named(definition));
+            for expression in expressions(definition) {
+                sampled(expression, &mut references);
+            }
+            if let Definition::Construct { body, .. } = definition {
+                collect(body, nodes);
+            }
+        }
+        match &body.result {
+            BodyResult::Value(value) => sampled(value, &mut references),
+            BodyResult::Node(node) => references.push(*node),
+        }
+        nodes.extend(references.iter().filter_map(|reference| match reference {
+            Reference::TopLevel(node) => Some(*node),
+            Reference::Local(_) => None,
+        }));
+    }
+    let mut nodes = Vec::new();
+    collect(body, &mut nodes);
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
+}
+
+/// The streams or cells a switch over the outer at `outer` may follow, of
+/// those the program names: a hold of tokens' initial token and every
+/// token its pick lists, a constant's token, or every cell a `MapPickCell`
+/// lists. Each is a potential dependency of the switch: a `switch_cell`
+/// depends on the cell it follows, and a `switch_stream` on the stream.
+/// What a construct emits into a hold is built at run time and not among
+/// them. Empty for a node that is not an outer.
 pub fn switch_candidates(definitions: &[Definition], outer: usize) -> Vec<Reference> {
     match definitions.get(outer) {
         Some(
@@ -773,6 +986,23 @@ pub fn switch_candidates(definitions: &[Definition], outer: usize) -> Vec<Refere
     }
 }
 
+/// What a construct body's nodes make, checked: each local node's type,
+/// the body of each construct among them, and what the construct's stream
+/// carries, integers for a value and tokens for a token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BodyTypes {
+    types: Vec<NodeType>,
+    bodies: Vec<Option<BodyTypes>>,
+    emits: NodeType,
+}
+
+/// A checked program: what each top-level node makes, and the body of each
+/// construct among them.
+struct Checked {
+    types: Vec<NodeType>,
+    bodies: Vec<Option<BodyTypes>>,
+}
+
 /// Checks that a program is in the subset and well formed, and returns what
 /// each node makes. Every error names the node at fault where there is one.
 ///
@@ -781,17 +1011,22 @@ pub fn switch_candidates(definitions: &[Definition], outer: usize) -> Vec<Refere
 /// are `State`s, loops included, and the definitions are checked once,
 /// each loop declared as what its definition is.
 pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
+    checked(program).map(|checked| checked.types)
+}
+
+/// [`check`], with the bodies of the constructs.
+fn checked(program: &Program) -> Result<Checked, BuildError> {
     let mut inputs = Vec::with_capacity(program.inputs.len());
     for (index, input) in program.inputs.iter().enumerate() {
         inputs.push(check_input(index, input)?);
     }
     let states = states(program);
-    let types = check_definitions(program, &inputs, &states)?;
+    let checked = check_definitions(program, &inputs, &states)?;
     if program.observe.is_empty() {
         return Err(BuildError::program("observe: the program observes no node"));
     }
     for &node in &program.observe {
-        match types.get(node) {
+        match checked.types.get(node) {
             None => {
                 return Err(BuildError::program(format!(
                     "observe: there is no node {node}"
@@ -811,9 +1046,9 @@ pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
             Some(_) => {}
         }
     }
-    check_linearity(program, &types)?;
+    check_linearity(program, &checked.types)?;
     check_schedule(program, &inputs)?;
-    Ok(types)
+    Ok(checked)
 }
 
 /// Which nodes are `State`s, if the program is well typed: an in-place
@@ -876,19 +1111,22 @@ fn check_definitions(
     program: &Program,
     inputs: &[Scalar],
     states: &[bool],
-) -> Result<Vec<NodeType>, BuildError> {
-    let mut types: Vec<NodeType> = Vec::with_capacity(program.definitions.len());
-    let mut closes: Vec<Option<usize>> = vec![None; program.definitions.len()];
+) -> Result<Checked, BuildError> {
+    let count = program.definitions.len();
+    let mut types: Vec<NodeType> = Vec::with_capacity(count);
+    let mut bodies: Vec<Option<BodyTypes>> = Vec::with_capacity(count);
+    let mut closes: Vec<Option<usize>> = vec![None; count];
     for (index, definition) in program.definitions.iter().enumerate() {
         let scope = Scope {
             program,
             inputs,
             states,
-            types: &types,
+            top: &types,
             closes: &closes,
+            body: None,
             index,
         };
-        let made = scope
+        let (made, body) = scope
             .definition(definition)
             .map_err(|message| BuildError::node(index, definition, message))?;
         if let Definition::Close {
@@ -899,6 +1137,7 @@ fn check_definitions(
             closes[*forward] = Some(*node);
         }
         types.push(made);
+        bodies.push(body);
     }
     for (index, definition) in program.definitions.iter().enumerate() {
         if is_loop(definition) && closes[index].is_none() {
@@ -909,7 +1148,72 @@ fn check_definitions(
             ));
         }
     }
-    Ok(types)
+    Ok(Checked { types, bodies })
+}
+
+/// Checks a construct body in a scope of its own: its definitions in order,
+/// each able to read the top-level nodes in `top`, those defined before the
+/// construct, and the body's nodes before it; then its result, and that
+/// each of its linear streams has one consumer.
+fn check_body(
+    program: &Program,
+    inputs: &[Scalar],
+    top: &[NodeType],
+    body: &Body,
+) -> Result<BodyTypes, String> {
+    let count = body.definitions.len();
+    let mut types: Vec<NodeType> = Vec::with_capacity(count);
+    let mut bodies: Vec<Option<BodyTypes>> = Vec::with_capacity(count);
+    for (index, definition) in body.definitions.iter().enumerate() {
+        let scope = Scope {
+            program,
+            inputs,
+            states: &[],
+            top,
+            closes: &[],
+            body: Some(Locals {
+                definitions: &body.definitions,
+                types: &types,
+            }),
+            index,
+        };
+        let (made, nested) = scope
+            .definition(definition)
+            .map_err(|message| format!("body node {index} ({}): {message}", name(definition)))?;
+        types.push(made);
+        bodies.push(nested);
+    }
+    let scope = Scope {
+        program,
+        inputs,
+        states: &[],
+        top,
+        closes: &[],
+        body: Some(Locals {
+            definitions: &body.definitions,
+            types: &types,
+        }),
+        index: count,
+    };
+    let emits = match &body.result {
+        BodyResult::Value(value) => {
+            scope
+                .expression(value, 0)
+                .map_err(|message| format!("body result: {message}"))?;
+            NodeType::Stream(Scalar::Integer)
+        }
+        BodyResult::Node(node) => NodeType::Tokens(
+            scope
+                .emitted(node)
+                .map_err(|message| format!("body result: {message}"))?,
+        ),
+    };
+    check_body_linearity(body, &types)?;
+    Ok(BodyTypes {
+        types,
+        bodies,
+        emits,
+    })
 }
 
 /// A `CellLoop` or a `StreamLoop`.
@@ -934,36 +1238,104 @@ fn check_input(index: usize, input: &Input) -> Result<Scalar, BuildError> {
     Ok(scalar)
 }
 
-/// Where a definition is checked: the program, what the nodes before it
-/// make, and the loops closed before it.
+/// Where a definition is checked: the program, the top-level nodes it may
+/// read and what they make, the loops closed before it, and in a construct
+/// body, the body's nodes before it.
 struct Scope<'a> {
     program: &'a Program,
     inputs: &'a [Scalar],
-    /// The cell loops taken as `State`s.
+    /// The cell loops taken as `State`s, at the top level.
     states: &'a [bool],
-    /// What each node before this one makes.
-    types: &'a [NodeType],
-    /// For each loop closed before this node, the node its `Close` names.
+    /// What each top-level node this scope may read makes: those before
+    /// this node at the top level, and in a body, those before its
+    /// outermost construct.
+    top: &'a [NodeType],
+    /// For each loop closed before this node, the node its `Close` names, at
+    /// the top level.
     closes: &'a [Option<usize>],
-    /// This node.
+    /// In a construct body: its nodes, and its construct's event.
+    body: Option<Locals<'a>>,
+    /// This node, in its scope.
     index: usize,
 }
 
-impl Scope<'_> {
-    fn node(&self, reference: &Reference) -> Result<usize, String> {
-        earlier(reference, self.index)
+/// A construct body's nodes, as far as they are checked. Its construct's
+/// event is an integer or a boolean, which `ConstructEvent` reads as a
+/// number.
+#[derive(Clone, Copy)]
+struct Locals<'a> {
+    definitions: &'a [Definition],
+    types: &'a [NodeType],
+}
+
+/// A node a reference names, as a scope sees it.
+#[derive(Clone, Copy)]
+struct Named<'a> {
+    made: NodeType,
+    definition: &'a Definition,
+    /// A top-level node that a construct body reads: its closure captures
+    /// it, and every run reads it again.
+    captured: bool,
+}
+
+impl<'a> Scope<'a> {
+    fn named(&self, reference: &Reference) -> Result<Named<'a>, String> {
+        let top = |node: usize, captured: bool| Named {
+            made: self.top[node],
+            definition: &self.program.definitions[node],
+            captured,
+        };
+        match (reference, self.body) {
+            (Reference::TopLevel(node), None) if *node < self.index => Ok(top(*node, false)),
+            (Reference::TopLevel(node), None) => Err(format!(
+                "N {node} does not name a node defined before this one"
+            )),
+            (Reference::TopLevel(node), Some(_)) if *node < self.top.len() => Ok(top(*node, true)),
+            (Reference::TopLevel(node), Some(_)) => Err(format!(
+                "N {node} does not name a node defined before the construct"
+            )),
+            (Reference::Local(node), Some(locals)) if *node < self.index => Ok(Named {
+                made: locals.types[*node],
+                definition: &locals.definitions[*node],
+                captured: false,
+            }),
+            (Reference::Local(node), Some(_)) => Err(format!(
+                "Local {node} does not name a node of this body defined before this one"
+            )),
+            (Reference::Local(node), None) => Err(format!(
+                "Local {node} names a construct body's node, and this is the top level"
+            )),
+        }
     }
 
     fn input(&self, k: usize) -> Result<Scalar, String> {
+        if self.body.is_some() {
+            return Err(
+                "an input a construct body builds is outside the subset: I/O code \
+                        would receive its token and wire it after the transaction"
+                    .into(),
+            );
+        }
         self.inputs
             .get(k)
             .copied()
             .ok_or_else(|| format!("there is no input {k}"))
     }
 
+    /// A stream this definition consumes. A construct body consumes a
+    /// top-level stream only if it is a `Share`: each run consumes it
+    /// again.
     fn stream(&self, reference: &Reference) -> Result<Scalar, String> {
-        let node = self.node(reference)?;
-        match self.types[node] {
+        let named = self.named(reference)?;
+        match named.made {
+            NodeType::Stream(_)
+                if named.captured && !matches!(named.definition, Definition::Share(_)) =>
+            {
+                Err(format!(
+                    "{reference} is a linear stream, which a construct body cannot consume, \
+                     since each run would consume it again; a body reads a Share"
+                ))
+            }
             NodeType::Stream(scalar) => Ok(scalar),
             NodeType::Cell { .. } | NodeType::Outer(_) => {
                 Err(format!("{reference} is a cell, not a stream"))
@@ -979,8 +1351,7 @@ impl Scope<'_> {
     }
 
     fn cell(&self, reference: &Reference) -> Result<(Scalar, bool), String> {
-        let node = self.node(reference)?;
-        match self.types[node] {
+        match self.named(reference)?.made {
             NodeType::Cell { value, state } => Ok((value, state)),
             NodeType::Stream(_) | NodeType::Lists | NodeType::Tokens(_) => {
                 Err(format!("{reference} is a stream, not a cell"))
@@ -992,15 +1363,28 @@ impl Scope<'_> {
         }
     }
 
-    /// A stream a switch may follow: a `Share`, of integers or booleans.
+    /// A stream a pick lists or a hold of shared streams starts from: a
+    /// `Share`, of integers or booleans.
     fn shared(&self, reference: &Reference) -> Result<Scalar, String> {
         let scalar = self.stream(reference)?;
-        match self.program.definitions[self.node(reference)?] {
+        match self.named(reference)?.definition {
             Definition::Share(_) => Ok(scalar),
             _ => Err(format!(
-                "{reference} is a linear stream; a cell of linear streams needs construct \
-                 (stage 6), so a switch here follows a Share"
+                "{reference} is a linear stream; a pick may select a stream many times, so a \
+                 switch here follows a Share"
             )),
+        }
+    }
+
+    /// A linear stream that a hold of linear streams starts from, or a
+    /// constant holds: not a `Share`.
+    fn linear(&self, reference: &Reference) -> Result<Scalar, String> {
+        let scalar = self.stream(reference)?;
+        match self.named(reference)?.definition {
+            Definition::Share(_) => Err(format!(
+                "{reference} is a Share, and a cell of linear streams holds linear streams"
+            )),
+            _ => Ok(scalar),
         }
     }
 
@@ -1048,24 +1432,58 @@ impl Scope<'_> {
         Ok(first)
     }
 
-    /// What a hold of tokens reads: a pick's stream of tokens.
+    /// What a hold of tokens reads: a stream of tokens, a pick's or a
+    /// construct's, which it consumes.
     fn tokens(&self, reference: &Reference) -> Result<Held, String> {
-        let node = self.node(reference)?;
-        match self.types[node] {
+        let named = self.named(reference)?;
+        match named.made {
+            NodeType::Tokens(held) if named.captured => Err(format!(
+                "{reference} is a stream of {held}, which a construct body cannot consume, \
+                 since each run would consume it again"
+            )),
             NodeType::Tokens(held) => Ok(held),
             made => Err(format!(
-                "{reference} is {made}; a hold of tokens reads a pick's stream of tokens"
+                "{reference} is {made}; a hold of tokens reads a stream of tokens"
             )),
         }
     }
 
-    /// What a switch reads: a cell of tokens.
+    /// What a switch reads: a cell of tokens. A cell of linear streams has
+    /// one switch, so a construct body cannot switch over a top-level one.
     fn outer(&self, reference: &Reference) -> Result<Held, String> {
-        let node = self.node(reference)?;
-        match self.types[node] {
+        let named = self.named(reference)?;
+        match named.made {
+            NodeType::Outer(held @ Held::Linear(_)) if named.captured => Err(format!(
+                "{reference} is a cell of {held}, which has one switch_stream, and a construct \
+                 body would build one at every run"
+            )),
             NodeType::Outer(held) => Ok(held),
             made => Err(format!(
                 "{reference} is {made}; a switch reads a cell of tokens"
+            )),
+        }
+    }
+
+    /// The token a construct body emits: a shared stream, a linear stream
+    /// it builds, or a cell of integers or a `State`.
+    fn emitted(&self, reference: &Reference) -> Result<Held, String> {
+        let named = self.named(reference)?;
+        match named.made {
+            NodeType::Stream(scalar) if matches!(named.definition, Definition::Share(_)) => {
+                Ok(Held::Streams(scalar))
+            }
+            NodeType::Stream(_) if named.captured => Err(format!(
+                "{reference} is a linear stream, which each run would emit again; a body emits \
+                 a Share, or a linear stream it builds"
+            )),
+            NodeType::Stream(scalar) => Ok(Held::Linear(scalar)),
+            NodeType::Cell {
+                value: Scalar::Integer,
+                state,
+            } => Ok(Held::Cells { state }),
+            made => Err(format!(
+                "{reference} is {made}; a body emits a stream, or a cell of integers, for a \
+                 switch to follow"
             )),
         }
     }
@@ -1074,17 +1492,18 @@ impl Scope<'_> {
         check_expression(expression, arguments, Some(self))
     }
 
-    /// Whether the build closure can read cell `node` here. A loop's
-    /// forward has no value before its `Close`, so it can be read once
-    /// closed, if its definition can be; a read-through cell can be read if
-    /// every cell it reads can be, and a switch if its outer and every cell
-    /// the outer may select can be. `depth` ends the walk on a loop closed
-    /// through itself, which the engine refuses at its close, or through a
-    /// switch that may select it, which it refuses at the switch's first
-    /// link or move, and where a read before that goes round the cycle and
-    /// panics (finding F49).
+    /// Whether the build closure can read top-level cell `node` here. A
+    /// loop's forward has no value before its `Close`, so it can be read
+    /// once closed, if its definition can be; a read-through cell can be
+    /// read if every cell it reads can be, and a switch if its outer and
+    /// every cell the outer may select can be. `depth` ends the walk on a
+    /// loop closed through itself, which the engine refuses at its close,
+    /// or through a switch that may select it, which it refuses at the
+    /// switch's first link or move, and where a read before that goes round
+    /// the cycle and panics (finding F49). A construct body runs after the
+    /// build closure has closed every loop, and reads any cell.
     fn readable(&self, node: usize, depth: usize) -> Result<(), String> {
-        if depth > self.types.len() {
+        if depth > self.top.len() {
             return Err(format!(
                 "a Sample reads N {node} through a loop closed with itself"
             ));
@@ -1120,7 +1539,19 @@ impl Scope<'_> {
         }
     }
 
-    fn definition(&self, definition: &Definition) -> Result<NodeType, String> {
+    /// What a definition makes, and for a construct, what its body's nodes
+    /// make.
+    fn definition(&self, definition: &Definition) -> Result<(NodeType, Option<BodyTypes>), String> {
+        if let Definition::Construct { body, source } = definition {
+            self.stream(source)?;
+            let checked = check_body(self.program, self.inputs, self.top, body)?;
+            return Ok((checked.emits, Some(checked)));
+        }
+        self.node_type(definition).map(|made| (made, None))
+    }
+
+    /// What a definition other than a construct makes.
+    fn node_type(&self, definition: &Definition) -> Result<NodeType, String> {
         let made = match definition {
             Definition::Input(k) => NodeType::Stream(self.input(*k)?),
             Definition::InputCell { input: k, initial } => {
@@ -1303,14 +1734,30 @@ impl Scope<'_> {
                 NodeType::Lists
             }
             Definition::Split(source) => {
-                let node = self.node(source)?;
-                if self.types[node] != NodeType::Lists {
+                let named = self.named(source)?;
+                if named.made != NodeType::Lists {
                     return Err(format!(
                         "{source} is {}; a split reads the lists of a MapList",
-                        self.types[node]
+                        named.made
+                    ));
+                }
+                if named.captured {
+                    return Err(format!(
+                        "{source} is a stream of lists, which a construct body cannot consume, \
+                         since each run would consume it again"
                     ));
                 }
                 NodeType::Stream(Scalar::Integer)
+            }
+            Definition::CellLoop(_) | Definition::StreamLoop(_) | Definition::Close { .. }
+                if self.body.is_some() =>
+            {
+                return Err(
+                    "a loop in a construct body is outside the subset: the oracle builds a \
+                     body's runs for events before its construct existed (F44), and a loop \
+                     there may not settle"
+                        .into(),
+                );
             }
             Definition::CellLoop(value_type) => NodeType::Cell {
                 value: loop_scalar(value_type)?,
@@ -1323,7 +1770,7 @@ impl Scope<'_> {
             } => {
                 let declared = match self.program.definitions.get(*forward) {
                     Some(declaration) if *forward < self.index && is_loop(declaration) => {
-                        self.types[*forward]
+                        self.top[*forward]
                     }
                     _ => {
                         return Err(format!(
@@ -1336,7 +1783,7 @@ impl Scope<'_> {
                         "the loop at node {forward} is closed more than once"
                     ));
                 }
-                let actual = self.types[self.node(reference)?];
+                let actual = self.named(reference)?.made;
                 let fits = match (declared, actual) {
                     (NodeType::Cell { value: a, .. }, NodeType::Cell { value: b, .. })
                     | (NodeType::Stream(a), NodeType::Stream(b)) => a == b,
@@ -1371,11 +1818,18 @@ impl Scope<'_> {
             }
             Definition::HoldStream { initial, source } => {
                 let held = self.tokens(source)?;
-                let scalar = self.shared(initial)?;
-                if held != Held::Streams(scalar) {
+                let (scalar, kind) = match held {
+                    Held::Streams(_) => (self.shared(initial)?, "a shared stream"),
+                    Held::Linear(_) => (self.linear(initial)?, "a linear stream"),
+                    Held::Cells { .. } => {
+                        return Err(format!(
+                            "{source} carries {held}; a hold of streams reads a stream of streams"
+                        ));
+                    }
+                };
+                if held != Held::Streams(scalar) && held != Held::Linear(scalar) {
                     return Err(format!(
-                        "{source} carries {held}, and the initial {initial} is a shared stream \
-                         of {}",
+                        "{source} carries {held}, and the initial {initial} is {kind} of {}",
                         scalar.plural()
                     ));
                 }
@@ -1387,13 +1841,17 @@ impl Scope<'_> {
                 if held != (Held::Cells { state }) {
                     return Err(format!(
                         "{source} carries {held}, and the initial {initial} is {}",
-                        self.types[self.node(initial)?]
+                        self.named(initial)?.made
                     ));
                 }
                 NodeType::Outer(held)
             }
             Definition::ConstantStream(stream) => {
-                NodeType::Outer(Held::Streams(self.shared(stream)?))
+                let scalar = self.stream(stream)?;
+                NodeType::Outer(match self.named(stream)?.definition {
+                    Definition::Share(_) => Held::Streams(scalar),
+                    _ => Held::Linear(scalar),
+                })
             }
             Definition::ConstantCell(cell) => NodeType::Outer(Held::Cells {
                 state: self.integer_cell(cell)?,
@@ -1412,7 +1870,7 @@ impl Scope<'_> {
                 })
             }
             Definition::SwitchStream(outer) => match self.outer(outer)? {
-                Held::Streams(scalar) => NodeType::Stream(scalar),
+                Held::Streams(scalar) | Held::Linear(scalar) => NodeType::Stream(scalar),
                 held => {
                     return Err(format!(
                         "{outer} is a cell of {held}; switch_stream needs a cell of streams"
@@ -1430,11 +1888,15 @@ impl Scope<'_> {
                     ));
                 }
             },
-            Definition::Literal { .. } | Definition::Construct { .. } => {
-                return Err(format!(
-                    "{} is outside the subset of stages 1 to 5",
-                    name(definition)
-                ));
+            Definition::Literal { .. } => {
+                return Err(
+                    "Literal is outside the subset: the engine cannot build a stream of given \
+                     events"
+                        .into(),
+                );
+            }
+            Definition::Construct { .. } => {
+                unreachable!("bough-oracle: Scope::definition checks a construct")
             }
         };
         Ok(made)
@@ -1449,7 +1911,8 @@ fn loop_scalar(value_type: &Type) -> Result<Scalar, String> {
 }
 
 /// Checks an expression taking `arguments` arguments. `scope` says what a
-/// `Sample` may read, and is `None` where it may read nothing.
+/// `Sample` may read and whether a `ConstructEvent` is bound, and is `None`
+/// where neither is: in a coalescing function.
 fn check_expression(
     expression: &Expression,
     arguments: usize,
@@ -1469,17 +1932,20 @@ fn check_expression(
         Expression::Argument => argument("Arg".to_owned(), 0),
         Expression::SecondArgument => argument("Arg2".to_owned(), 1),
         Expression::ArgumentAt(index) => argument(format!("ArgN {index}"), *index),
-        Expression::ConstructEvent => {
-            Err("CArg is used outside a construct body, and the subset has no construct".into())
-        }
+        Expression::ConstructEvent => match scope.and_then(|scope| scope.body) {
+            Some(_) => Ok(()),
+            None => Err("CArg is used outside a construct body".into()),
+        },
         Expression::Sample(reference) => {
             let Some(scope) = scope else {
                 return Err("an input's coalescing function cannot sample a cell".into());
             };
-            let node = scope.node(reference)?;
-            match scope.types[node] {
-                NodeType::Cell { .. } => scope.readable(node, 0),
-                made => Err(format!("Sample {reference}: node {node} is {made}")),
+            let named = scope.named(reference)?;
+            match (named.made, reference) {
+                // A body runs after the build closure closed every loop.
+                (NodeType::Cell { .. }, _) if scope.body.is_some() => Ok(()),
+                (NodeType::Cell { .. }, Reference::TopLevel(node)) => scope.readable(*node, 0),
+                (made, _) => Err(format!("Sample {reference}: {reference} is {made}")),
             }
         }
         Expression::Literal(_) => Ok(()),
@@ -1509,7 +1975,10 @@ fn check_expression(
 }
 
 /// A stream node other than a `Share` has at most one consumer, the
-/// observation included; so has a stream of lists or of tokens.
+/// observation included; so has a stream of lists or of tokens. A cell of
+/// linear streams has at most one `switch_stream`. A construct body's
+/// references to top-level streams are not counted: a body consumes only
+/// `Share`s of the top level.
 fn check_linearity(program: &Program, types: &[NodeType]) -> Result<(), BuildError> {
     let mut consumers: Vec<Vec<String>> = vec![Vec::new(); types.len()];
     for (index, definition) in program.definitions.iter().enumerate() {
@@ -1521,6 +1990,11 @@ fn check_linearity(program: &Program, types: &[NodeType]) -> Result<(), BuildErr
                 ) {
                     consumers[node].push(format!("node {index}"));
                 }
+            }
+        }
+        if let Definition::SwitchStream(Reference::TopLevel(outer)) = definition {
+            if matches!(types[*outer], NodeType::Outer(Held::Linear(_))) {
+                consumers[*outer].push(format!("node {index}"));
             }
         }
     }
@@ -1535,11 +2009,63 @@ fn check_linearity(program: &Program, types: &[NodeType]) -> Result<(), BuildErr
             return Err(BuildError::node(
                 node,
                 definition,
-                format!(
-                    "a linear stream has {} consumers ({}); only a Share may have more than one",
-                    users.len(),
-                    users.join(", ")
-                ),
+                too_many(types[node], users),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The message for a linear stream, or a cell of linear streams, that
+/// `users` read.
+fn too_many(made: NodeType, users: &[String]) -> String {
+    match made {
+        NodeType::Outer(_) => format!(
+            "a cell of linear streams has {} switch_streams ({}); it may have one",
+            users.len(),
+            users.join(", ")
+        ),
+        _ => format!(
+            "a linear stream has {} consumers ({}); only a Share may have more than one",
+            users.len(),
+            users.join(", ")
+        ),
+    }
+}
+
+/// [`check_linearity`] inside a construct body, whose result is a consumer
+/// of a linear stream it emits.
+fn check_body_linearity(body: &Body, types: &[NodeType]) -> Result<(), String> {
+    let mut consumers: Vec<Vec<String>> = vec![Vec::new(); types.len()];
+    for (index, definition) in body.definitions.iter().enumerate() {
+        for reference in consumed_streams(definition) {
+            if let Reference::Local(node) = reference {
+                if matches!(
+                    types[node],
+                    NodeType::Stream(_) | NodeType::Lists | NodeType::Tokens(_)
+                ) {
+                    consumers[node].push(format!("body node {index}"));
+                }
+            }
+        }
+        if let Definition::SwitchStream(Reference::Local(outer)) = definition {
+            if matches!(types[*outer], NodeType::Outer(Held::Linear(_))) {
+                consumers[*outer].push(format!("body node {index}"));
+            }
+        }
+    }
+    if let BodyResult::Node(Reference::Local(node)) = &body.result {
+        if matches!(types[*node], NodeType::Stream(_)) {
+            consumers[*node].push("the result".to_owned());
+        }
+    }
+    for (node, users) in consumers.iter().enumerate() {
+        let definition = &body.definitions[node];
+        if users.len() > 1 && !matches!(definition, Definition::Share(_)) {
+            return Err(format!(
+                "body node {node} ({}): {}",
+                name(definition),
+                too_many(types[node], users)
             ));
         }
     }
@@ -1929,6 +2455,15 @@ impl CellToken {
             CellToken::BooleanState(state) => tracer.visit(&state),
         }
     }
+
+    fn token(&self) -> &dyn TokenRef {
+        match self {
+            CellToken::Integer(cell) => cell,
+            CellToken::IntegerState(state) => state,
+            CellToken::Boolean(cell) => cell,
+            CellToken::BooleanState(state) => state,
+        }
+    }
 }
 
 /// Lifts two to six cells of integers: one arm per tuple of `Cell` and
@@ -1991,9 +2526,10 @@ fn lift<M: EngineMode>(b: &mut Build<M>, cells: &[IntegerCell], e: Expression) -
 
 // ----- switches -----
 
-/// A pick's stream of tokens, as its tokens' type says.
+/// A pick's or a construct's stream of tokens, as its tokens' type says.
 enum Tokens {
     Streams(Stream<Shared<i64>>),
+    Linear(Stream<Stream<i64>>),
     Cells(Stream<Cell<i64>>),
     States(Stream<State<i64>>),
 }
@@ -2002,8 +2538,20 @@ enum Tokens {
 #[derive(Clone, Copy)]
 enum Outer {
     Streams(Cell<Shared<i64>>),
+    Linear(Cell<Stream<i64>>),
     Cells(Cell<Cell<i64>>),
     States(Cell<State<i64>>),
+}
+
+impl Outer {
+    fn token(&self) -> &dyn TokenRef {
+        match self {
+            Outer::Streams(outer) => outer,
+            Outer::Linear(outer) => outer,
+            Outer::Cells(outer) => outer,
+            Outer::States(outer) => outer,
+        }
+    }
 }
 
 /// The cells one outer may select: all `Cell`s or all `State`s.
@@ -2075,12 +2623,13 @@ fn pick<M: EngineMode, T: Send + 'static>(b: &mut Build<M>, node: Base, f: PickF
 
 // ----- building -----
 
-/// A node of the program while the build closure runs.
+/// A node of the program while the build closure, or a construct's
+/// closure, runs.
 enum Built<M: EngineMode> {
     Stream(Chained<M>),
     /// A `MapList`'s node, moved into the split that reads it.
     Lists(Stream<Vec<i64>>),
-    /// A pick's node, moved into the hold that reads it.
+    /// A pick's or a construct's node, moved into the hold that reads it.
     Tokens(Tokens),
     /// A linear stream, moved into its one consumer.
     Consumed,
@@ -2139,60 +2688,142 @@ impl Trace for Edge {
     }
 }
 
-/// The builder's state in the build closure.
+/// A top-level token a construct's closure captures, to build its body
+/// with at each run: a shared stream, a cell, or a cell of tokens, which
+/// are all `Copy`.
+#[derive(Clone, Copy)]
+enum Captured {
+    Shared(Shared<i64>),
+    Cell(CellToken),
+    Outer(Outer),
+}
+
+impl Captured {
+    /// The node as the body's builder holds a top-level node.
+    fn built<M: EngineMode>(self) -> Built<M> {
+        match self {
+            Captured::Shared(shared) => Built::Stream(Chained::Shared(shared)),
+            Captured::Cell(cell) => Built::Cell(cell),
+            Captured::Outer(outer) => Built::Outer(outer),
+        }
+    }
+
+    fn token(&self) -> &dyn TokenRef {
+        match self {
+            Captured::Shared(shared) => shared,
+            Captured::Cell(cell) => cell.token(),
+            Captured::Outer(outer) => outer.token(),
+        }
+    }
+}
+
+/// A construct body's view of the top level while its closure runs.
+struct Inside<M: EngineMode> {
+    /// The top-level nodes, by index: those the body captured, and
+    /// `Consumed` for the others, which it never reads.
+    top: Vec<Built<M>>,
+    /// What every top-level node the body may read makes.
+    top_types: Arc<[NodeType]>,
+    /// The construct's event.
+    event: i64,
+}
+
+/// The builder's state in the build closure, or in a construct's closure
+/// while it builds the body.
 struct Builder<'p, M: EngineMode> {
-    program: &'p Program,
+    /// The program's inputs, which only the top level reads.
+    program_inputs: &'p [Input],
+    /// What each node of this scope makes.
     types: &'p [NodeType],
+    /// The body of each construct of this scope, by node.
+    bodies: &'p [Option<BodyTypes>],
     nodes: Vec<Built<M>>,
     inputs: Vec<Vec<EngineInput>>,
     /// Each loop's closer, from its declaration to its `Close`.
     closers: Vec<Option<Closer>>,
+    /// In a construct body: the top level it reads, and the event.
+    inside: Option<Inside<M>>,
 }
 
 impl<M: EngineMode> Builder<'_, M> {
+    /// The node a checked reference names: a node of this scope, or in a
+    /// body, a top-level node the body captured.
+    fn at(&self, reference: &Reference) -> &Built<M> {
+        match (reference, &self.inside) {
+            (Reference::TopLevel(node), Some(inside)) => &inside.top[*node],
+            (Reference::TopLevel(node) | Reference::Local(node), _) => &self.nodes[*node],
+        }
+    }
+
+    fn at_mut(&mut self, reference: &Reference) -> &mut Built<M> {
+        match (reference, &mut self.inside) {
+            (Reference::TopLevel(node), Some(inside)) => &mut inside.top[*node],
+            (Reference::TopLevel(node) | Reference::Local(node), _) => &mut self.nodes[*node],
+        }
+    }
+
+    /// What the node a checked reference names makes.
+    fn made(&self, reference: &Reference) -> NodeType {
+        match (reference, &self.inside) {
+            (Reference::TopLevel(node), Some(inside)) => inside.top_types[*node],
+            (Reference::TopLevel(node) | Reference::Local(node), _) => self.types[*node],
+        }
+    }
+
     /// A stream a definition consumes: moved out if linear, copied if shared.
     fn take(&mut self, reference: &Reference) -> Chained<M> {
-        let node = top(reference);
-        match &self.nodes[node] {
-            Built::Stream(Chained::Shared(shared)) => Chained::Shared(*shared),
-            Built::Stream(_) => match mem::replace(&mut self.nodes[node], Built::Consumed) {
-                Built::Stream(chain) => chain,
-                _ => unreachable!("bough-oracle: node {node} was a stream"),
-            },
+        let slot = self.at_mut(reference);
+        if let Built::Stream(Chained::Shared(shared)) = slot {
+            return Chained::Shared(*shared);
+        }
+        match mem::replace(slot, Built::Consumed) {
+            Built::Stream(chain) => chain,
             Built::Consumed => {
-                unreachable!("bough-oracle: check refuses a second consumer of node {node}")
+                unreachable!("bough-oracle: check refuses a second consumer of {reference}")
             }
             Built::Lists(_)
             | Built::Tokens(_)
             | Built::Cell(_)
             | Built::Outer(_)
             | Built::Closed => {
-                unreachable!("bough-oracle: check refuses node {node} as a stream of the subset")
+                unreachable!("bough-oracle: check refuses {reference} as a stream of the subset")
+            }
+        }
+    }
+
+    /// A linear stream a hold or a constant of linear streams takes, as a
+    /// node.
+    fn linear(&mut self, b: &mut Build<M>, reference: &Reference) -> Stream<i64> {
+        match self.take(reference).materialized(b) {
+            Base::Stream(stream) => stream,
+            Base::Shared(_) => {
+                unreachable!("bough-oracle: check holds linear streams in a cell of them")
             }
         }
     }
 
     /// The lists a split reads, moved out of the `MapList`'s node.
     fn take_lists(&mut self, reference: &Reference) -> Stream<Vec<i64>> {
-        let node = top(reference);
-        match mem::replace(&mut self.nodes[node], Built::Consumed) {
+        match mem::replace(self.at_mut(reference), Built::Consumed) {
             Built::Lists(lists) => lists,
             _ => unreachable!("bough-oracle: check lets a split read only a MapList, once"),
         }
     }
 
-    /// The tokens a hold of them reads, moved out of the pick's node.
+    /// The tokens a hold of them reads, moved out of the pick's or the
+    /// construct's node.
     fn take_tokens(&mut self, reference: &Reference) -> Tokens {
-        let node = top(reference);
-        match mem::replace(&mut self.nodes[node], Built::Consumed) {
+        match mem::replace(self.at_mut(reference), Built::Consumed) {
             Built::Tokens(tokens) => tokens,
-            _ => unreachable!("bough-oracle: check lets a hold of tokens read only a pick, once"),
+            _ => unreachable!(
+                "bough-oracle: check lets a hold of tokens read only a stream of tokens, once"
+            ),
         }
     }
 
     /// A shared stream, as a token a switch may follow.
     fn shared(&self, reference: &Reference) -> Shared<i64> {
-        match &self.nodes[top(reference)] {
+        match self.at(reference) {
             Built::Stream(Chained::Shared(shared)) => *shared,
             _ => unreachable!("bough-oracle: check lets a switch follow a Share only"),
         }
@@ -2204,21 +2835,21 @@ impl<M: EngineMode> Builder<'_, M> {
     }
 
     fn outer(&self, reference: &Reference) -> Outer {
-        match &self.nodes[top(reference)] {
+        match self.at(reference) {
             Built::Outer(outer) => *outer,
             _ => unreachable!("bough-oracle: check lets a switch read only a cell of tokens"),
         }
     }
 
     fn cell(&self, reference: &Reference) -> CellToken {
-        match &self.nodes[top(reference)] {
+        match self.at(reference) {
             Built::Cell(cell) => *cell,
             _ => unreachable!("bough-oracle: check refuses a stream as a cell"),
         }
     }
 
     fn scalar(&self, reference: &Reference) -> Scalar {
-        match self.types[top(reference)] {
+        match self.made(reference) {
             NodeType::Stream(scalar) | NodeType::Cell { value: scalar, .. } => scalar,
             NodeType::Lists | NodeType::Tokens(_) | NodeType::Outer(_) | NodeType::Closed => {
                 unreachable!("bough-oracle: check refuses {reference} where a scalar is read")
@@ -2226,12 +2857,19 @@ impl<M: EngineMode> Builder<'_, M> {
         }
     }
 
-    /// The expression with every `Sample` replaced by the value it reads:
-    /// the cell's value before transaction zero, read in the build closure.
+    /// The expression with every `Sample` replaced by the value it reads,
+    /// and in a body, every `ConstructEvent` by the event: at the top level
+    /// the cell's value before transaction zero, read in the build closure;
+    /// in a body, its value before the construct's instant, read in the
+    /// construct's closure.
     fn resolve(&self, b: &Build<M>, expression: &Expression) -> Expression {
         let go = |e: &Expression| Box::new(self.resolve(b, e));
         match expression {
             Expression::Sample(reference) => Expression::Literal(self.cell(reference).sample(b)),
+            Expression::ConstructEvent => match &self.inside {
+                Some(inside) => Expression::Literal(inside.event),
+                None => unreachable!("bough-oracle: check refuses CArg outside a body"),
+            },
             Expression::Add(x, y) => Expression::Add(go(x), go(y)),
             Expression::Subtract(x, y) => Expression::Subtract(go(x), go(y)),
             Expression::Multiply(x, y) => Expression::Multiply(go(x), go(y)),
@@ -2259,7 +2897,7 @@ impl<M: EngineMode> Builder<'_, M> {
     fn define(&mut self, b: &mut Build<M>, definition: &Definition) -> Built<M> {
         match definition {
             Definition::Input(k) => {
-                let input = &self.program.inputs[*k];
+                let input = &self.program_inputs[*k];
                 let (stream, token) = match &input.coalesce {
                     None => M::input(b),
                     Some(e) => {
@@ -2277,7 +2915,7 @@ impl<M: EngineMode> Builder<'_, M> {
                 Built::Stream(Chained::Stream(stream))
             }
             Definition::InputCell { input: k, initial } => {
-                let input = &self.program.inputs[*k];
+                let input = &self.program_inputs[*k];
                 let initial = self.value(b, initial);
                 let coalesce = input.coalesce.clone();
                 if Scalar::of(&input.event_type) == Some(Scalar::Boolean) {
@@ -2558,11 +3196,19 @@ impl<M: EngineMode> Builder<'_, M> {
                 })
             }
             Definition::HoldStream { initial, source } => {
-                let initial = self.shared(initial);
-                let Tokens::Streams(tokens) = self.take_tokens(source) else {
-                    unreachable!("bough-oracle: check holds streams from a pick of streams")
-                };
-                Built::Outer(Outer::Streams(M::hold_tokens(b, tokens, initial)))
+                Built::Outer(match self.take_tokens(source) {
+                    Tokens::Streams(tokens) => {
+                        let initial = self.shared(initial);
+                        Outer::Streams(M::hold_tokens(b, tokens, initial))
+                    }
+                    Tokens::Linear(tokens) => {
+                        let initial = self.linear(b, initial);
+                        Outer::Linear(M::hold_tokens(b, tokens, initial))
+                    }
+                    Tokens::Cells(_) | Tokens::States(_) => {
+                        unreachable!("bough-oracle: check holds streams from a stream of streams")
+                    }
+                })
             }
             Definition::HoldCell { initial, source } => {
                 let outer = match (self.take_tokens(source), self.cell(initial)) {
@@ -2577,8 +3223,13 @@ impl<M: EngineMode> Builder<'_, M> {
                 Built::Outer(outer)
             }
             Definition::ConstantStream(stream) => {
-                let stream = self.shared(stream);
-                Built::Outer(Outer::Streams(M::constant_token(b, stream)))
+                if let Built::Stream(Chained::Shared(shared)) = self.at(stream) {
+                    let shared = *shared;
+                    Built::Outer(Outer::Streams(M::constant_token(b, shared)))
+                } else {
+                    let linear = self.linear(b, stream);
+                    Built::Outer(Outer::Linear(M::constant_token(b, linear)))
+                }
             }
             Definition::ConstantCell(cell) => Built::Outer(match self.cell(cell) {
                 CellToken::Integer(cell) => Outer::Cells(M::constant_token(b, cell)),
@@ -2626,23 +3277,35 @@ impl<M: EngineMode> Builder<'_, M> {
                 match outer {
                     Outer::Cells(outer) => listed.declare(b, &outer),
                     Outer::States(outer) => listed.declare(b, &outer),
-                    Outer::Streams(_) => unreachable!("bough-oracle: a MapPickCell lists cells"),
+                    Outer::Streams(_) | Outer::Linear(_) => {
+                        unreachable!("bough-oracle: a MapPickCell lists cells")
+                    }
                 }
                 Built::Outer(outer)
             }
             Definition::SwitchStream(outer) => {
-                let Outer::Streams(outer) = self.outer(outer) else {
-                    unreachable!("bough-oracle: check switches streams over a cell of streams")
-                };
-                Built::Stream(Chained::Stream(M::switch_stream(b, outer)))
+                Built::Stream(Chained::Stream(match self.outer(outer) {
+                    Outer::Streams(outer) => M::switch_stream(b, outer),
+                    Outer::Linear(outer) => M::switch_linear(b, outer),
+                    Outer::Cells(_) | Outer::States(_) => {
+                        unreachable!("bough-oracle: check switches streams over a cell of streams")
+                    }
+                }))
             }
             Definition::SwitchCell(outer) => Built::Cell(match self.outer(outer) {
                 Outer::Cells(outer) => CellToken::Integer(outer.switch_cell(b)),
                 Outer::States(outer) => CellToken::IntegerState(outer.switch_cell(b)),
-                Outer::Streams(_) => {
+                Outer::Streams(_) | Outer::Linear(_) => {
                     unreachable!("bough-oracle: check switches cells over a cell of cells")
                 }
             }),
+            Definition::Construct { body, source } => {
+                let index = self.nodes.len();
+                let types = self.bodies[index]
+                    .clone()
+                    .expect("bough-oracle: check gives every construct its body's types");
+                self.construct(b, body, types, source)
+            }
             Definition::CellLoop(_) => {
                 let index = self.nodes.len();
                 let NodeType::Cell { value, state } = self.types[index] else {
@@ -2684,7 +3347,7 @@ impl<M: EngineMode> Builder<'_, M> {
                     .expect("bough-oracle: check closes a loop once");
                 // check makes a cell loop a State exactly when its definition
                 // is one, and a state loop may close with either.
-                match (closer, self.nodes.get(top(definition))) {
+                match (closer, Some(self.at(definition))) {
                     (Closer::Stream(closer), _) => {
                         let chain = self.take(definition);
                         chain.close_stream_loop(b, closer);
@@ -2740,24 +3403,227 @@ impl<M: EngineMode> Builder<'_, M> {
             }
         }
     }
-}
 
-/// The node a checked top-level reference names.
-fn top(reference: &Reference) -> usize {
-    match reference {
-        Reference::TopLevel(node) => *node,
-        Reference::Local(_) => unreachable!("bough-oracle: check refuses Local"),
+    /// The token of top-level node `node`, which a construct body reads.
+    fn capture(&self, node: usize) -> Captured {
+        match self.at(&Reference::TopLevel(node)) {
+            Built::Stream(Chained::Shared(shared)) => Captured::Shared(*shared),
+            Built::Cell(cell) => Captured::Cell(*cell),
+            Built::Outer(outer) => Captured::Outer(*outer),
+            _ => unreachable!(
+                "bough-oracle: check lets a construct body read a Share, a cell or a cell of \
+                 tokens of the top level, not N {node}"
+            ),
+        }
+    }
+
+    /// A construct: the chain before it gets a node, and the node runs a
+    /// closure that builds the body at each event, with the build context
+    /// it is handed, and emits the body's result. The closure captures the
+    /// tokens of the top-level nodes the body reads, and of those every
+    /// body nested in it reads, and the construct's node declares them with
+    /// `depends`.
+    fn construct(
+        &mut self,
+        b: &mut Build<M>,
+        body: &Body,
+        types: BodyTypes,
+        source: &Reference,
+    ) -> Built<M> {
+        let top: Arc<[NodeType]> = match &self.inside {
+            Some(inside) => inside.top_types.clone(),
+            None => Arc::from(self.types),
+        };
+        let mut captured: Vec<Option<Captured>> = vec![None; top.len()];
+        for node in body_references(body) {
+            captured[node] = Some(self.capture(node));
+        }
+        let emits = types.emits;
+        let run = Arc::new(Run {
+            body: body.clone(),
+            types,
+            top,
+            captured,
+        });
+        let node = self.take(source).materialized(b);
+        match emits {
+            NodeType::Stream(_) => {
+                let values = construct_node(b, node, run.clone(), emit_value::<M>);
+                declare_captures(b, &values, &run.captured);
+                Built::Stream(Chained::Stream(values))
+            }
+            NodeType::Tokens(Held::Streams(_)) => {
+                let tokens = construct_node(b, node, run.clone(), emit_shared::<M>);
+                declare_captures(b, &tokens, &run.captured);
+                Built::Tokens(Tokens::Streams(tokens))
+            }
+            NodeType::Tokens(Held::Linear(_)) => {
+                let tokens = construct_node(b, node, run.clone(), emit_linear::<M>);
+                declare_captures(b, &tokens, &run.captured);
+                Built::Tokens(Tokens::Linear(tokens))
+            }
+            NodeType::Tokens(Held::Cells { state: false }) => {
+                let tokens = construct_node(b, node, run.clone(), emit_cell::<M>);
+                declare_captures(b, &tokens, &run.captured);
+                Built::Tokens(Tokens::Cells(tokens))
+            }
+            NodeType::Tokens(Held::Cells { state: true }) => {
+                let tokens = construct_node(b, node, run.clone(), emit_state::<M>);
+                declare_captures(b, &tokens, &run.captured);
+                Built::Tokens(Tokens::States(tokens))
+            }
+            made => unreachable!("bough-oracle: check makes no construct of {made}"),
+        }
     }
 }
 
+// ----- construct -----
+
+/// What a construct's closure owns: the body, what its nodes make, what
+/// the top-level nodes it may read make, and the tokens of those it reads.
+struct Run {
+    body: Body,
+    types: BodyTypes,
+    top: Arc<[NodeType]>,
+    captured: Vec<Option<Captured>>,
+}
+
+/// What a construct emits for each event, from the builder that built the
+/// body: its value, or the token it names.
+type Emit<M, B> = for<'p> fn(&mut Builder<'p, M>, &mut Build<M>, &BodyResult) -> B;
+
+impl Run {
+    /// Builds the body at the construct's instant, with the build context
+    /// the closure is handed, and returns what it emits: a builder of its
+    /// own, whose top-level nodes are the captured tokens and whose `Sample`
+    /// reads, like every read during a transaction, the value before the
+    /// instant.
+    fn build<M: EngineMode, B>(&self, b: &mut Build<M>, event: i64, emit: Emit<M, B>) -> B {
+        let mut scope = Builder::<M> {
+            program_inputs: &[],
+            types: &self.types.types,
+            bodies: &self.types.bodies,
+            nodes: Vec::with_capacity(self.body.definitions.len()),
+            inputs: Vec::new(),
+            closers: Vec::new(),
+            inside: Some(Inside {
+                top: self
+                    .captured
+                    .iter()
+                    .map(|captured| captured.map_or(Built::Consumed, Captured::built))
+                    .collect(),
+                top_types: self.top.clone(),
+                event,
+            }),
+        };
+        for definition in &self.body.definitions {
+            let built = scope.define(b, definition);
+            scope.nodes.push(built);
+        }
+        emit(&mut scope, b, &self.body.result)
+    }
+}
+
+/// The node a body emits.
+fn emitted(result: &BodyResult) -> &Reference {
+    match result {
+        BodyResult::Node(node) => node,
+        BodyResult::Value(_) => {
+            unreachable!("bough-oracle: check makes a construct of tokens emit a node")
+        }
+    }
+}
+
+fn emit_value<M: EngineMode>(
+    scope: &mut Builder<'_, M>,
+    b: &mut Build<M>,
+    result: &BodyResult,
+) -> i64 {
+    match result {
+        BodyResult::Value(value) => scope.value(b, value),
+        BodyResult::Node(_) => {
+            unreachable!("bough-oracle: check makes a construct of values emit a value")
+        }
+    }
+}
+
+fn emit_shared<M: EngineMode>(
+    scope: &mut Builder<'_, M>,
+    _: &mut Build<M>,
+    result: &BodyResult,
+) -> Shared<i64> {
+    scope.shared(emitted(result))
+}
+
+fn emit_linear<M: EngineMode>(
+    scope: &mut Builder<'_, M>,
+    b: &mut Build<M>,
+    result: &BodyResult,
+) -> Stream<i64> {
+    scope.linear(b, emitted(result))
+}
+
+fn emit_cell<M: EngineMode>(
+    scope: &mut Builder<'_, M>,
+    _: &mut Build<M>,
+    result: &BodyResult,
+) -> Cell<i64> {
+    match scope.cell(emitted(result)) {
+        CellToken::Integer(cell) => cell,
+        _ => unreachable!("bough-oracle: check makes a construct of cells emit one"),
+    }
+}
+
+fn emit_state<M: EngineMode>(
+    scope: &mut Builder<'_, M>,
+    _: &mut Build<M>,
+    result: &BodyResult,
+) -> State<i64> {
+    match scope.cell(emitted(result)) {
+        CellToken::IntegerState(state) => state,
+        _ => unreachable!("bough-oracle: check makes a construct of States emit one"),
+    }
+}
+
+/// `node.construct(b, f)`, `f` building the body with `run` and emitting
+/// with `emit`.
+fn construct_node<M: EngineMode, B: Send + 'static>(
+    b: &mut Build<M>,
+    node: Base,
+    run: Arc<Run>,
+    emit: Emit<M, B>,
+) -> Stream<B> {
+    let f: ConstructFn<M, B> =
+        Box::new(move |b: &mut Build<M>, event: i64| run.build(b, event, emit));
+    match node {
+        Base::Stream(stream) => M::construct(b, stream, f),
+        Base::Shared(shared) => M::construct(b, shared, f),
+    }
+}
+
+/// Declares that a construct's node keeps the top-level nodes its closure
+/// captured, which the collector cannot see (RFD 3): a capture no root
+/// reaches otherwise would be collected before the closure's next run uses
+/// it (findings F61 and F62).
+fn declare_captures<M: EngineMode>(
+    b: &mut Build<M>,
+    node: &impl TokenRef,
+    captured: &[Option<Captured>],
+) {
+    let on: Vec<&dyn TokenRef> = captured.iter().flatten().map(Captured::token).collect();
+    b.depends(node, &on);
+}
+
 /// The build closure's body.
-fn build_program<M: EngineMode>(b: &mut Build<M>, program: &Program, types: &[NodeType]) -> Edge {
+fn build_program<M: EngineMode>(b: &mut Build<M>, program: &Program, checked: &Checked) -> Edge {
     let mut builder = Builder::<M> {
-        program,
-        types,
+        program_inputs: &program.inputs,
+        types: &checked.types,
+        bodies: &checked.bodies,
         nodes: Vec::with_capacity(program.definitions.len()),
         inputs: program.inputs.iter().map(|_| Vec::new()).collect(),
         closers: program.definitions.iter().map(|_| None).collect(),
+        inside: None,
     };
     for definition in &program.definitions {
         let built = builder.define(b, definition);
@@ -3206,9 +4072,9 @@ pub fn refusal<M: EngineMode>(
     program: &Program,
     options: RunOptions,
 ) -> Result<Refusal, BuildError> {
-    let types = check(program)?;
+    let checked = checked(program)?;
     let built = panic::catch_unwind(AssertUnwindSafe(|| {
-        M::build(|b| build_program(b, program, &types))
+        M::build(|b| build_program(b, program, &checked))
     }));
     let (mut graph, edge) = match built {
         Ok(built) => built,
@@ -3223,14 +4089,7 @@ pub fn refusal<M: EngineMode>(
             options.permute_sends.map(|seed| (seed, k)),
         );
         let ran = panic::catch_unwind(AssertUnwindSafe(|| {
-            graph.transaction(|tx| {
-                for (input, value) in order {
-                    match input {
-                        EngineInput::Integer(input) => M::send(tx, input, value),
-                        EngineInput::Boolean(input) => M::send(tx, input, truthy(value)),
-                    }
-                }
-            })
+            graph.transaction(|tx| send_all::<M>(tx, order))
         }));
         if let Err(payload) = ran {
             return Ok(Refusal::Transaction {
@@ -3243,14 +4102,24 @@ pub fn refusal<M: EngineMode>(
     Ok(Refusal::Ran)
 }
 
+/// Sends the engine sends of one transaction.
+fn send_all<M: EngineMode>(tx: &mut Transaction<'_, M>, order: Vec<(EngineInput, i64)>) {
+    for (input, value) in order {
+        match input {
+            EngineInput::Integer(input) => M::send(tx, input, value),
+            EngineInput::Boolean(input) => M::send(tx, input, truthy(value)),
+        }
+    }
+}
+
 /// Builds the program in mode `M`, listens to its observed nodes, and runs
 /// its schedule. The window of the program is not read: what the listeners
 /// see is the window `FromFirstTransaction`.
 ///
 /// Panics only where the engine panics.
 pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<EngineRun, BuildError> {
-    let types = check(program)?;
-    let (mut graph, edge) = M::build(|b| build_program(b, program, &types));
+    let checked = checked(program)?;
+    let (mut graph, edge) = M::build(|b| build_program(b, program, &checked));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
     graph.set_collect_after_every_transaction(options.collect_every_transaction);
@@ -3271,14 +4140,7 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
             &edge.inputs,
             options.permute_sends.map(|seed| (seed, k)),
         );
-        graph.transaction(|tx| {
-            for (input, value) in order {
-                match input {
-                    EngineInput::Integer(input) => M::send(tx, input, value),
-                    EngineInput::Boolean(input) => M::send(tx, input, truthy(value)),
-                }
-            }
-        });
+        graph.transaction(|tx| send_all::<M>(tx, order));
         for recorder in &mut recorders {
             recorder.begin_transaction();
         }
