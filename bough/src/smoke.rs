@@ -273,13 +273,53 @@ macro_rules! smoke_graph {
     }};
 }
 
+/// Stage 8, the I/O edge, in one mode: a slot connected to an input and a
+/// burst folded into one event, a pump and a waker; and where the target
+/// has a `Remote`, a remote send and a remote transaction, pumped after the
+/// slot. Each expansion has a slot of its own.
+macro_rules! smoke_edge {
+    ($build:path) => {{
+        #[cfg(any(feature = "std", feature = "critical-section"))]
+        {
+            static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
+            let (mut graph, (presses_in, total)) = $build(|b| {
+                let (presses, presses_in) = b.input::<u32>();
+                b.connect(presses_in, &PRESSES);
+                (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
+            });
+            graph.set_waker(core::task::Waker::noop().clone());
+            PRESSES.send(1);
+            PRESSES.send(2);
+            graph.pump();
+            #[cfg(target_has_atomic = "ptr")]
+            {
+                let remote = graph.remote();
+                remote.send(presses_in, 10);
+                remote.transaction(move |tx| tx.send(presses_in, 20));
+                let _ = remote.try_send(presses_in, 30);
+                let _ = remote.try_transaction(move |tx| tx.send(presses_in, 40));
+            }
+            let _ = graph.try_pump();
+            *graph.sample(total)
+        }
+        #[cfg(not(any(feature = "std", feature = "critical-section")))]
+        {
+            let (mut graph, _) = $build(|b| b.input::<u32>().1);
+            graph.set_waker(core::task::Waker::noop().clone());
+            graph.pump();
+            let _ = graph.try_pump();
+            0u32
+        }
+    }};
+}
+
 /// Builds and drives a graph with every node kind of the engine so far, in
 /// each mode the target has, and returns a sum of the final values.
 #[doc(hidden)]
 pub fn smoke() -> u32 {
-    let local = smoke_graph!(Graph::build);
+    let local = smoke_graph!(Graph::build) + smoke_edge!(Graph::build);
     #[cfg(target_has_atomic = "ptr")]
-    let threaded = smoke_graph!(Graph::build_threaded);
+    let threaded = smoke_graph!(Graph::build_threaded) + smoke_edge!(Graph::build_threaded);
     #[cfg(not(target_has_atomic = "ptr"))]
     let threaded = local;
     local + threaded

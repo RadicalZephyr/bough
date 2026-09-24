@@ -55,7 +55,11 @@ fn the_smoke_graph_runs_in_every_mode() {
     // the closures build there: 2 + 2, the constant 2 * 2, a new counter at
     // 1, and 2 then 4. So 4 + 4 + 1 + 4 = 13.
     //
-    // Each mode gives 26 + 241 + 9 + 13 + 208 + 13, and the host has both
-    // modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208 + 13));
+    // Stage 8. The slot folds the burst 1, 2 into one event, 3; the remote
+    // queues 10, 20, 30 and 40, one unit each, which the pump runs after
+    // the slot. So 103.
+    //
+    // Each mode gives 26 + 241 + 9 + 13 + 208 + 13 + 103, and the host has
+    // both modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208 + 13 + 103));
 }

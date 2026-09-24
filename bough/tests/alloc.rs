@@ -37,8 +37,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::task::{Wake, Waker};
+use std::thread;
 
-use bough::{Cell, CollectionPolicy, Graph, Lift, Source};
+use bough::{Cell, CollectionPolicy, Graph, InputSlot, Lift, Source};
 
 struct Counting;
 
@@ -484,4 +489,115 @@ fn steady_state_collections_do_not_allocate() {
     assert_eq!(allocations() - before, 0, "collections that free nothing");
     assert!(slots.len() <= 4, "the new nodes took {} slots", slots.len());
     assert_eq!(*graph.sample(shown), 2 * 1100);
+}
+
+/// A waker that counts its wakes and allocates nothing when woken or
+/// cloned.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// RFD 7's claim for input slots: a write folds into the one pending event
+/// in place and wakes the driver, and a pump of slots runs each pending
+/// one as a transaction; neither allocates. Two slots, one on each of two
+/// inputs, merged; the driver's waker is registered, so every write wakes.
+#[test]
+fn slot_writes_and_pumps_do_not_allocate() {
+    static SENSOR: InputSlot<u64> = InputSlot::new(|a, b| a + b);
+    static LEVEL: InputSlot<u64> = InputSlot::keep_latest();
+    DRIVER.with(|driver| driver.set(true));
+    let (mut graph, total) = Graph::build(|b| {
+        let (sensor, sensor_in) = b.input::<u64>();
+        b.connect(sensor_in, &SENSOR);
+        let (level, level_in) = b.input::<u64>();
+        b.connect(level_in, &LEVEL);
+        sensor
+            .merge(b, level, |s, l| s + l)
+            .accumulate(b, 0u64, |n, t| t + n)
+    });
+    let (heard, sink) = tally();
+    graph
+        .listen_steps(total, move |_| sink.set(sink.get() + 1))
+        .keep();
+    let wakes = Arc::new(Wakes::default());
+    graph.set_waker(Waker::from(wakes.clone()));
+    let round = |graph: &mut Graph, k: u64| {
+        SENSOR.send(k);
+        SENSOR.send(1);
+        LEVEL.send(k);
+        graph.pump();
+    };
+    for k in 0..100 {
+        round(&mut graph, k); // warm up
+    }
+    let before = allocations();
+    for k in 100..20_100 {
+        round(&mut graph, k);
+    }
+    assert_eq!(allocations() - before, 0, "allocations in 20,000 rounds");
+    assert_eq!(heard.get(), 2 * 20_100, "two transactions a round");
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 3 * 20_100);
+    let sum: u64 = (0..20_100u64).map(|k| 2 * k + 1).sum();
+    assert_eq!(*graph.sample(total), sum);
+}
+
+/// RFD 6 sanctions a remote unit's allocation on the sending thread, and
+/// that is the only one: the unit's box, once its queue has grown to size.
+/// The driver's pumps, which pop each unit, run it as a transaction and
+/// drop it, allocate nothing. The sender runs on a thread of its own and
+/// counts its own allocations.
+#[test]
+fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
+    const UNITS: u64 = 1_000;
+    DRIVER.with(|driver| driver.set(true));
+    let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        (numbers_in, numbers.accumulate(b, 0u64, |n, t| t + n))
+    });
+    let (heard, sink) = tally();
+    graph
+        .listen_steps(total, move |_| sink.set(sink.get() + 1))
+        .keep();
+    graph.set_waker(Waker::from(Arc::new(Wakes::default())));
+    let remote = graph.remote();
+    let (go, rounds) = mpsc::sync_channel::<()>(0);
+    let (sent, filled) = mpsc::sync_channel::<usize>(0);
+    let sender = thread::spawn(move || {
+        DRIVER.with(|driver| driver.set(true));
+        while rounds.recv().is_ok() {
+            let before = allocations();
+            for n in 0..UNITS / 2 {
+                remote.send(numbers_in, n);
+                remote.transaction(move |tx| tx.send(numbers_in, n));
+            }
+            sent.send(allocations() - before).unwrap();
+        }
+    });
+    let mut on_sender = Vec::new();
+    let mut on_driver = 0;
+    for round in 0..20 {
+        go.send(()).unwrap();
+        on_sender.push(filled.recv().unwrap());
+        let before = allocations();
+        graph.pump();
+        if round > 0 {
+            on_driver += allocations() - before;
+        }
+    }
+    drop(go);
+    sender.join().unwrap();
+    assert_eq!(on_driver, 0, "allocations in 19 pumps of 1,000 units");
+    assert_eq!(heard.get(), 20 * UNITS, "one transaction a unit");
+    assert!(
+        on_sender[1..].iter().all(|&n| n == UNITS as usize),
+        "one allocation a unit once the queue has grown: {on_sender:?}"
+    );
 }
