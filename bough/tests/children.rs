@@ -1,6 +1,6 @@
 //! Child transactions: the children `t ++ [n]` of an instant t, which
-//! `split` starts, run after t's listeners, depth first, each a whole
-//! transaction, and poison across them.
+//! `split` and `defer` start, run after t's listeners, depth first, each a
+//! whole transaction, and poison across them.
 //!
 //! The expected values are GHC's. The spike's scratchpad holds the program,
 //! stage4-ghc/Stage4.hs, which runs each test's program over an unchanged
@@ -434,13 +434,235 @@ fn a_split_ends_at_its_iterators_first_none() {
     assert_instants(counts, [1 + 3]);
 }
 
-/// A split is two nodes: the one that takes the event and the one that
-/// emits the elements.
+/// A defer is a split of a one-element list, so its event is simultaneous
+/// with element 0 of every split that fires in its instant, and with every
+/// other defer's event there (finding F13): child 0 is not the defer's own.
+/// Stage4.hs, `splitAndDefer`:
+///
+/// ```text
+/// split and defer: merged: [([1,0],140),([1,1],2),([1,2],3),([2,0],5),([3,0],607),([4,0],8)]
+/// split and defer: two defers: [([1,0],409),([2,0],54),([3,0],7),([4,0],8)]
+/// ```
 #[test]
-fn a_split_is_two_nodes() {
+fn a_split_and_a_defer_share_child_index_0() {
+    let (merged, defers, counts) = every_seed(|seed| {
+        let (mut graph, (inputs, merged, defers)) = Graph::build(|b| {
+            let (lists, lists_in) = b.input::<Vec<u32>>();
+            let (numbers, numbers_in) = b.input::<u32>();
+            let (others, others_in) = b.input::<u32>();
+            let numbers = numbers.share(b);
+            let later = numbers.defer(b);
+            let merged = lists.split(b).merge(b, later, |i, n| i * 100 + n);
+            let also = others.defer(b);
+            let defers = numbers.defer(b).merge(b, also, |n, o| n * 10 + o);
+            ((lists_in, numbers_in, others_in), merged, defers)
+        });
+        graph.set_shuffle_seed(seed);
+        let (lists_in, numbers_in, others_in) = inputs;
+        let (merged_seen, on_merged) = recorder();
+        graph.listen(merged, on_merged).keep();
+        let (defers_seen, on_defers) = recorder();
+        graph.listen(defers, on_defers).keep();
+        let counts = [
+            counted(&mut graph, |g| {
+                g.transaction(|tx| {
+                    tx.send(lists_in, vec![1, 2, 3]);
+                    tx.send(numbers_in, 40);
+                    tx.send(others_in, 9);
+                })
+            }),
+            counted(&mut graph, |g| {
+                g.transaction(|tx| {
+                    tx.send(numbers_in, 5);
+                    tx.send(others_in, 4);
+                })
+            }),
+            counted(&mut graph, |g| {
+                g.transaction(|tx| {
+                    tx.send(lists_in, vec![6]);
+                    tx.send(numbers_in, 7);
+                })
+            }),
+            counted(&mut graph, |g| {
+                g.transaction(|tx| {
+                    tx.send(lists_in, vec![]);
+                    tx.send(numbers_in, 8);
+                })
+            }),
+        ];
+        (merged_seen.take(), defers_seen.take(), counts)
+    });
+    assert_eq!(merged, [140, 2, 3, 5, 607, 8]);
+    assert_eq!(defers, [409, 54, 7, 8]);
+    assert_instants(counts, [1 + 3, 1 + 1, 1 + 1, 1 + 1]);
+}
+
+/// A countdown, `s = merge(input, defer(s.map(-1).filter(> 0)))`: a stream
+/// loop through defer, legal since the defer's output does not depend on
+/// its input, one child level deeper per round, and stopped by the filter.
+/// Stage4.hs, `countdown`:
+///
+/// ```text
+/// countdown: s: [([1],3),([1,0],2),([1,0,0],1),([2],1),([3],2),([3,0],1)]
+/// countdown: hold after [1], [2], [3]: (1,1,1)
+/// countdown with no filter, 30 rounds: Nothing
+/// ```
+///
+/// Without the filter the loop has no fixed point (finding F22), and the
+/// engine's send would never return; that is the semantics, and nothing
+/// guards against it.
+#[test]
+fn a_countdown_loop_through_defer_ends_with_its_filter() {
+    let (events, holds, counts) = every_seed(|seed| {
+        let (mut graph, (input_in, s, held)) = Graph::build(|b| {
+            let (fwd, fwd_loop) = b.stream_loop::<i64>();
+            let again = fwd.map(|n| n - 1).filter(|n| *n > 0).defer(b);
+            let (input, input_in) = b.input::<i64>();
+            let s = input.merge(b, again, |i, _| i).share(b);
+            fwd_loop.close(b, s);
+            (input_in, s, s.hold(b, 0i64))
+        });
+        graph.set_shuffle_seed(seed);
+        let (seen, on) = recorder();
+        graph.listen(s, on).keep();
+        let mut holds = Vec::new();
+        let mut counts = [None; 3];
+        for (k, start) in [3, 1, 2].into_iter().enumerate() {
+            counts[k] = counted(&mut graph, |g| g.send(input_in, start));
+            holds.push(*graph.sample(held));
+        }
+        (seen.take(), holds, counts)
+    });
+    assert_eq!(events, [3, 2, 1, 1, 2, 1]);
+    assert_eq!(holds, [1, 1, 1]);
+    assert_instants(counts, [1 + 2, 1, 1 + 1]);
+}
+
+/// A loop whose depth is a hundred thousand child levels runs in a thread
+/// with a 256 KiB stack: the scheduler is a loop, and keeps the levels in
+/// progress on the heap. A scheduler that recursed per level would need
+/// the stack to grow with the depth.
+#[test]
+fn a_deep_defer_loop_does_not_grow_the_stack() {
+    const DEPTH: i64 = 100_000;
+    let run = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let (mut graph, (input_in, count, last)) = Graph::build(|b| {
+                let (fwd, fwd_loop) = b.stream_loop::<i64>();
+                let again = fwd.map(|n| n - 1).filter(|n| *n > 0).defer(b);
+                let (input, input_in) = b.input::<i64>();
+                let s = input.or_else(b, again).share(b);
+                fwd_loop.close(b, s);
+                let count = s.accumulate(b, 0i64, |_, c| c + 1);
+                (input_in, count, s.hold(b, 0i64))
+            });
+            graph.send(input_in, DEPTH);
+            let first = (*graph.sample(count), *graph.sample(last));
+            graph.send(input_in, 2);
+            (first, *graph.sample(count), *graph.sample(last))
+        })
+        .expect("spawn")
+        .join()
+        .expect("no overflow");
+    assert_eq!(run, ((DEPTH, 1), DEPTH + 2, 1));
+}
+
+/// A loop through a defer of a cell loop's own steps view is legal: the
+/// definition reaches the forward only through the defer. The same loop
+/// without the defer is F3's same-instant cycle, a hold feeding its own
+/// steps view, and close refuses it. Stage4.hs, `cellLoopThroughDefer`:
+///
+/// ```text
+/// cell loop through defer: count: (0,[([1],1),([1,0],2),([1,0,0],3),([2],0),([2,0],1),([2,0,0],2),([2,0,0,0],3),([3],2),([3,0],3)])
+/// ```
+#[test]
+fn a_cell_loop_through_a_defer_of_its_steps_is_legal_where_f3_is_refused() {
+    let (steps, count) = every_seed(|seed| {
+        let (mut graph, (ticks_in, count)) = Graph::build(|b| {
+            let (count, count_loop) = b.cell_loop::<i64>();
+            let (ticks, ticks_in) = b.input::<i64>();
+            let again = count.steps(b).filter(|n| *n < 3).map(|n| n + 1).defer(b);
+            let next = ticks.or_else(b, again).hold(b, 0i64);
+            count_loop.close(b, next);
+            (ticks_in, count)
+        });
+        graph.set_shuffle_seed(seed);
+        let (seen, mut on) = recorder();
+        graph.listen_steps(count, move |n| on(*n)).keep();
+        for tick in [1, 0, 2] {
+            graph.send(ticks_in, tick);
+        }
+        (seen.take(), *graph.sample(count))
+    });
+    assert_eq!(steps, [1, 2, 3, 0, 1, 2, 3, 2, 3]);
+    assert_eq!(count, 3);
+
+    let refused = catch_unwind(|| {
+        Graph::build(|b| {
+            let (count, count_loop) = b.cell_loop::<i64>();
+            let (ticks, _ticks_in) = b.input::<i64>();
+            let again = count.steps(b).filter(|n| *n < 3).map(|n| n + 1);
+            let next = ticks.or_else(b, again).hold(b, 0i64);
+            count_loop.close(b, next);
+        });
+    });
+    let text = *refused
+        .expect_err("closing without the defer is refused")
+        .downcast::<String>()
+        .expect("a formatted message");
+    assert!(text.contains("same-instant cycle"), "{text}");
+}
+
+/// Transaction zero has children (finding F11): a steps_with_current built
+/// in the build fires at [0], a defer of it at [0,0], and Graph::build runs
+/// that child before it returns. The child reads what [0] committed: a
+/// hold of the steps_with_current itself. Stage4.hs, `txZero`:
+///
+/// ```text
+/// tx zero: current: [([0],3),([1],4)]
+/// tx zero: deferred: [([0,0],30),([1,0],40)]
+/// tx zero: held, direct, seen at [1]: (30,3,33)
+/// tx zero: held, direct, seen after [1]: (40,4,44)
+/// ```
+#[test]
+fn a_defer_of_steps_with_current_built_in_the_build_fires_before_build_returns() {
+    let run = every_seed(|seed| {
+        let (mut graph, (level_in, held, direct, seen)) = Graph::build(|b| {
+            let (level, level_in) = b.input_cell(3i64);
+            let current = level.steps_with_current(b).share(b);
+            let direct = current.hold(b, 0i64);
+            let deferred = current.map(|x| x * 10).defer(b).share(b);
+            let held = deferred.hold(b, 0i64);
+            let seen = deferred.snapshot(direct, |d, h| d + h).hold(b, 0i64);
+            (level_in, held, direct, seen)
+        });
+        let values = |g: &Graph| (*g.sample(held), *g.sample(direct), *g.sample(seen));
+        let built = (values(&graph), instants(&graph));
+        graph.set_shuffle_seed(seed);
+        let after = counted(&mut graph, |g| g.send(level_in, 4));
+        (built, values(&graph), after)
+    });
+    let ((built, zero), after, counts) = run;
+    assert_eq!(built, (30, 3, 33));
+    assert_eq!(after, (40, 4, 44));
+    if let (Some(zero), Some(counts)) = (zero, counts) {
+        assert_eq!((zero, counts), (1 + 1, 1 + 1));
+    }
+}
+
+/// A split and a defer are two nodes each: the one that takes the event
+/// and the one that emits it, or its elements.
+#[test]
+fn a_split_and_a_defer_are_two_nodes_each() {
     let (graph, _) = Graph::build(|b| {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         (lists_in, lists.map(|l| l).split(b))
+    });
+    assert_eq!(graph.live_nodes(), 3);
+    let (graph, _) = Graph::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.map(|n| n + 1).defer(b))
     });
     assert_eq!(graph.live_nodes(), 3);
 }

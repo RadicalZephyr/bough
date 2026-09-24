@@ -73,8 +73,9 @@ impl Graph<Local> {
     /// set, which is why `R: Trace`.
     ///
     /// The build closure runs as transaction zero. Its child transactions,
-    /// which a [`split`](crate::Source::split) that fires in it starts, run
-    /// before `build` returns.
+    /// which a [`split`](crate::Source::split) or a
+    /// [`defer`](crate::Source::defer) that fires in it starts, run before
+    /// `build` returns.
     pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Graph<Local>, R) {
         build_graph(f)
     }
@@ -147,8 +148,9 @@ impl<M: Mode> Graph<M> {
 
     /// Sends one value in a transaction of its own. Returns after the
     /// transaction's listeners have run, and after its child transactions,
-    /// which a [`split`](crate::Source::split) that fires starts, have run
-    /// with theirs.
+    /// which a [`split`](crate::Source::split) or a
+    /// [`defer`](crate::Source::defer) that fires starts, have run with
+    /// theirs.
     ///
     /// Panics on a foreign token or a poisoned graph. Sending to a collected
     /// input is unobservable by the semantics: a panic in debug builds and a
@@ -417,12 +419,12 @@ impl<M: Mode> Graph<M> {
     /// The number of live nodes: how the no-leak requirement is asserted.
     ///
     /// Every materializer creates one node, however long its chain;
-    /// `input_cell` creates two, the input and the hold over it, and so
-    /// does [`split`](crate::Source::split): the node that takes each event,
-    /// and the one that emits its elements in the child transactions. A
-    /// cell or state loop's forward is a node of its own besides its
-    /// definition; a stream loop's forward is the one node its definition's
-    /// chain is fused into.
+    /// `input_cell` creates two, the input and the hold over it, and so do
+    /// [`split`](crate::Source::split) and [`defer`](crate::Source::defer):
+    /// the node that takes each event, and the one that emits it, or its
+    /// elements, in the child transactions. A cell or state loop's forward
+    /// is a node of its own besides its definition; a stream loop's forward
+    /// is the one node its definition's chain is fused into.
     pub fn live_nodes(&self) -> usize {
         self.build.store.live
     }

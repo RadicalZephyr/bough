@@ -1,10 +1,12 @@
-//! `split`: two nodes. The capture takes the event at the instant it fires
-//! in, as its chain's one consumer, and keeps an iterator over the event's
-//! elements for the child scheduler. The output is a stream node with no
-//! dependencies, started by the scheduler in each child instant with the
-//! next element. The output does not depend on the capture, since it fires
-//! at a later instant, so marking never passes from one to the other and a
-//! loop through them has no cycle.
+//! `split` and `defer`: two nodes each. The capture takes the event at the
+//! instant it fires in, as its chain's one consumer, and keeps it for the
+//! child scheduler: `split` as an iterator over the event's elements,
+//! `defer` as the event itself. The output is a stream node with no
+//! dependencies, started by the scheduler in child instants: a split's with
+//! each next element, a defer's with its event in the first child. The
+//! output does not depend on the capture, since it fires at a later
+//! instant, so marking never passes from one to the other and a loop
+//! through them has no cycle.
 //!
 //! A capture's program is its chain and a stack with one entry per level of
 //! child instants it has fired in and whose children are not done: a loop
@@ -91,6 +93,61 @@ where
         eval: eval_split::<M, S>,
         emit_child: emit_split::<M, S>,
         end_children: end_split::<M, S>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
+/// `defer`'s capture: the chain, and a stack of events, each emitted once,
+/// in the first child instant of the instant it fired in. The semantics'
+/// `defer` is `split` of a one-element list, and this is that node with the
+/// list left out.
+pub(crate) struct DeferNode<S>(Marker<S>);
+
+fn eval_defer<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+where
+    S::Event: 'static,
+{
+    let [chain, stack] = parts else {
+        unreachable!("bough engine: a defer capture has two parts")
+    };
+    if let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) {
+        part::<M, Vec<Option<S::Event>>>(stack).push(Some(event));
+        b.capture_fired(me);
+    }
+}
+
+/// Child 0 takes the top event; any later child finds it gone.
+fn emit_defer<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32) -> bool
+where
+    S::Event: 'static,
+{
+    let top = part::<M, Vec<Option<S::Event>>>(&mut parts[1])
+        .last_mut()
+        .expect("bough engine: a capture in a level has an entry for that level");
+    match top.take() {
+        Some(event) => {
+            b.fire_child(me, event);
+            true
+        }
+        None => false,
+    }
+}
+
+fn end_defer<M: Mode, S: Source>(parts: &mut [M::Carrier])
+where
+    S::Event: 'static,
+{
+    part::<M, Vec<Option<S::Event>>>(&mut parts[1]).pop();
+}
+
+impl<M: Mode, S: Source> NodeOps<M> for DeferNode<S>
+where
+    S::Event: 'static,
+{
+    const OPS: Ops<M> = Ops {
+        eval: eval_defer::<M, S>,
+        emit_child: emit_defer::<M, S>,
+        end_children: end_defer::<M, S>,
         ..Ops::<M>::DEFAULT
     };
 }

@@ -28,10 +28,10 @@ pub(crate) struct Sched {
     pub(crate) relinks: Vec<u32>,
     /// Nodes with listeners that fired, in evaluation order.
     pub(crate) dispatch: Vec<u32>,
-    /// `levels[d]`: the split captures that fired in the running instant
-    /// at child depth `d`, or in the one whose children are running there.
-    /// The child scheduler's stack: the levels in progress are always 0 to
-    /// the innermost.
+    /// `levels[d]`: the split and defer captures that fired in the running
+    /// instant at child depth `d`, or in the one whose children are running
+    /// there. The child scheduler's stack: the levels in progress are
+    /// always 0 to the innermost.
     pub(crate) levels: Vec<Vec<u32>>,
     /// The child depth of the running instant: 0 for a transaction, d + 1
     /// for a child of an instant at depth d.

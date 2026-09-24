@@ -3,12 +3,14 @@
 //! before `send` returns, depth first, by a loop with an explicit stack
 //! rather than by recursion.
 //!
-//! A split capture that fires at depth d pushes one entry on its own stack,
-//! the iterator over the event's elements, and registers in `levels[d]`.
-//! Child n of an instant at depth d is an instant at depth d + 1 whose
-//! started nodes are the outputs of the captures in `levels[d]`, each with
-//! its element n. So two splits that fire in one instant share child
-//! indices, and their elements at one index are simultaneous. A capture that
+//! A split or defer capture that fires at depth d pushes one entry on its
+//! own stack, the iterator over the event's elements or the deferred event,
+//! and registers in `levels[d]`. Child n of an instant at depth d is an
+//! instant at depth d + 1 whose started nodes are the outputs of the
+//! captures in `levels[d]`, each with its element n. So two splits that
+//! fire in one instant share child indices, and their elements at one index
+//! are simultaneous; a defer is a split of one element, so its event is
+//! simultaneous with element 0 of the others (finding F13). A capture that
 //! fires again inside a child, through a loop, pushes a second entry. The
 //! scheduler always runs the innermost level, whose captures' entries are
 //! on top, so the grandchildren `t ++ [n] ++ [m]` run before `t ++ [n + 1]`:

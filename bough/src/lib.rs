@@ -23,11 +23,12 @@
 //! [`CellLoop`], `state_loop` with [`StateLoop`] and `stream_loop` with
 //! [`StreamLoop`], closed under the rule that the dependency graph stays
 //! acyclic. Stage 4 adds child transactions: `split` emits the elements of
-//! an event in the children of its transaction, which run depth first
-//! before `send` returns. Every other operation still has a `todo!()`
-//! body. The examples in the documentation that call only working
-//! operations run, the rest compile, and the guarantees the RFDs make are
-//! fixed by `compile_fail` doc tests.
+//! an event in the children of its transaction, and `defer` the event in
+//! its first child, and the children run depth first before `send`
+//! returns. Every other operation still has a `todo!()` body. The examples
+//! in the documentation that call only working operations run, the rest
+//! compile, and the guarantees the RFDs make are fixed by `compile_fail`
+//! doc tests.
 //!
 //! # Targets
 //!

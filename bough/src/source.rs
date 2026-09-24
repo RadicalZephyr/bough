@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use crate::Build;
 use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
-use crate::engine::nodes::split::SplitNode;
+use crate::engine::nodes::split::{DeferNode, SplitNode};
 use crate::engine::nodes::stream::{ChainNode, MergeNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
@@ -397,11 +397,12 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     ///
     /// Every split that fires at t shares t's children: child n carries
     /// element n of each, so those elements are simultaneous, and a
-    /// [`merge`](Source::merge) of two splits combines them. An empty event
-    /// emits nothing. A split that fires inside a child, over another
-    /// split's elements or through a loop, has children of that child,
-    /// which run before the next child of t: depth first, which is time
-    /// order.
+    /// [`merge`](Source::merge) of two splits combines them. A
+    /// [`defer`](Source::defer) is a split of one element, so its event
+    /// joins element 0. An empty event emits nothing. A split that fires
+    /// inside a child, over another split's elements or through a loop, has
+    /// children of that child, which run before the next child of t: depth
+    /// first, which is time order.
     ///
     /// The output does not depend on the input, since it fires in a later
     /// instant, so a loop through a split is legal (the rule is
@@ -442,13 +443,79 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         Stream::from_token(build.token(output))
     }
 
-    /// Emits each event in a child transaction of its own.
+    /// Emits each event again in the first child transaction of the
+    /// transaction t it fires in, `t ++ [0]`: after t's listeners, and
+    /// before anything the I/O side sends next.
+    ///
+    /// That child is not the defer's own. The semantics' `defer` is a
+    /// [`split`](Source::split) of a one-element list, so it shares index
+    /// 0 with every split and every other defer that fires at t: the
+    /// deferred event is simultaneous with their events there, and a
+    /// [`merge`](Source::merge) combines them.
+    ///
+    /// The output does not depend on the input, since it fires in a later
+    /// instant, so a loop through a defer is legal (the rule is
+    /// [`Build::cell_loop`]'s), and each round of it runs one child
+    /// transaction deeper. A countdown:
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (starts_in, counts)) = Graph::build(|b| {
+    ///     let (counts, counts_loop) = b.stream_loop::<u32>();
+    ///     let again = counts.filter(|n| *n > 1).map(|n| n - 1).defer(b);
+    ///     let (starts, starts_in) = b.input::<u32>();
+    ///     let counts = starts.or_else(b, again).share(b);
+    ///     counts_loop.close(b, counts);
+    ///     (starts_in, counts)
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen(counts, move |n| log.borrow_mut().push(n)).keep();
+    /// graph.send(starts_in, 3); // 3 at [1], 2 at [1, 0], 1 at [1, 0, 0]
+    /// assert_eq!(*seen.borrow(), [3, 2, 1]);
+    /// ```
+    ///
+    /// Such a loop needs something that stops it, here the filter. A loop
+    /// through a defer whose every event comes back never ends, and
+    /// neither does the `send` that started it: the semantics give it
+    /// infinitely many events before the next transaction, and no check at
+    /// close can tell a loop that stops from one that does not, so the
+    /// engine does not guard against it. It keeps one level of child
+    /// transactions in progress per round, so a loop that does stop grows
+    /// memory with its depth, not the stack.
+    ///
+    /// A defer is two nodes: one takes the event, the other emits it. The
+    /// event waits in the first until the child transaction, and in the
+    /// second's slot after it, so the mode must accept its type; a
+    /// `Threaded` graph refuses `Rc` events:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
+    /// });
+    /// ```
     fn defer<M>(self, build: &mut Build<M>) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self>,
+        M: Mode + Accepts<Self> + Accepts<Self::Event>,
         Self::Event: 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<Self::Event>>::erase(Erase::Stack),
+        ]);
+        let slot = <M as Accepts<Self::Event>>::erase(Erase::Slot);
+        let ops = &<DeferNode<Self> as NodeOps<M>>::OPS;
+        let output = build.capture_pair(dependency, cells, parts, ops, slot);
+        Stream::from_token(build.token(output))
     }
 
     /// The semantics' `Execute`: runs `f` at each event with a fresh
