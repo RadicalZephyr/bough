@@ -15,8 +15,8 @@ pub(crate) struct Sched {
     pub(crate) cursor: u32,
     /// The evaluation loop has finished for this instant.
     pub(crate) order_done: bool,
-    /// The marking walk's stack: a node and how many of its dependents it
-    /// has visited.
+    /// The marking walk's stack: the ancestors of the node being walked,
+    /// each with how many of its dependents it has visited.
     pub(crate) stack: Vec<(u32, u32)>,
     /// Nodes created in this instant, in creation order.
     pub(crate) created: Vec<u32>,

@@ -175,18 +175,21 @@ impl<M: Mode> Build<M> {
         }
     }
 
-    /// An iterative depth-first walk from each started node's dependents,
-    /// with the reused stack. Its post-order read backwards is a topological
-    /// order of exactly the affected region. Every marked node is ordered,
-    /// read-through cells included: marking reaches more than what steps (a
-    /// hold behind a filter that rejects is marked and does not step), so
-    /// whether a node fired is decided in dependency order. A node with
-    /// watchers queues its switch_streams for relink and does not descend
-    /// into them, since they are not its dependents.
+    /// An iterative depth-first walk from each started node's dependents.
+    /// Its post-order read backwards is a topological order of exactly the
+    /// affected region. Every marked node is ordered, read-through cells
+    /// included: marking reaches more than what steps (a hold behind a
+    /// filter that rejects is marked and does not step), so whether a node
+    /// fired is decided in dependency order. A node with watchers queues its
+    /// switch_streams for relink and does not descend into them, since they
+    /// are not its dependents.
+    ///
+    /// The node being walked and its position in its dependents list stay
+    /// in locals; only its ancestors wait on the reused stack, so a node
+    /// with one dependent costs one push and one pop.
     fn mark_walk<const SHUFFLE: bool>(&mut self, seed: u64) {
         let tx = self.tx;
         let Build { store, s, .. } = self;
-        s.order.clear();
         let starts = s.starts.len();
         let first = if SHUFFLE && starts > 1 {
             rotation(seed, tx, u32::MAX, starts)
@@ -194,21 +197,19 @@ impl<M: Mode> Build<M> {
             0
         };
         for r in 0..starts {
-            let at = if SHUFFLE { (r + first) % starts } else { r };
-            let start = s.starts[at];
-            s.stack.push((start, 0));
-            while let Some(top) = s.stack.last_mut() {
-                let (n, k) = *top;
+            let start = s.starts[if SHUFFLE { (r + first) % starts } else { r }];
+            let (mut n, mut k) = (start, 0usize);
+            loop {
                 let dependents = &store.relations[n as usize].dependents;
                 let len = dependents.len();
-                if (k as usize) < len {
-                    top.1 += 1;
+                if k < len {
                     let at = if SHUFFLE {
-                        (k as usize + rotation(seed, tx, n, len)) % len
+                        (k + rotation(seed, tx, n, len)) % len
                     } else {
-                        k as usize
+                        k
                     };
                     let d = dependents[at];
+                    k += 1;
                     let h = &mut store.hot[d as usize];
                     if h.mark != tx {
                         h.mark = tx;
@@ -224,7 +225,8 @@ impl<M: Mode> Build<M> {
                                 }
                             }
                         }
-                        s.stack.push((d, 0));
+                        s.stack.push((n, k as u32));
+                        (n, k) = (d, 0);
                     } else {
                         // A backstop: closing a loop and relinking a switch
                         // refuse cycles first.
@@ -234,14 +236,17 @@ impl<M: Mode> Build<M> {
                         );
                     }
                 } else {
-                    s.stack.pop();
-                    if n != start {
-                        let h = &mut store.hot[n as usize];
-                        h.flags &= !ON_STACK;
-                        h.pos = s.order.len() as u32;
-                        s.order.push(n);
-                        count!(s, ordered);
-                    }
+                    // `n` is finished. The start, at the bottom, is not
+                    // ordered.
+                    let Some((parent, visited)) = s.stack.pop() else {
+                        break;
+                    };
+                    let h = &mut store.hot[n as usize];
+                    h.flags &= !ON_STACK;
+                    h.pos = s.order.len() as u32;
+                    s.order.push(n);
+                    count!(s, ordered);
+                    (n, k) = (parent, visited as usize);
                 }
             }
         }
