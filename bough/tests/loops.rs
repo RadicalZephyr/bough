@@ -311,6 +311,60 @@ fn a_loop_closed_with_another_loops_forward_reads_through_both() {
     assert_eq!(*graph.sample(outer), 8);
 }
 
+/// The rule's boundary: a steps view inside a loop is legal when the cycle
+/// also passes through a snapshot, which delays it to the next instant. x
+/// snapshots y, and y holds x's steps: `x = hold 0 (snapshot ticks y
+/// (\t y -> y + t))`, `y = hold 100 (map (*2) (updates x))`. GHC
+/// (Boundary.hs; the fixed point and the lazy knot agree): x `[1] 101 [2]
+/// 204 [3] 411`, y `[1] 202 [2] 408 [3] 822`, y carrying x's value after
+/// each instant. With x reading y's steps instead of a snapshot of y, the
+/// cycle runs through both loops within one instant and the second close
+/// refuses it, naming all seven nodes.
+#[test]
+fn a_steps_view_inside_a_loop_is_legal_when_a_snapshot_is_on_the_cycle() {
+    let (mut graph, (ticks_in, x, y)) = Graph::build(|b| {
+        let (x_fwd, x_loop) = b.cell_loop::<u32>();
+        let (y_fwd, y_loop) = b.cell_loop::<u32>();
+        let (ticks, ticks_in) = b.input::<u32>();
+        let x = ticks.snapshot(y_fwd, |t, y| y + t).hold(b, 0u32);
+        let x_steps = x_fwd.steps(b);
+        let y = x_steps.map(|v| v * 2).hold(b, 100u32);
+        x_loop.close(b, x);
+        y_loop.close(b, y);
+        (ticks_in, x, y)
+    });
+    let (x_seen, mut on_x) = recorder();
+    graph.listen_steps(x, move |v| on_x(*v)).keep();
+    let (y_seen, mut on_y) = recorder();
+    graph.listen_steps(y, move |v| on_y(*v)).keep();
+    for t in [1, 2, 3] {
+        graph.send(ticks_in, t);
+    }
+    assert_eq!(*x_seen.borrow(), [101, 204, 411]);
+    assert_eq!(*y_seen.borrow(), [202, 408, 822]);
+
+    let both_steps = panic_message(|| {
+        Graph::build(|b| {
+            let (x_fwd, x_loop) = b.cell_loop::<u32>(); // node 1
+            let (y_fwd, y_loop) = b.cell_loop::<u32>(); // node 2
+            let (ticks, _ticks_in) = b.input::<u32>(); // node 3
+            let y_steps = y_fwd.steps(b); // node 4
+            let x = ticks.or_else(b, y_steps).hold(b, 0u32); // nodes 5 and 6
+            let x_steps = x_fwd.steps(b); // node 7
+            let y = x_steps.map(|v| v * 2).hold(b, 100u32); // node 8
+            x_loop.close(b, x);
+            y_loop.close(b, y);
+        })
+    });
+    assert!(
+        both_steps.contains(
+            "same-instant cycle: node 2 (Loop) -> node 4 (Stream) -> node 5 (Stream) -> \
+             node 6 (Hold) -> node 1 (Loop) -> node 7 (Stream) -> node 8 (Hold) -> node 2"
+        ),
+        "{both_steps}"
+    );
+}
+
 #[test]
 fn a_cell_loop_is_one_node_besides_its_definition() {
     let (graph, ()) = Graph::build(|b| {
