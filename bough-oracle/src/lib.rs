@@ -128,8 +128,8 @@ pub use build::{
     evaluate, name, refusal, run, switch_candidates,
 };
 pub use compare::{
-    Engine, Expected, Failure, Report, SwitchCount, SwitchWatch, Switching, check_program, compare,
-    expected, watch_switches,
+    ConstructCount, ConstructWatch, Engine, Expected, Failure, Report, SwitchCount, SwitchWatch,
+    Switching, check_program, compare, expected, watch_constructs, watch_switches,
 };
 pub use generate::{
     MAX_DEFINITIONS, guard_element, guard_filter, guard_map, programs, reduce, references,

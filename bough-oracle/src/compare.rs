@@ -64,7 +64,7 @@ use crate::answer::{Answer, Datum, Observation};
 use crate::build::{self, BuildError, Call, EngineObservation, EngineRun, RunOptions};
 use crate::generate;
 use crate::ghc::Oracle;
-use crate::program::{Definition, Expression, Program, Reference, Time, Value, Window};
+use crate::program::{BodyResult, Definition, Expression, Program, Reference, Time, Value, Window};
 
 /// What the oracle says one observed node shows, transaction k at index
 /// k - 1, each event or step with its time.
@@ -862,6 +862,212 @@ impl SwitchWatch {
             } else {
                 count.streams += tally;
             }
+        }
+        Ok(count)
+    }
+}
+
+// ----- what the constructs did -----
+
+/// What some programs' constructs did, by the oracle's answer to their
+/// watching programs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConstructCount {
+    /// The constructs the comparison sees: top-level ones that an observed
+    /// node reads, however indirectly.
+    pub constructs: u64,
+    /// Those that ran their body at an instant from `[1]` on.
+    pub fired: u64,
+    /// The switches the comparison sees over a hold of what one of those
+    /// constructs emits, a token its body builds.
+    pub switches: u64,
+    /// Those that moved to a token a body built at an instant from `[1]`
+    /// on: their construct fired then.
+    pub switched: u64,
+    /// Those that then showed it: a `switch_cell` steps to the built cell's
+    /// value at the move, and a `switch_stream` forwarded an event after it.
+    pub showed: u64,
+    /// The constructs of values, among the fired ones, whose value reads a
+    /// cell their body built, as it was before the instant.
+    pub sampled: u64,
+}
+
+impl AddAssign for ConstructCount {
+    fn add_assign(&mut self, other: ConstructCount) {
+        self.constructs += other.constructs;
+        self.fired += other.fired;
+        self.switches += other.switches;
+        self.switched += other.switched;
+        self.showed += other.showed;
+        self.sampled += other.sampled;
+    }
+}
+
+/// A switch over a hold of a construct's tokens, as the watching program
+/// observes it.
+#[derive(Clone, Copy, Debug)]
+struct Following {
+    /// The construct's place in [`ConstructWatch::constructs`].
+    construct: usize,
+    /// A `switch_cell`, or a `switch_stream`.
+    cell: bool,
+    /// Where the switch is in the watching program's observations.
+    observed: usize,
+}
+
+/// One construct the comparison sees, as the watching program observes
+/// it.
+#[derive(Clone, Copy, Debug)]
+struct Constructed {
+    /// Where its firings, one integer per event, are in the watching
+    /// program's observations.
+    observed: usize,
+    /// Its body emits a node it built, not a top-level one.
+    builds: bool,
+    /// Its body emits a value that samples a node it built.
+    samples: bool,
+}
+
+/// A program the oracle answers to show what another program's constructs
+/// did, and how to read that answer.
+#[derive(Clone, Debug)]
+pub struct ConstructWatch {
+    /// The program to ask the oracle about: every node of the original,
+    /// with the window `Everything`, a node more per construct the
+    /// comparison sees, which maps each of its events to 1, observed, and
+    /// every switch over a hold of what it emits observed.
+    pub program: Program,
+    constructs: Vec<Constructed>,
+    followers: Vec<Following>,
+}
+
+/// The program that shows what `program`'s constructs did, or `None` if
+/// the comparison sees no construct in it.
+pub fn watch_constructs(program: &Program) -> Option<ConstructWatch> {
+    let seen = seen(program);
+    let mut watching = Program {
+        window: Window::Everything,
+        observe: Vec::new(),
+        ..program.clone()
+    };
+    let mut constructs = Vec::new();
+    let mut places = vec![None; program.definitions.len()];
+    for (node, definition) in program.definitions.iter().enumerate() {
+        let Definition::Construct { body, .. } = definition else {
+            continue;
+        };
+        if !seen[node] {
+            continue;
+        }
+        watching.definitions.push(Definition::MapTo {
+            value: Value::Integer(1),
+            source: Reference::TopLevel(node),
+        });
+        watching.observe.push(watching.definitions.len() - 1);
+        let mut sampled = Vec::new();
+        if let BodyResult::Value(value) = &body.result {
+            build::sampled(value, &mut sampled);
+        }
+        places[node] = Some(constructs.len());
+        constructs.push(Constructed {
+            observed: watching.observe.len() - 1,
+            builds: matches!(body.result, BodyResult::Node(Reference::Local(_))),
+            samples: sampled
+                .iter()
+                .any(|cell| matches!(cell, Reference::Local(_))),
+        });
+    }
+    let mut followers = Vec::new();
+    for (node, definition) in program.definitions.iter().enumerate() {
+        let (cell, outer) = match definition {
+            Definition::SwitchCell(Reference::TopLevel(outer)) => (true, *outer),
+            Definition::SwitchStream(Reference::TopLevel(outer)) => (false, *outer),
+            _ => continue,
+        };
+        let held = match program.definitions.get(outer) {
+            Some(
+                Definition::HoldCell {
+                    source: Reference::TopLevel(held),
+                    ..
+                }
+                | Definition::HoldStream {
+                    source: Reference::TopLevel(held),
+                    ..
+                },
+            ) => *held,
+            _ => continue,
+        };
+        let Some(construct) = places.get(held).copied().flatten() else {
+            continue;
+        };
+        if !seen[node] || !constructs[construct].builds {
+            continue;
+        }
+        watching.observe.push(node);
+        followers.push(Following {
+            construct,
+            cell,
+            observed: watching.observe.len() - 1,
+        });
+    }
+    (!constructs.is_empty()).then_some(ConstructWatch {
+        program: watching,
+        constructs,
+        followers,
+    })
+}
+
+impl ConstructWatch {
+    /// What the constructs did, by the oracle's answer to
+    /// [`program`](ConstructWatch::program).
+    pub fn count(&self, answer: &Answer) -> Result<ConstructCount, String> {
+        let observations = match answer {
+            Answer::Observed(observations) => observations,
+            Answer::Error(message) => return Err(format!("the oracle answered ERR {message}")),
+            Answer::Timeout => return Err("the oracle answered TIMEOUT".to_owned()),
+        };
+        if observations.len() != self.program.observe.len() {
+            return Err(format!(
+                "the oracle answered {} observations for {} observed nodes",
+                observations.len(),
+                self.program.observe.len()
+            ));
+        }
+        let times = |position: usize| -> Vec<&Time> {
+            match &observations[position] {
+                Observation::Stream { events } => events.iter().map(|(time, _)| time).collect(),
+                Observation::Cell { steps, .. } => steps.iter().map(|(time, _)| time).collect(),
+            }
+        };
+        let external = |time: &&Time| time.first().is_some_and(|&k| k >= 1);
+        // Each construct's first event from [1] on.
+        let first: Vec<Option<&Time>> = self
+            .constructs
+            .iter()
+            .map(|constructed| times(constructed.observed).into_iter().find(external))
+            .collect();
+        let mut count = ConstructCount {
+            constructs: self.constructs.len() as u64,
+            ..ConstructCount::default()
+        };
+        for (constructed, first) in self.constructs.iter().zip(&first) {
+            count.fired += u64::from(first.is_some());
+            count.sampled += u64::from(first.is_some() && constructed.samples);
+        }
+        for following in &self.followers {
+            count.switches += 1;
+            let Some(moved) = first[following.construct] else {
+                continue;
+            };
+            count.switched += 1;
+            let after = times(following.observed).into_iter().any(|time| {
+                if following.cell {
+                    time >= moved
+                } else {
+                    time > moved
+                }
+            });
+            count.showed += u64::from(after);
         }
         Ok(count)
     }

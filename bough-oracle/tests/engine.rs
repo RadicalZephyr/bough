@@ -19,11 +19,14 @@
 //! child transactions, switches and constructs, and some loops run through
 //! children or through a switch's selection; some constructs are nested,
 //! run in child instants, build RFD 4's screens, or run RFD 2's navigation
-//! loop; one in seven is a program of stages 1 and 2 alone. Each shard prints what its programs held, how many observed
-//! nodes had events in child transactions, and what the switches the
-//! comparison sees did, which a second question to the oracle about each
-//! program shows: how many moved to another inner, and how often the new
-//! inner or the old one fired at the move. `PROPTEST_CASES` sets how many
+//! loop; one in seven is a program of stages 1 and 2 alone. Each shard
+//! prints what its programs held, how many observed nodes had events in
+//! child transactions, and what the switches and the constructs the
+//! comparison sees did, which two more questions to the oracle about each
+//! program show: how many switches moved to another inner, and how often
+//! the new inner or the old one fired at the move; how many constructs
+//! fired, and how many switches moved to a token a construct built and then
+//! showed it. `PROPTEST_CASES` sets how many
 //! programs in all, 1024 unless set; `PROPTEST_RNG_SEED` fixes the seed,
 //! which a failure prints. A failing program is shrunk by proptest, then by
 //! `bough_oracle::reduce` to a program that fails the same way, and reported
@@ -66,11 +69,11 @@ use Expression::{Argument, ArgumentAt, ConstructEvent, Literal, Sample, SecondAr
 use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
-    Answer, Body, BodyResult, Definition, Engine, Expected, Expression, Held, Input, NodeType,
-    Observation, Oracle, Program, Reference, Refusal, RunOptions, Scalar, SwitchCount, Switching,
-    Type, Value, Window, check, check_program, compare, expected, guard_element, guard_filter,
-    guard_map, programs, reduce, refusal, run, watch_switches, with_same_instant_cycle,
-    with_switch_cycle,
+    Answer, Body, BodyResult, ConstructCount, Definition, Engine, Expected, Expression, Held,
+    Input, NodeType, Observation, Oracle, Program, Reference, Refusal, RunOptions, Scalar,
+    SwitchCount, Switching, Type, Value, Window, check, check_program, compare, expected,
+    guard_element, guard_filter, guard_map, programs, reduce, refusal, run, watch_constructs,
+    watch_switches, with_same_instant_cycle, with_switch_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -277,6 +280,15 @@ struct Tally {
     watched: u32,
     switched: u32,
     switching: SwitchCount,
+    /// Programs with a construct the comparison sees; those in which one
+    /// fired, from [1] on; those in which a node a construct built was
+    /// observed, through a switch that showed it or a value that sampled
+    /// it; and those in which a switch moved to a token a construct built.
+    constructing: u32,
+    fired: u32,
+    built_observed: u32,
+    switched_to_built: u32,
+    construct_count: ConstructCount,
     /// Watching programs the oracle gave no usable answer for, and the
     /// first reason.
     unwatched: u32,
@@ -289,6 +301,7 @@ impl Tally {
         program: &Program,
         expected: &[Expected],
         switching: Option<Result<SwitchCount, String>>,
+        constructing: Option<Result<ConstructCount, String>>,
     ) {
         let c = census(program);
         self.programs += 1;
@@ -314,6 +327,20 @@ impl Tally {
                 self.watched += 1;
                 self.switched += u32::from(count.streams.switched + count.cells.switched > 0);
                 self.switching += count;
+            }
+            Some(Err(reason)) => {
+                self.unwatched += 1;
+                self.unwatched_reason.get_or_insert(reason);
+            }
+        }
+        match constructing {
+            None => {}
+            Some(Ok(count)) => {
+                self.constructing += 1;
+                self.fired += u32::from(count.fired > 0);
+                self.built_observed += u32::from(count.showed + count.sampled > 0);
+                self.switched_to_built += u32::from(count.switched > 0);
+                self.construct_count += count;
             }
             Some(Err(reason)) => {
                 self.unwatched += 1;
@@ -375,7 +402,11 @@ impl std::fmt::Display for Tally {
              selector in child instants in {:.0}%; constructs in {:.0}% (nested in {:.0}%, in \
              child instants in {:.0}%, emitting linear streams in {:.0}%, the navigation loop in \
              {:.0}%); of {} programs whose switches the comparison sees, {:.0}% had one that \
-             moved: {}; {}",
+             moved: {}; {}; of the programs, {:.0}% had a construct the comparison sees, {:.0}% \
+             one that fired, {:.0}% a node a construct built observed, {:.0}% a switch that moved \
+             to a token a construct built: {} constructs seen, {:.0}% fired, {} switches over \
+             what they emit, {:.0}% moved to a built token and {:.0}% showed it, {} values read \
+             a cell their body built",
             self.percent(self.loops),
             self.percent(self.stream_loops),
             self.percent(self.state_loops),
@@ -402,6 +433,16 @@ impl std::fmt::Display for Tally {
             share(u64::from(self.switched), u64::from(self.watched)),
             switching("switch_streams", &self.switching.streams),
             switching("switch_cells", &self.switching.cells),
+            self.percent(self.constructing),
+            self.percent(self.fired),
+            self.percent(self.built_observed),
+            self.percent(self.switched_to_built),
+            self.construct_count.constructs,
+            share(self.construct_count.fired, self.construct_count.constructs),
+            self.construct_count.switches,
+            share(self.construct_count.switched, self.construct_count.switches),
+            share(self.construct_count.showed, self.construct_count.switches),
+            self.construct_count.sampled,
         )?;
         if let Some(reason) = &self.unwatched_reason {
             write!(
@@ -448,7 +489,15 @@ fn random_programs(shard: u32) {
                         .map_err(|error| error.to_string())
                         .and_then(|answer| watch.count(&answer))
                 });
-                tally.borrow_mut().add(&program, &expected, switching);
+                let constructing = watch_constructs(&program).map(|watch| {
+                    oracle
+                        .answer(&watch.program)
+                        .map_err(|error| error.to_string())
+                        .and_then(|answer| watch.count(&answer))
+                });
+                tally
+                    .borrow_mut()
+                    .add(&program, &expected, switching, constructing);
                 Ok(())
             }
             Err(report) => {
@@ -3239,21 +3288,10 @@ fn body(definitions: Vec<Definition>, result: BodyResult) -> Body {
     }
 }
 
-/// The builder builds constructs as a user writes them. The chain before a
-/// construct gets a node, and the construct is that node's `construct`,
-/// whose closure builds the body with the build context it is handed, at
-/// the event's instant, and emits a value or a token: here a value, a cell,
-/// a linear stream, a State, and a shared stream, which a switch_stream in
-/// the body takes from a constant of a linear stream it built. Holds of the
-/// tokens feed a switch each. The values are worked out by hand: each body
-/// runs at [2] and [4], where `go` fires, and what it builds over `x`,
-/// which fires then too, takes x's event there; a switch_cell steps at the
-/// move to the new inner's value after the instant, dropping the old one's
-/// step, and a switch_stream forwards its old inner at the move and the new
-/// one after it.
-#[test]
-fn the_builder_builds_constructs_as_a_user_writes_them() {
-    let constructs = Program {
+/// The constructs of the builder's test: a value, a cell, a linear stream, a
+/// State and a shared stream, each built at [2] and [4].
+fn constructs_program() -> Program {
+    Program {
         window: Window::FromFirstTransaction,
         inputs: integers(3),
         definitions: vec![
@@ -3368,7 +3406,24 @@ fn the_builder_builds_constructs_as_a_user_writes_them() {
             ],
             vec![(1, Value::Integer(7))],
         ],
-    };
+    }
+}
+
+/// The builder builds constructs as a user writes them. The chain before a
+/// construct gets a node, and the construct is that node's `construct`,
+/// whose closure builds the body with the build context it is handed, at
+/// the event's instant, and emits a value or a token: here a value, a cell,
+/// a linear stream, a State, and a shared stream, which a switch_stream in
+/// the body takes from a constant of a linear stream it built. Holds of the
+/// tokens feed a switch each. The values are worked out by hand: each body
+/// runs at [2] and [4], where `go` fires, and what it builds over `x`,
+/// which fires then too, takes x's event there; a switch_cell steps at the
+/// move to the new inner's value after the instant, dropping the old one's
+/// step, and a switch_stream forwards its old inner at the move and the new
+/// one after it.
+#[test]
+fn the_builder_builds_constructs_as_a_user_writes_them() {
+    let constructs = constructs_program();
     let types = check(&constructs).unwrap();
     assert_eq!(types[5], NodeType::Stream(Scalar::Integer));
     assert_eq!(
@@ -3425,6 +3480,44 @@ fn the_builder_builds_constructs_as_a_user_writes_them() {
     ] {
         assert_eq!(run.observations, expected);
     }
+}
+
+/// The watching program of the constructs' test program sees all five
+/// constructs fire at [2] and [4], and the four switches over what they
+/// emit move to a token a body built at [2]: the switch_cells step there
+/// with the built cells' values, and the switch_streams forward the built
+/// streams' events from [3]. The construct of values reads the hold its
+/// body built, as it was before the instant.
+#[test]
+fn the_construct_watch_counts_what_the_constructs_did() {
+    let Some(oracle) = oracle() else { return };
+    let program = constructs_program();
+    let watch = watch_constructs(&program).expect("the comparison sees the constructs");
+    let answer = oracle.answer(&watch.program).unwrap();
+    assert_eq!(
+        watch.count(&answer).unwrap(),
+        ConstructCount {
+            constructs: 5,
+            fired: 5,
+            switches: 4,
+            switched: 4,
+            showed: 4,
+            sampled: 1,
+        }
+    );
+    // A program whose constructs never fire from [1] on.
+    let mut quiet = program.clone();
+    quiet.schedule = vec![vec![(1, Value::Integer(1))]];
+    let watch = watch_constructs(&quiet).unwrap();
+    let answer = oracle.answer(&watch.program).unwrap();
+    assert_eq!(
+        watch.count(&answer).unwrap(),
+        ConstructCount {
+            constructs: 5,
+            switches: 4,
+            ..ConstructCount::default()
+        }
+    );
 }
 
 /// What the engine cannot build in a construct body, or the oracle would
