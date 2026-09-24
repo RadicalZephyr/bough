@@ -126,7 +126,10 @@ pub use build::{
     BuildError, Call, Chain, EngineMode, EngineObservation, EngineRun, Held, ListFn, Listened,
     MAX_FUSED, NodeType, PickFn, RunOptions, Scalar, check, evaluate, name, run, switch_candidates,
 };
-pub use compare::{Engine, Expected, Failure, Report, check_program, compare, expected};
+pub use compare::{
+    Engine, Expected, Failure, Report, SwitchCount, SwitchWatch, Switching, check_program, compare,
+    expected, watch_switches,
+};
 pub use generate::{
     MAX_DEFINITIONS, guard_element, guard_filter, guard_map, programs, reduce, references,
     well_founded, with_same_instant_cycle,

@@ -43,14 +43,28 @@
 //! is given. A failure is a [`Report`]: the program as Rust and as the
 //! Haskell line, its schedule, and every observed node, the engine beside
 //! the oracle, a row per transaction, with the rows that differ marked.
+//!
+//! # What the switches did
+//!
+//! A switch whose outer never selects another inner tests little, and the
+//! answer does not say what a switch followed: a cell of tokens cannot be
+//! observed. [`watch_switches`] makes a second program for the oracle, the
+//! same nodes and more, which observes each switch's selections, as the
+//! index its pick or map_cell takes, and every token its outer may select.
+//! [`SwitchWatch::count`] reads the answer: which switches the comparison
+//! sees moved to another inner, and at how many instants the new inner or
+//! the old one fired or stepped at the instant of the move, which is where
+//! a switch is hardest to get right.
 
 use std::fmt::{self, Write as _};
+use std::ops::AddAssign;
 use std::panic::{self, AssertUnwindSafe};
 
 use crate::answer::{Answer, Datum, Observation};
 use crate::build::{self, BuildError, Call, EngineObservation, EngineRun, RunOptions};
+use crate::generate;
 use crate::ghc::Oracle;
-use crate::program::{Program, Time, Value, Window};
+use crate::program::{Definition, Expression, Program, Reference, Time, Value, Window};
 
 /// What the oracle says one observed node shows, transaction k at index
 /// k - 1, each event or step with its time.
@@ -560,4 +574,306 @@ pub fn check_program(
         }
     }
     Ok(expected)
+}
+
+// ----- what the switches did -----
+
+/// What some switches did, by the oracle's answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Switching {
+    /// The switches the comparison sees: observed, or read by an observed
+    /// node, however indirectly.
+    pub switches: u64,
+    /// Those whose outer selected another inner at some instant from `[1]`
+    /// on, in a transaction or one of its children.
+    pub switched: u64,
+    /// The instants from `[1]` on at which one of them moved to another
+    /// inner.
+    pub moves: u64,
+    /// The moves in child instants.
+    pub moves_in_children: u64,
+    /// The moves at whose instant the new inner fired or stepped: a
+    /// `switch_stream` must not forward that event, and a `switch_cell`
+    /// must step to that value, read after the instant.
+    pub new_fired: u64,
+    /// The moves at whose instant the old inner fired or stepped: a
+    /// `switch_stream` forwards that event, and a `switch_cell` drops that
+    /// step.
+    pub old_fired: u64,
+}
+
+impl AddAssign for Switching {
+    fn add_assign(&mut self, other: Switching) {
+        self.switches += other.switches;
+        self.switched += other.switched;
+        self.moves += other.moves;
+        self.moves_in_children += other.moves_in_children;
+        self.new_fired += other.new_fired;
+        self.old_fired += other.old_fired;
+    }
+}
+
+/// What a program's switches did, `switch_stream`s and `switch_cell`s
+/// apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SwitchCount {
+    /// The `switch_stream`s.
+    pub streams: Switching,
+    /// The `switch_cell`s, over `Cell`s and over `State`s.
+    pub cells: Switching,
+}
+
+impl AddAssign for SwitchCount {
+    fn add_assign(&mut self, other: SwitchCount) {
+        self.streams += other.streams;
+        self.cells += other.cells;
+    }
+}
+
+/// How one switch's outer selects, in the watching program.
+#[derive(Clone, Copy, Debug)]
+enum Selection {
+    /// A constant: the switch never moves.
+    Constant,
+    /// A hold of a pick: the observation at this position is the stream of
+    /// the pick's indices; the switch starts at the first token, the
+    /// hold's initial one, and index i selects token 1 + i.
+    Hold(usize),
+    /// A `MapPickCell`: the observation at this position is the cell of its
+    /// indices; index i selects token i.
+    Map(usize),
+}
+
+/// One switch the comparison sees, as the watching program observes it.
+#[derive(Clone, Debug)]
+struct Watched {
+    /// A `switch_cell`, or a `switch_stream`.
+    cell: bool,
+    /// The tokens its outer may select, as nodes: for a hold, its initial
+    /// one first and then the pick's list.
+    tokens: Vec<usize>,
+    /// Where each token is in the watching program's observations.
+    observed: Vec<usize>,
+    selection: Selection,
+}
+
+/// A program the oracle answers to show what another program's switches
+/// did, and how to read that answer: see the module documentation.
+#[derive(Clone, Debug)]
+pub struct SwitchWatch {
+    /// The program to ask the oracle about: every node of the original,
+    /// with the window `Everything`, a node more per switch whose outer can
+    /// select, and observing each switch's selections and every token its
+    /// outer may select.
+    pub program: Program,
+    switches: Vec<Watched>,
+}
+
+/// Every node the observed nodes read, directly or through others, and
+/// they themselves; a loop reads the definition its `Close` names.
+fn seen(program: &Program) -> Vec<bool> {
+    let n = program.definitions.len();
+    let mut closes = vec![Vec::new(); n];
+    for definition in &program.definitions {
+        if let Definition::Close {
+            forward,
+            definition: Reference::TopLevel(node),
+        } = definition
+        {
+            if *forward < n {
+                closes[*forward].push(*node);
+            }
+        }
+    }
+    let mut seen = vec![false; n];
+    let mut stack: Vec<usize> = program.observe.clone();
+    while let Some(node) = stack.pop() {
+        if node >= n || seen[node] {
+            continue;
+        }
+        seen[node] = true;
+        stack.extend(generate::references(&program.definitions[node]));
+        stack.extend(closes[node].iter().copied());
+    }
+    seen
+}
+
+/// The program that shows what `program`'s switches did, or `None` if the
+/// comparison sees no switch in it.
+pub fn watch_switches(program: &Program) -> Option<SwitchWatch> {
+    let seen = seen(program);
+    let mut watching = Program {
+        window: Window::Everything,
+        observe: Vec::new(),
+        ..program.clone()
+    };
+    let observe = |watching: &mut Program, node: usize| -> usize {
+        match watching.observe.iter().position(|&o| o == node) {
+            Some(position) => position,
+            None => {
+                watching.observe.push(node);
+                watching.observe.len() - 1
+            }
+        }
+    };
+    let mut switches = Vec::new();
+    for (node, definition) in program.definitions.iter().enumerate() {
+        let (cell, outer) = match definition {
+            Definition::SwitchCell(Reference::TopLevel(outer)) => (true, *outer),
+            Definition::SwitchStream(Reference::TopLevel(outer)) => (false, *outer),
+            _ => continue,
+        };
+        if !seen[node] {
+            continue;
+        }
+        let tokens: Vec<usize> = build::switch_candidates(&program.definitions, outer)
+            .iter()
+            .filter_map(|token| match token {
+                Reference::TopLevel(token) => Some(*token),
+                Reference::Local(_) => None,
+            })
+            .collect();
+        let choices = |listed: &[Reference]| listed.len() as i64;
+        let selection = match &program.definitions[outer] {
+            Definition::HoldStream {
+                source: Reference::TopLevel(pick),
+                ..
+            }
+            | Definition::HoldCell {
+                source: Reference::TopLevel(pick),
+                ..
+            } => {
+                let (index, listed, selector) = match &program.definitions[*pick] {
+                    Definition::PickStream {
+                        index,
+                        streams,
+                        source,
+                    } => (index, streams, source),
+                    Definition::PickCell {
+                        index,
+                        cells,
+                        source,
+                    } => (index, cells, source),
+                    _ => continue,
+                };
+                watching.definitions.push(Definition::Map {
+                    function: Expression::Modulo(Box::new(index.clone()), choices(listed)),
+                    source: *selector,
+                });
+                let at = watching.definitions.len() - 1;
+                Selection::Hold(observe(&mut watching, at))
+            }
+            Definition::MapPickCell { index, cells, cell } => {
+                watching.definitions.push(Definition::MapCell {
+                    function: Expression::Modulo(Box::new(index.clone()), choices(cells)),
+                    cell: *cell,
+                });
+                let at = watching.definitions.len() - 1;
+                Selection::Map(observe(&mut watching, at))
+            }
+            Definition::ConstantStream(_) | Definition::ConstantCell(_) => Selection::Constant,
+            _ => continue,
+        };
+        let observed = tokens
+            .iter()
+            .map(|&token| observe(&mut watching, token))
+            .collect();
+        switches.push(Watched {
+            cell,
+            tokens,
+            observed,
+            selection,
+        });
+    }
+    (!switches.is_empty()).then_some(SwitchWatch {
+        program: watching,
+        switches,
+    })
+}
+
+impl SwitchWatch {
+    /// What the switches did, by the oracle's answer to
+    /// [`program`](SwitchWatch::program).
+    pub fn count(&self, answer: &Answer) -> Result<SwitchCount, String> {
+        let observations = match answer {
+            Answer::Observed(observations) => observations,
+            Answer::Error(message) => return Err(format!("the oracle answered ERR {message}")),
+            Answer::Timeout => return Err("the oracle answered TIMEOUT".to_owned()),
+        };
+        if observations.len() != self.program.observe.len() {
+            return Err(format!(
+                "the oracle answered {} observations for {} observed nodes",
+                observations.len(),
+                self.program.observe.len()
+            ));
+        }
+        let times = |position: usize| -> Vec<&Time> {
+            match &observations[position] {
+                Observation::Stream { events } => events.iter().map(|(time, _)| time).collect(),
+                Observation::Cell { steps, .. } => steps.iter().map(|(time, _)| time).collect(),
+            }
+        };
+        let index = |datum: &Datum| match datum {
+            Datum::Integer(index) => Ok(*index as usize),
+            Datum::List(_) => Err("the oracle answered a list for a pick's index".to_owned()),
+        };
+        let mut count = SwitchCount::default();
+        for watched in &self.switches {
+            // The token the switch follows before any selection, and each
+            // selection after it: its time and its token's place.
+            let (first, selections): (usize, Vec<(&Time, usize)>) = match watched.selection {
+                Selection::Constant => (0, Vec::new()),
+                Selection::Hold(position) => match &observations[position] {
+                    Observation::Stream { events } => (
+                        0,
+                        events
+                            .iter()
+                            .map(|(time, datum)| Ok((time, 1 + index(datum)?)))
+                            .collect::<Result<_, String>>()?,
+                    ),
+                    Observation::Cell { .. } => {
+                        return Err("a pick's indices answered as a cell".to_owned());
+                    }
+                },
+                Selection::Map(position) => match &observations[position] {
+                    Observation::Cell { initial, steps } => (
+                        index(initial)?,
+                        steps
+                            .iter()
+                            .map(|(time, datum)| Ok((time, index(datum)?)))
+                            .collect::<Result<_, String>>()?,
+                    ),
+                    Observation::Stream { .. } => {
+                        return Err("a map_cell's indices answered as a stream".to_owned());
+                    }
+                },
+            };
+            let mut tally = Switching {
+                switches: 1,
+                ..Switching::default()
+            };
+            let fired = |place: usize, time: &Time| times(watched.observed[place]).contains(&time);
+            let mut current = first;
+            for (time, place) in selections {
+                if place >= watched.tokens.len() {
+                    return Err(format!("the oracle picked token {place} of a switch"));
+                }
+                let moved = watched.tokens[place] != watched.tokens[current];
+                if moved && time.first().is_some_and(|&k| k >= 1) {
+                    tally.moves += 1;
+                    tally.moves_in_children += u64::from(time.len() > 1);
+                    tally.new_fired += u64::from(fired(place, time));
+                    tally.old_fired += u64::from(fired(current, time));
+                }
+                current = place;
+            }
+            tally.switched = u64::from(tally.moves > 0);
+            if watched.cell {
+                count.cells += tally;
+            } else {
+                count.streams += tally;
+            }
+        }
+        Ok(count)
+    }
 }

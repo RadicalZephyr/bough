@@ -14,8 +14,11 @@
 //! that run in parallel. Most have loops, cell, state and stream loops,
 //! child transactions and switches, and some loops run through children or
 //! through a switch's selection; one in seven is a program of stages 1 and
-//! 2 alone. Each shard prints what its programs held and how many observed
-//! nodes had events in child transactions. `PROPTEST_CASES` sets how many
+//! 2 alone. Each shard prints what its programs held, how many observed
+//! nodes had events in child transactions, and what the switches the
+//! comparison sees did, which a second question to the oracle about each
+//! program shows: how many moved to another inner, and how often the new
+//! inner or the old one fired at the move. `PROPTEST_CASES` sets how many
 //! programs in all, 1024 unless set; `PROPTEST_RNG_SEED` fixes the seed,
 //! which a failure prints. A failing program is shrunk by proptest, then by
 //! `bough_oracle::reduce` to a program that fails the same way, and reported
@@ -50,9 +53,9 @@ use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
     Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
-    Program, Reference, RunOptions, Scalar, Type, Value, Window, check, check_program, compare,
-    expected, guard_element, guard_filter, guard_map, programs, reduce, run,
-    with_same_instant_cycle,
+    Program, Reference, RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window, check,
+    check_program, compare, expected, guard_element, guard_filter, guard_map, programs, reduce,
+    run, watch_switches, with_same_instant_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -223,10 +226,11 @@ fn fresh_seed() -> u64 {
 }
 
 /// What one shard's random programs held and did: how many had each kind
-/// of loop and child transaction; how many observed nodes had events or
-/// steps, in child transactions among them, and how deep; and how many
-/// observed loop forwards stepped or fired, which a loop does only when its
-/// feedback runs.
+/// of loop, child transaction and switch; how many observed nodes had
+/// events or steps, in child transactions among them, and how deep; how
+/// many observed loop forwards stepped or fired, which a loop does only
+/// when its feedback runs; and what the switches the comparison sees did,
+/// by the oracle's answer to each program's watching program.
 #[derive(Default)]
 struct Tally {
     programs: u32,
@@ -236,6 +240,11 @@ struct Tally {
     splits: u32,
     defers: u32,
     children_in_loops: u32,
+    switch_streams: u32,
+    switch_cells: u32,
+    switch_states: u32,
+    nested_switches: u32,
+    selectors_in_children: u32,
     observed: u64,
     active: u64,
     in_children: u64,
@@ -243,10 +252,24 @@ struct Tally {
     /// Observed loop forwards, and those that stepped or fired.
     forwards: u64,
     active_forwards: u64,
+    /// Programs with a switch the comparison sees, and those in which one
+    /// moved to another inner.
+    watched: u32,
+    switched: u32,
+    switching: SwitchCount,
+    /// Watching programs the oracle gave no usable answer for, and the
+    /// first reason.
+    unwatched: u32,
+    unwatched_reason: Option<String>,
 }
 
 impl Tally {
-    fn add(&mut self, program: &Program, expected: &[Expected]) {
+    fn add(
+        &mut self,
+        program: &Program,
+        expected: &[Expected],
+        switching: Option<Result<SwitchCount, String>>,
+    ) {
         let c = census(program);
         self.programs += 1;
         self.loops += u32::from(c.loops);
@@ -255,6 +278,23 @@ impl Tally {
         self.splits += u32::from(c.splits);
         self.defers += u32::from(c.defers);
         self.children_in_loops += u32::from(c.children_in_loops);
+        self.switch_streams += u32::from(c.switch_streams);
+        self.switch_cells += u32::from(c.switch_cells);
+        self.switch_states += u32::from(c.switch_states);
+        self.nested_switches += u32::from(c.nested_switches);
+        self.selectors_in_children += u32::from(c.selectors_in_children);
+        match switching {
+            None => {}
+            Some(Ok(count)) => {
+                self.watched += 1;
+                self.switched += u32::from(count.streams.switched + count.cells.switched > 0);
+                self.switching += count;
+            }
+            Some(Err(reason)) => {
+                self.unwatched += 1;
+                self.unwatched_reason.get_or_insert(reason);
+            }
+        }
         for (node, observed) in program.observe.iter().zip(expected) {
             let lists = match observed {
                 Expected::Stream { events } => events,
@@ -279,6 +319,25 @@ impl Tally {
     }
 }
 
+/// `part` of `whole` as a percentage.
+fn share(part: u64, whole: u64) -> f64 {
+    100.0 * part as f64 / whole.max(1) as f64
+}
+
+/// What one kind of switch did, for a tally's line.
+fn switching(kind: &str, s: &Switching) -> String {
+    format!(
+        "{} {kind} seen, {:.0}% moved, {} moves ({:.0}% in child instants; the new inner fired \
+         at {:.0}% of them, the old one at {:.0}%)",
+        s.switches,
+        share(s.switched, s.switches),
+        s.moves,
+        share(s.moves_in_children, s.moves),
+        share(s.new_fired, s.moves),
+        share(s.old_fired, s.moves),
+    )
+}
+
 impl std::fmt::Display for Tally {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -286,7 +345,10 @@ impl std::fmt::Display for Tally {
             "with loops {:.0}% (stream loops {:.0}%, state loops {:.0}%), splits {:.0}%, \
              defers {:.0}%, a loop through children {:.0}%; of {} observed nodes {:.0}% had \
              events or steps and {:.0}% had them in child transactions, down to depth {}; of \
-             {} observed loop forwards {:.0}% stepped or fired",
+             {} observed loop forwards {:.0}% stepped or fired; switch_streams in {:.0}%, \
+             switch_cells in {:.0}% (over States in {:.0}%), nested switches in {:.0}%, a \
+             selector in child instants in {:.0}%; of {} programs whose switches the comparison \
+             sees, {:.0}% had one that moved: {}; {}",
             self.percent(self.loops),
             self.percent(self.stream_loops),
             self.percent(self.state_loops),
@@ -294,12 +356,29 @@ impl std::fmt::Display for Tally {
             self.percent(self.defers),
             self.percent(self.children_in_loops),
             self.observed,
-            100.0 * self.active as f64 / self.observed.max(1) as f64,
-            100.0 * self.in_children as f64 / self.observed.max(1) as f64,
+            share(self.active, self.observed),
+            share(self.in_children, self.observed),
             self.deepest,
             self.forwards,
-            100.0 * self.active_forwards as f64 / self.forwards.max(1) as f64,
-        )
+            share(self.active_forwards, self.forwards),
+            self.percent(self.switch_streams),
+            self.percent(self.switch_cells),
+            self.percent(self.switch_states),
+            self.percent(self.nested_switches),
+            self.percent(self.selectors_in_children),
+            self.watched,
+            share(u64::from(self.switched), u64::from(self.watched)),
+            switching("switch_streams", &self.switching.streams),
+            switching("switch_cells", &self.switching.cells),
+        )?;
+        if let Some(reason) = &self.unwatched_reason {
+            write!(
+                formatter,
+                "; {} watching programs unanswered, the first: {reason}",
+                self.unwatched
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -331,7 +410,13 @@ fn random_programs(shard: u32) {
         tried.set(tried.get() + 1);
         match check_program(oracle, &program, &ENGINES, &runs(seed)) {
             Ok(expected) => {
-                tally.borrow_mut().add(&program, &expected);
+                let switching = watch_switches(&program).map(|watch| {
+                    oracle
+                        .answer(&watch.program)
+                        .map_err(|error| error.to_string())
+                        .and_then(|answer| watch.count(&answer))
+                });
+                tally.borrow_mut().add(&program, &expected, switching);
                 Ok(())
             }
             Err(report) => {
