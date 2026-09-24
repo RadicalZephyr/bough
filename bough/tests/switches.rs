@@ -1500,7 +1500,12 @@ fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build(
 /// s1 as the other moves onto it. Relink gives up every claim before it
 /// makes any, so the trade is accepted in whatever order the switches were
 /// queued, which each seed and send order changes, and each forwards its
-/// new stream from the next instant.
+/// new stream from the next instant. Stage5.hs:
+///
+/// ```text
+/// trade: a: [([1],11),([2],21),([3],32)]
+/// trade: b: [([1],13),([2],23),([3],31)]
+/// ```
 #[test]
 fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
     let (first, second) = every_order(|order| {
