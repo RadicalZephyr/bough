@@ -40,8 +40,13 @@
 //! switch vectors of sodium.hs, the two switch_stream probes, a switch to a
 //! quiet inner, two switches that reverse a dependency in one instant
 //! (finding F46), switches at child instants, nested switches, and a switch
-//! over States. Each asserts the oracle's answer, times included, as well
-//! as the engine's agreement with it. One fixed program pins where the
+//! over States; and the constructs of the stage 6 probe, Stage6.hs: what a
+//! body builds exists from its instant, switches a body builds start from
+//! their outers' values before it (F6), RFD 2's navigation loop through
+//! RFD 4's dynamic pattern, a construct a body builds, and constructs fed
+//! by a split, in transaction zero's children too. Each asserts the
+//! oracle's answer, times included, as well as the engine's agreement with
+//! it. One fixed program pins where the
 //! engine and the text differ: a split built at a child instant, which the
 //! text's `Split`, with no creation time, lets split its input's event from
 //! the instant before.
@@ -2356,6 +2361,653 @@ fn a_switch_cell_over_states_steps_as_a_state() {
 }
 
 // ----- fixed programs: constructs -----
+
+/// Appends a construct over `source` whose body emits node `emitted`, a
+/// cell of integers, a hold of what it emits starting from the cell
+/// `from`, and a switch_cell over the hold, which follows what the body
+/// built from the construct's first event on. Returns the switch.
+fn switched(
+    definitions: &mut Vec<Definition>,
+    source: usize,
+    from: usize,
+    built: Vec<Definition>,
+    emitted: usize,
+) -> usize {
+    definitions.push(Construct {
+        body: body(built, BodyResult::Node(Reference::Local(emitted))),
+        source: TopLevel(source),
+    });
+    let construct = definitions.len() - 1;
+    definitions.push(HoldCell {
+        initial: TopLevel(from),
+        source: TopLevel(construct),
+    });
+    definitions.push(SwitchCell(TopLevel(construct + 1)));
+    construct + 2
+}
+
+/// A switch_cell that follows a constant 0 until [2], where it moves to a
+/// cell a body built there, and steps as that cell does.
+fn built_at_2(steps: &[(&[i64], i64)]) -> Expected {
+    timed_cell(0, 3, steps)
+}
+
+/// Everything a body built at [2] builds exists from [2] (Stage6.hs,
+/// "creation"): a hold, an accumulator, a scan and a once over s, which
+/// fires at [2], take its event there; steps_with_current and steps of c,
+/// which steps at [2], fire there, and so does steps of a map_cell of c; a
+/// split and a defer of s have children of [2]; a snapshot of c, like a
+/// sample inside the body, reads c before [2], 11; and steps_with_current
+/// of q, which is quiet at [2], fires there with q's value, as a creation.
+/// The values after [2] and [3] are Stage6.out's: [2, 3], [2, 5],
+/// [200, 301], [2, 2], [12, 13], [12, 13], [24, 26], [22, 55],
+/// [1002, 1003], [211, 312], [40, 43]. Each switch steps at [2] to what the
+/// body built, a split's accumulator and a defer's hold to 0, before their
+/// children.
+#[test]
+fn everything_a_body_builds_exists_from_its_instant() {
+    let Some(oracle) = oracle() else { return };
+    let (s, c, q, go, zero) = (1, 2, 3, 5, 6);
+    let mut definitions = vec![
+        Definition::Input(0),
+        Share(TopLevel(0)),
+        InputCell {
+            input: 1,
+            initial: Literal(10),
+        },
+        InputCell {
+            input: 2,
+            initial: Literal(40),
+        },
+        Definition::Input(3),
+        Share(TopLevel(4)),
+        Constant(Literal(0)),
+    ];
+    let held = |source: usize| Hold {
+        initial: Literal(0),
+        source: Reference::Local(source),
+    };
+    let bodies: Vec<(Vec<Definition>, usize)> = vec![
+        (
+            vec![Hold {
+                initial: Literal(0),
+                source: TopLevel(s),
+            }],
+            0,
+        ),
+        (
+            vec![Accumulate {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(s),
+            }],
+            0,
+        ),
+        (
+            vec![
+                Definition::Scan {
+                    initial: Literal(0),
+                    output: Argument * Literal(100) + SecondArgument,
+                    state: SecondArgument + Literal(1),
+                    source: TopLevel(s),
+                },
+                held(0),
+            ],
+            1,
+        ),
+        (vec![Once(TopLevel(s)), held(0)], 1),
+        (vec![StepsWithCurrent(TopLevel(c)), held(0)], 1),
+        (vec![Steps(TopLevel(c)), held(0)], 1),
+        (
+            vec![
+                MapCell {
+                    function: Argument * Literal(2),
+                    cell: TopLevel(c),
+                },
+                Steps(Reference::Local(0)),
+                held(1),
+            ],
+            2,
+        ),
+        (
+            vec![
+                MapList {
+                    length: Literal(2),
+                    element: Argument * (Literal(1) + SecondArgument * Literal(9)),
+                    source: TopLevel(s),
+                },
+                Definition::Split(Reference::Local(0)),
+                Accumulate {
+                    initial: Literal(0),
+                    function: SecondArgument + Argument,
+                    source: Reference::Local(1),
+                },
+            ],
+            2,
+        ),
+        (
+            vec![
+                Map {
+                    function: Argument + Literal(1000),
+                    source: TopLevel(s),
+                },
+                Definition::Defer(Reference::Local(0)),
+                held(1),
+            ],
+            2,
+        ),
+        (
+            vec![
+                Snapshot {
+                    function: Argument * Literal(100) + SecondArgument,
+                    source: TopLevel(s),
+                    cell: TopLevel(c),
+                },
+                held(0),
+            ],
+            1,
+        ),
+        (vec![StepsWithCurrent(TopLevel(q)), held(0)], 1),
+    ];
+    let mut observe = Vec::new();
+    for (built, emitted) in bodies {
+        observe.push(switched(&mut definitions, go, zero, built, emitted));
+    }
+    definitions.push(Construct {
+        body: body(vec![], BodyResult::Value(Sample(TopLevel(c)))),
+        source: TopLevel(go),
+    });
+    observe.push(definitions.len() - 1);
+    let creation = program(
+        integers(4),
+        definitions,
+        observe,
+        &[
+            &[(0, 1), (1, 11)],
+            &[(0, 2), (1, 12), (3, 0)],
+            &[(0, 3), (1, 13), (2, 43)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &creation),
+        [
+            built_at_2(&[(&[2], 2), (&[3], 3)]),
+            built_at_2(&[(&[2], 2), (&[3], 5)]),
+            built_at_2(&[(&[2], 200), (&[3], 301)]),
+            built_at_2(&[(&[2], 2)]),
+            built_at_2(&[(&[2], 12), (&[3], 13)]),
+            built_at_2(&[(&[2], 12), (&[3], 13)]),
+            built_at_2(&[(&[2], 24), (&[3], 26)]),
+            built_at_2(&[
+                (&[2], 0),
+                (&[2, 0], 2),
+                (&[2, 1], 22),
+                (&[3, 0], 25),
+                (&[3, 1], 55)
+            ]),
+            built_at_2(&[(&[2], 0), (&[2, 0], 1002), (&[3, 0], 1003)]),
+            built_at_2(&[(&[2], 211), (&[3], 312)]),
+            built_at_2(&[(&[2], 40), (&[3], 43)]),
+            timed_stream(3, &[(&[2], 11)]),
+        ]
+    );
+}
+
+/// Switch cells a body builds at [2] (Stage6.hs, "switch matrix", risk 1):
+/// over an outer that stepped at [1], which F6 is about, one that steps at
+/// [2], and one that steps at [3]; over an outer and an inner both built
+/// at [2]; and over a hold of two of those switches, both built at [2],
+/// which moves at [3] to the first. Each starts from its outer's value
+/// before [2], which a sample in the body reads, steps at [2] to its
+/// outer's value after [2], and moves after the instant its outer steps.
+/// Stage6.out: samples inside [2, 10, 10, 3, 10]; steps [(2, 200), (3,
+/// 300)], [(2, 200), (3, 300)], [(2, 20), (3, 300)], [(2, 21), (3, 31)],
+/// [(2, 200), (3, 300)].
+#[test]
+fn switches_a_body_builds_start_from_their_outers_values_before_its_instant() {
+    let Some(oracle) = oracle() else { return };
+    let (x, c1, c2, c3, go, zero) = (1, 3, 4, 5, 17, 18);
+    let outer = |selector: usize| {
+        [
+            PickCell {
+                index: Literal(0),
+                cells: vec![TopLevel(c2)],
+                source: TopLevel(selector),
+            },
+            HoldCell {
+                initial: TopLevel(c1),
+                source: TopLevel(selector + 1),
+            },
+        ]
+    };
+    let mut definitions = vec![
+        Definition::Input(0),
+        Share(TopLevel(0)),
+        Definition::Input(1),
+        Hold {
+            initial: Literal(1),
+            source: TopLevel(x),
+        },
+        Hold {
+            initial: Literal(2),
+            source: TopLevel(2),
+        },
+        Constant(Literal(3)),
+        Definition::Input(2),
+    ];
+    definitions.extend(outer(6)); // 7, 8: before
+    definitions.push(Definition::Input(3));
+    definitions.extend(outer(9)); // 10, 11: at
+    definitions.push(Definition::Input(4));
+    definitions.push(Share(TopLevel(12)));
+    definitions.extend(outer(13)); // 14, 15: after
+    definitions.push(Definition::Input(5));
+    definitions.push(Share(TopLevel(16)));
+    definitions.push(Constant(Literal(0)));
+    let (before, at, after, selected) = (8, 11, 15, 13);
+    let local = Reference::Local;
+    // An inner and an outer built at [2], and the switch between them, as
+    // the body's nodes `base` and on.
+    let fresh = |base: usize| {
+        vec![
+            Map {
+                function: Argument + Literal(1),
+                source: TopLevel(x),
+            },
+            Hold {
+                initial: Literal(5),
+                source: local(base),
+            },
+            PickCell {
+                index: Literal(0),
+                cells: vec![local(base + 1)],
+                source: TopLevel(go),
+            },
+            HoldCell {
+                initial: TopLevel(c3),
+                source: local(base + 2),
+            },
+            SwitchCell(local(base + 3)),
+        ]
+    };
+    // Two switches built at [2], and a switch between them.
+    let top = |base: usize| {
+        vec![
+            SwitchCell(TopLevel(before)),
+            SwitchCell(TopLevel(at)),
+            PickCell {
+                index: Literal(0),
+                cells: vec![local(base)],
+                source: TopLevel(selected),
+            },
+            HoldCell {
+                initial: local(base + 1),
+                source: local(base + 2),
+            },
+            SwitchCell(local(base + 3)),
+        ]
+    };
+    let mut observe = vec![
+        switched(
+            &mut definitions,
+            go,
+            zero,
+            vec![SwitchCell(TopLevel(before))],
+            0,
+        ),
+        switched(
+            &mut definitions,
+            go,
+            zero,
+            vec![SwitchCell(TopLevel(at))],
+            0,
+        ),
+        switched(
+            &mut definitions,
+            go,
+            zero,
+            vec![SwitchCell(TopLevel(after))],
+            0,
+        ),
+        switched(&mut definitions, go, zero, fresh(0), 4),
+        switched(&mut definitions, go, zero, top(0), 4),
+    ];
+    // The five samples inside one body, two digits each.
+    let mut inside = vec![
+        SwitchCell(TopLevel(before)),
+        SwitchCell(TopLevel(at)),
+        SwitchCell(TopLevel(after)),
+    ];
+    inside.extend(fresh(3));
+    inside.extend(top(8));
+    let sample = |node: usize| Sample(local(node));
+    definitions.push(Construct {
+        body: body(
+            inside,
+            BodyResult::Value(
+                sample(0) * Literal(100_000_000)
+                    + sample(1) * Literal(1_000_000)
+                    + sample(2) * Literal(10_000)
+                    + sample(7) * Literal(100)
+                    + sample(12),
+            ),
+        ),
+        source: TopLevel(go),
+    });
+    observe.push(definitions.len() - 1);
+    let matrix = program(
+        integers(6),
+        definitions,
+        observe,
+        &[
+            &[(0, 10), (2, 0)],
+            &[(0, 20), (1, 200), (3, 0), (5, 0)],
+            &[(0, 30), (1, 300), (4, 0)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &matrix),
+        [
+            built_at_2(&[(&[2], 200), (&[3], 300)]),
+            built_at_2(&[(&[2], 200), (&[3], 300)]),
+            built_at_2(&[(&[2], 20), (&[3], 300)]),
+            built_at_2(&[(&[2], 21), (&[3], 31)]),
+            built_at_2(&[(&[2], 200), (&[3], 300)]),
+            timed_stream(3, &[(&[2], 2_10_10_03_10)]),
+        ]
+    );
+}
+
+/// RFD 4's dynamic pattern closed as RFD 2's navigation loop (Stage6.hs,
+/// "navigation"). Every navigation event builds a screen: a linear stream
+/// of the clicks it sees, each numbered by a counter built with it, `base +
+/// click * 10 + seen`, `base` the navigation's event. A hold keeps the
+/// current screen, from one built in the build with `base` 0, and one
+/// switch_stream takes its events. A click of 0 navigates, through a
+/// stream loop, at the click's instant, to a screen whose base is 100 more:
+/// the new screen's counter, built then, counts that click, and the switch
+/// forwards the old screen's event then and the new screen's from the next
+/// instant. The selection is not a dependency, so the loop is legal (F14).
+/// Stage6.out's (screen, click, seen), (0,5,1), (0,0,2), (1,7,2), (1,0,3),
+/// (2,9,2), (2,0,3), (3,4,2), are 51, 2, 172, 103, 292, 203, 342.
+#[test]
+fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
+    let Some(oracle) = oracle() else { return };
+    let clicks = 3;
+    let screen = |base: Expression, count: Reference| Snapshot {
+        function: base + (Argument * Literal(10) + (SecondArgument + Literal(1))),
+        source: TopLevel(clicks),
+        cell: count,
+    };
+    let counter = Accumulate {
+        initial: Literal(0),
+        function: SecondArgument + Literal(1),
+        source: TopLevel(clicks),
+    };
+    let navigation = program(
+        integers(1),
+        vec![
+            StreamLoop(Type::Integer),
+            Share(TopLevel(0)),
+            Definition::Input(0),
+            Share(TopLevel(2)),
+            counter.clone(),
+            screen(Literal(0), TopLevel(4)),
+            Construct {
+                body: body(
+                    vec![counter, screen(ConstructEvent, Reference::Local(0))],
+                    BodyResult::Node(Reference::Local(1)),
+                ),
+                source: TopLevel(1),
+            },
+            HoldStream {
+                initial: TopLevel(5),
+                source: TopLevel(6),
+            },
+            SwitchStream(TopLevel(7)),
+            Share(TopLevel(8)),
+            Definition::FilterMap {
+                keep: Argument.modulo(100).less_than(Literal(10)),
+                function: Argument - Argument.modulo(100) + Literal(100),
+                source: TopLevel(9),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(10),
+            },
+        ],
+        vec![9, 1],
+        &[
+            &[(0, 5)],
+            &[(0, 0)],
+            &[(0, 7)],
+            &[(0, 0)],
+            &[(0, 9)],
+            &[(0, 0)],
+            &[(0, 4)],
+        ],
+    );
+    assert!(bough_oracle::well_founded(&navigation));
+    assert_eq!(
+        agree(oracle, &navigation),
+        [
+            stream(&[&[51], &[2], &[172], &[103], &[292], &[203], &[342]]),
+            stream(&[&[], &[100], &[], &[200], &[], &[300], &[]]),
+        ]
+    );
+}
+
+/// A construct a body builds runs its own body at the instant it is built,
+/// since its source fires then, and at every later event of its source
+/// (Stage6.hs, "nested", which reads the outer body's event in the inner
+/// one; a body here reads only its own event, so the outer body passes it
+/// on through the stream the inner construct runs on). At [n], the outer
+/// body maps s to `s + 100 n`, the inner construct runs on that, `m`, and
+/// holds `s + 10 m`: 1 + 1010 at [1], 2 + 2020 at [2], 3 + 3030 at [3]. A
+/// switch over the outer bodies' switches follows the latest.
+#[test]
+fn a_construct_a_body_builds_runs_at_its_instant_and_after() {
+    let Some(oracle) = oracle() else { return };
+    let local = Reference::Local;
+    let nested = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Constant(Literal(0)),
+            Construct {
+                body: body(
+                    vec![
+                        Map {
+                            function: Argument + ConstructEvent * Literal(100),
+                            source: TopLevel(1),
+                        },
+                        Construct {
+                            body: body(
+                                vec![
+                                    Map {
+                                        function: Argument + ConstructEvent * Literal(10),
+                                        source: TopLevel(1),
+                                    },
+                                    Hold {
+                                        initial: Literal(0),
+                                        source: local(0),
+                                    },
+                                ],
+                                BodyResult::Node(local(1)),
+                            ),
+                            source: local(0),
+                        },
+                        HoldCell {
+                            initial: TopLevel(2),
+                            source: local(1),
+                        },
+                        SwitchCell(local(2)),
+                    ],
+                    BodyResult::Node(local(3)),
+                ),
+                source: TopLevel(1),
+            },
+            HoldCell {
+                initial: TopLevel(2),
+                source: TopLevel(3),
+            },
+            SwitchCell(TopLevel(4)),
+            Steps(TopLevel(5)),
+        ],
+        vec![5, 6],
+        &[&[(0, 1)], &[(0, 2)], &[(0, 3)]],
+    );
+    assert_eq!(
+        agree(oracle, &nested),
+        [
+            cell(0, &[Some(1011), Some(2022), Some(3033)]),
+            stream(&[&[1011], &[2022], &[3033]]),
+        ]
+    );
+}
+
+/// A construct fed by a split runs its body in each child instant [k, n],
+/// and what it builds exists from that child (Stage6.hs, "children"): a
+/// hold over the split's items takes the item of [k, n], 11, 22, 33, 44,
+/// and a defer of them fires in [k, n, 0], before [k, n + 1], 101, 202,
+/// 303, 404. A construct built in the build over a split of a
+/// steps_with_current of a constant runs its body in the build's own
+/// children, [0, 0] and [0, 1], before `build` returns: the switch over
+/// what it builds holds 6 after transaction zero, and then steps with the
+/// items, 7, 8, 9, 10.
+#[test]
+fn a_construct_fed_by_a_split_runs_its_body_in_each_child_instant() {
+    let Some(oracle) = oracle() else { return };
+    let (items, zero) = (3, 4);
+    let mut definitions = vec![
+        Definition::Input(0),
+        // [1, 2, 3] for 3, and [4] for 5.
+        MapList {
+            length: Argument,
+            element: Expression::if_then_else(
+                Argument.less_than(Literal(4)),
+                SecondArgument + Literal(1),
+                Argument - Literal(1),
+            ),
+            source: TopLevel(0),
+        },
+        Definition::Split(TopLevel(1)),
+        Share(TopLevel(2)),
+        Constant(Literal(0)),
+        Constant(Literal(5)),
+        StepsWithCurrent(TopLevel(5)),
+        MapList {
+            length: Literal(2),
+            element: Argument + SecondArgument,
+            source: TopLevel(6),
+        },
+        Definition::Split(TopLevel(7)),
+    ];
+    let local = Reference::Local;
+    let top = switched(
+        &mut definitions,
+        items,
+        zero,
+        vec![
+            Map {
+                function: Argument * Literal(10) + ConstructEvent,
+                source: TopLevel(items),
+            },
+            Hold {
+                initial: Literal(0),
+                source: local(0),
+            },
+        ],
+        1,
+    );
+    let later = switched(
+        &mut definitions,
+        items,
+        zero,
+        vec![
+            Map {
+                function: Argument + ConstructEvent * Literal(100),
+                source: TopLevel(items),
+            },
+            Definition::Defer(local(0)),
+            Hold {
+                initial: Literal(0),
+                source: local(1),
+            },
+        ],
+        2,
+    );
+    let top0 = switched(
+        &mut definitions,
+        8,
+        zero,
+        vec![
+            Map {
+                function: Argument + ConstructEvent,
+                source: TopLevel(items),
+            },
+            Hold {
+                initial: ConstructEvent,
+                source: local(0),
+            },
+        ],
+        1,
+    );
+    let children = program(
+        integers(1),
+        definitions,
+        vec![top, later, top0],
+        &[&[(0, 3)], &[(0, 5)]],
+    );
+    assert_eq!(
+        agree(oracle, &children),
+        [
+            timed_cell(
+                0,
+                2,
+                &[(&[1, 0], 11), (&[1, 1], 22), (&[1, 2], 33), (&[2, 0], 44)]
+            ),
+            timed_cell(
+                0,
+                2,
+                &[
+                    (&[1, 0], 0),
+                    (&[1, 0, 0], 101),
+                    (&[1, 1], 0),
+                    (&[1, 1, 0], 202),
+                    (&[1, 2], 0),
+                    (&[1, 2, 0], 303),
+                    (&[2, 0], 0),
+                    (&[2, 0, 0], 404)
+                ]
+            ),
+            timed_cell(
+                6,
+                2,
+                &[(&[1, 0], 7), (&[1, 1], 8), (&[1, 2], 9), (&[2, 0], 10)]
+            ),
+        ]
+    );
+}
+
+/// The builder's program of constructs, which its own test works out by
+/// hand, is GHC's too, times included: every construct runs at [2] and
+/// [4].
+#[test]
+fn the_constructs_of_the_builder_s_test_agree_with_ghc() {
+    let Some(oracle) = oracle() else { return };
+    assert_eq!(
+        agree(oracle, &constructs_program()),
+        [
+            stream(&[&[], &[202], &[], &[505], &[]]),
+            cell(0, &[None, Some(5), Some(6), Some(11), Some(12)]),
+            stream(&[&[7], &[], &[2004], &[2006], &[5007]]),
+            cell(0, &[Some(1), Some(5), Some(9), Some(11), Some(18)]),
+            stream(&[&[1], &[3], &[8], &[12], &[14]]),
+        ]
+    );
+}
 
 /// A split built at a child instant splits nothing its input carried
 /// before the split existed; the text's `Split`, which has no creation
