@@ -3,12 +3,13 @@
 //! graph stays acyclic, where reading a cell's value from before the
 //! instant (snapshot, gate, sample) is not a dependency (finding F3).
 //!
-//! Expected values come from GHC running the unchanged `Denotational.hs`
-//! with every loop solved by explicit fixed-point iteration, the research's
-//! method (research-loop-shapes/loop-shapes.md): the program behind each
-//! test is in the spike's scratchpad as `stage3-ghc/Stage3.hs`, and its
-//! output is quoted at each test. Instant `[0]` is the build, and `[k]` is
-//! the k-th transaction after it.
+//! Where a test quotes GHC, the value comes from GHC running the unchanged
+//! `Denotational.hs` with every loop solved by explicit fixed-point
+//! iteration, the research's method (research-loop-shapes/loop-shapes.md);
+//! the programs are in the spike's scratchpad as `stage3-ghc/Stage3.hs` and
+//! `stage3-ghc/Boundary.hs`, and each test quotes their output. The other
+//! tests state the semantics they follow. Instant `[0]` is the build, and
+//! `[k]` is the k-th transaction after it.
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
