@@ -2757,7 +2757,9 @@ fn candidates(program: &Program) -> Vec<Program> {
             let (scalar, cell) = match made {
                 NodeType::Stream(scalar) => (*scalar, false),
                 NodeType::Cell { value, .. } => (*value, true),
-                NodeType::Lists | NodeType::Closed => continue,
+                NodeType::Lists | NodeType::Tokens(_) | NodeType::Outer(_) | NodeType::Closed => {
+                    continue;
+                }
             };
             if matches!(
                 program.definitions[node],

@@ -1646,6 +1646,22 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
         refused(
             vec![
                 Definition::Input(0),
+                Definition::Construct {
+                    body: bough_oracle::Body {
+                        definitions: vec![],
+                        result: bough_oracle::BodyResult::Value(Literal(1)),
+                    },
+                    source: TopLevel(0),
+                },
+            ],
+            vec![1]
+        ),
+        "node 1 (Construct): Construct is outside the subset of stages 1 to 5"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
                 Definition::Hold {
                     initial: Literal(0),
                     source: TopLevel(0),
@@ -1654,7 +1670,7 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
             ],
             vec![1]
         ),
-        "node 2 (SwitchCell): SwitchCell is outside the subset of stages 1 to 4"
+        "node 2 (SwitchCell): N 1 is a cell of integers; a switch reads a cell of tokens"
     );
     assert_eq!(
         refused(
@@ -1948,6 +1964,343 @@ fn the_builder_refuses_loops_and_children_it_cannot_build() {
         refused(counter(Some(3)), vec![4]),
         "observe: node 4 is a Close, which makes no node; the comparison observes streams and \
          cells of integers and booleans"
+    );
+}
+
+/// The builder builds switches as a user writes them. A pick is
+/// `map(..).node(b)` over a node, so a chain before it gets a node first,
+/// and a hold of the picks is the outer; a constant of a token and a
+/// map_cell to tokens are outers too. A switch_stream over shared streams
+/// is a linear stream, a switch_cell over cells a Cell and over States a
+/// State. The values are worked out by hand: the switch_stream forwards the
+/// old stream at [2], where it switches; the switch_cell switches to a
+/// quiet constant at [2], dropping its old inner's step there; the switch
+/// over States follows the map_cell of c1, which steps at every
+/// transaction, so it steps at each, to the value after the instant of the
+/// State it selects.
+#[test]
+fn the_builder_builds_switches_as_a_user_writes_them() {
+    let switches = Program {
+        window: Window::FromFirstTransaction,
+        inputs: vec![
+            Input::new(Type::Integer),
+            Input::new(Type::Integer),
+            Input::new(Type::Integer),
+            Input::new(Type::Integer),
+            Input::new(Type::Boolean),
+            Input::new(Type::Integer),
+        ],
+        definitions: vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Definition::Input(1),
+            Map {
+                function: Argument * Literal(10),
+                source: TopLevel(2),
+            },
+            Share(TopLevel(3)),
+            Definition::Input(2),
+            Map {
+                function: Argument + Literal(1),
+                source: TopLevel(5),
+            },
+            Definition::PickStream {
+                index: Argument,
+                streams: vec![TopLevel(1), TopLevel(4)],
+                source: TopLevel(6),
+            },
+            Definition::HoldStream {
+                initial: TopLevel(1),
+                source: TopLevel(7),
+            },
+            Definition::SwitchStream(TopLevel(8)),
+            InputCell {
+                input: 3,
+                initial: Literal(7),
+            },
+            Constant(Literal(8)),
+            Definition::Input(4),
+            Definition::PickCell {
+                index: Argument,
+                cells: vec![TopLevel(10), TopLevel(11)],
+                source: TopLevel(12),
+            },
+            Definition::HoldCell {
+                initial: TopLevel(10),
+                source: TopLevel(13),
+            },
+            Definition::SwitchCell(TopLevel(14)),
+            Steps(TopLevel(15)),
+            Definition::Input(5),
+            Share(TopLevel(17)),
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(18),
+            },
+            AccumulateMut {
+                initial: Literal(100),
+                function: SecondArgument - Argument,
+                source: TopLevel(18),
+            },
+            Definition::MapPickCell {
+                index: Argument,
+                cells: vec![TopLevel(19), TopLevel(20)],
+                cell: TopLevel(10),
+            },
+            Definition::SwitchCell(TopLevel(21)),
+            Definition::ConstantStream(TopLevel(4)),
+            Definition::SwitchStream(TopLevel(23)),
+        ],
+        observe: vec![9, 15, 16, 22, 24],
+        schedule: vec![
+            vec![
+                (0, Value::Integer(1)),
+                (1, Value::Integer(2)),
+                (2, Value::Integer(-1)),
+                (3, Value::Integer(9)),
+                (5, Value::Integer(5)),
+            ],
+            vec![
+                (0, Value::Integer(3)),
+                (1, Value::Integer(4)),
+                (2, Value::Integer(0)),
+                (3, Value::Integer(10)),
+                (4, Value::Boolean(true)),
+                (5, Value::Integer(6)),
+            ],
+            vec![
+                (0, Value::Integer(5)),
+                (1, Value::Integer(6)),
+                (3, Value::Integer(11)),
+                (5, Value::Integer(7)),
+            ],
+        ],
+    };
+    let types = check(&switches).unwrap();
+    let integers = bough_oracle::Held::Streams(Scalar::Integer);
+    assert_eq!(types[7], NodeType::Tokens(integers));
+    assert_eq!(types[8], NodeType::Outer(integers));
+    assert_eq!(
+        types[21],
+        NodeType::Outer(bough_oracle::Held::Cells { state: true })
+    );
+    assert_eq!(
+        types[22],
+        NodeType::Cell {
+            value: Scalar::Integer,
+            state: true
+        },
+        "a switch over States is a State"
+    );
+    let run = run_local(&switches);
+    // Five inputs and an input cell's two nodes; two shares; the node the
+    // chain before the first pick gets, and the pick; a hold and a switch;
+    // a constant, a pick, a hold, a switch and a steps view; a share, two
+    // accumulators, a map_cell and a switch; a constant and a switch.
+    assert_eq!(run.live_nodes, 7 + 2 + 4 + 5 + 5 + 2);
+    let stream = |events: Vec<Vec<i64>>| bough_oracle::EngineObservation::Stream { events };
+    let cell = |registration: i64, steps: Vec<Vec<i64>>, samples: Vec<i64>| {
+        bough_oracle::EngineObservation::Cell {
+            registration: vec![registration],
+            steps_registration: vec![],
+            values: steps.clone(),
+            steps,
+            samples,
+        }
+    };
+    assert_eq!(
+        run.observations,
+        [
+            stream(vec![vec![1], vec![3], vec![60]]),
+            cell(7, vec![vec![9], vec![8], vec![]], vec![9, 8, 8]),
+            stream(vec![vec![9], vec![8], vec![]]),
+            cell(100, vec![vec![95], vec![11], vec![82]], vec![95, 11, 82]),
+            stream(vec![vec![20], vec![40], vec![60]]),
+        ]
+    );
+    let threaded = bough_oracle::run::<Threaded>(&switches, RunOptions::default()).unwrap();
+    assert_eq!(threaded.observations, run.observations);
+}
+
+/// What the engine cannot switch among without `construct`, or the oracle
+/// would refuse, the builder refuses before building, naming the node.
+#[test]
+fn the_builder_refuses_switches_it_cannot_build() {
+    let refused = |definitions: Vec<Definition>, observe: Vec<usize>| {
+        let program = program(integers(2), definitions, observe, &[]);
+        let error = run::<Local>(&program, RunOptions::default()).unwrap_err();
+        assert_eq!(check(&program).unwrap_err(), error);
+        error.to_string()
+    };
+    let accumulate_mut = |source: usize| AccumulateMut {
+        initial: Literal(0),
+        function: SecondArgument + Argument,
+        source: TopLevel(source),
+    };
+    let pick_stream = |streams: Vec<usize>, source: usize| Definition::PickStream {
+        index: Argument,
+        streams: streams.into_iter().map(TopLevel).collect(),
+        source: TopLevel(source),
+    };
+    let pick_cell = |cells: Vec<usize>, source: usize| Definition::PickCell {
+        index: Argument,
+        cells: cells.into_iter().map(TopLevel).collect(),
+        source: TopLevel(source),
+    };
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Definition::Input(1),
+                pick_stream(vec![0], 1),
+            ],
+            vec![0]
+        ),
+        "node 2 (PickStream): N 0 is a linear stream; a cell of linear streams needs construct \
+         (stage 6), so a switch here follows a Share"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                InputCell {
+                    input: 0,
+                    initial: Literal(0),
+                },
+                Definition::ToBoolean(TopLevel(0)),
+                Definition::Input(1),
+                pick_cell(vec![1], 2),
+            ],
+            vec![0]
+        ),
+        "node 3 (PickCell): N 1 is a cell of booleans; a switch here follows cells of integers"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                accumulate_mut(1),
+                Constant(Literal(1)),
+                pick_cell(vec![2, 3], 1),
+            ],
+            vec![2]
+        ),
+        "node 4 (PickCell): the listed cells mix Cells and States, which the engine types apart"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                accumulate_mut(0),
+                Constant(Literal(1)),
+                Definition::MapPickCell {
+                    index: Argument,
+                    cells: vec![TopLevel(2)],
+                    cell: TopLevel(1),
+                },
+            ],
+            vec![2]
+        ),
+        "node 3 (MapPickCell): N 1 is a State; a map_cell of it would be a State of cells, which \
+         the engine has no switch over"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                Definition::Input(1),
+                pick_stream(vec![1], 2),
+                Definition::Node(TopLevel(3)),
+            ],
+            vec![4]
+        ),
+        "node 4 (Node): N 3 is a stream of shared streams of integers, which only a hold of \
+         them reads"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                Definition::Input(1),
+                pick_stream(vec![1], 2),
+                Definition::HoldStream {
+                    initial: TopLevel(1),
+                    source: TopLevel(3),
+                },
+                Definition::HoldStream {
+                    initial: TopLevel(1),
+                    source: TopLevel(3),
+                },
+            ],
+            vec![1]
+        ),
+        "node 3 (PickStream): a linear stream has 2 consumers (node 4, node 5); only a Share may \
+         have more than one"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                accumulate_mut(1),
+                Constant(Literal(1)),
+                pick_cell(vec![3], 1),
+                Definition::HoldCell {
+                    initial: TopLevel(2),
+                    source: TopLevel(4),
+                },
+            ],
+            vec![2]
+        ),
+        "node 5 (HoldCell): N 4 carries cells of integers, and the initial N 2 is a State of \
+         integers"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Constant(Literal(1)),
+                Definition::ConstantCell(TopLevel(0)),
+                Definition::SwitchStream(TopLevel(1)),
+            ],
+            vec![2]
+        ),
+        "node 2 (SwitchStream): N 1 is a cell of cells of integers; switch_stream needs a cell \
+         of streams"
+    );
+    assert_eq!(
+        refused(
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                Definition::ConstantStream(TopLevel(1)),
+            ],
+            vec![2]
+        ),
+        "observe: node 2 is a cell of shared streams of integers; the comparison observes \
+         streams and cells of integers and booleans"
+    );
+    // A Sample of a switch that may select a loop closed with the switch
+    // would not end in the engine (finding F49).
+    let f49 = refused(
+        vec![
+            CellLoop(Type::Integer),
+            Definition::ConstantCell(TopLevel(0)),
+            Definition::SwitchCell(TopLevel(1)),
+            Close {
+                forward: 0,
+                definition: TopLevel(2),
+            },
+            Constant(Expression::Sample(TopLevel(2))),
+        ],
+        vec![4],
+    );
+    assert!(
+        f49.starts_with("node 4 (Constant): a Sample reads ")
+            && f49.ends_with("through a loop closed with itself"),
+        "{f49}"
     );
 }
 

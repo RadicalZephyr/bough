@@ -1,6 +1,6 @@
 //! A [`Program`] built with the Bough API, and its schedule run on it.
 //!
-//! [`run`] checks that a program is in the subset stages 1 to 4 of the
+//! [`run`] checks that a program is in the subset stages 1 to 5 of the
 //! engine implement, builds it in one build closure the way a user would
 //! write it, registers listeners on the observed nodes, and runs the
 //! schedule: one `graph.transaction` per external transaction, with the
@@ -20,17 +20,23 @@
 //! `MapCell`, `ToBoolean` and `Lift` (stages 1 and 2). The loops `CellLoop`
 //! and `StreamLoop` of integers or booleans, and `Close` (stage 3). `Split`
 //! and `Defer`, and `MapList`, the one node that carries lists, which only a
-//! `Split` may read (stage 4). An expression may `Sample` a cell defined
-//! before it, which reads the cell in the build closure, before transaction
-//! zero, as the oracle's top level does; the engine has no value for a
-//! loop's forward before its `Close`, so a `Sample` may not read one that is
-//! still open, directly or through a read-through cell. Anything else, and
-//! anything the oracle would refuse, is a [`BuildError`] naming the node,
-//! from [`check`], before any node is built.
+//! `Split` may read (stage 4). The switches and the tokens they switch
+//! among, without `construct` (stage 5): `PickStream`, `PickCell`,
+//! `HoldStream`, `HoldCell`, `ConstantStream`, `ConstantCell`,
+//! `MapPickCell`, `SwitchStream` and `SwitchCell`. An expression may
+//! `Sample` a cell defined before it, which reads the cell in the build
+//! closure, before transaction zero, as the oracle's top level does; the
+//! engine has no value for a loop's forward before its `Close`, so a
+//! `Sample` may not read one that is still open, directly, through a
+//! read-through cell, or through a switch that may select it. Anything
+//! else, and anything the oracle would refuse, is a [`BuildError`] naming
+//! the node, from [`check`], before any node is built.
 //!
 //! [`check`] does not refuse a loop the engine refuses at its close, one
-//! whose definition depends on its own forward in the same instant: that
-//! refusal is the engine's to make, and a test holds it to it.
+//! whose definition depends on its own forward in the same instant, or a
+//! switch whose first link or move the engine refuses, one that selects a
+//! cell or stream that depends on the switch itself: those refusals are
+//! the engine's to make, and tests hold it to them.
 //!
 //! # Loops
 //!
@@ -50,6 +56,35 @@
 //! multiply the chain types (finding F36), so the builder materializes it
 //! with `node` at once, fusing the chain before it, and the `Split` that
 //! reads it takes that one stream of lists.
+//!
+//! # Switches
+//!
+//! A switch reads a cell of tokens, its outer: `HoldStream` or
+//! `ConstantStream` for `switch_stream`, and `HoldCell`, `ConstantCell` or
+//! `MapPickCell` for `switch_cell`. A pick maps an integer to one of the
+//! tokens it lists, `index mod n`, and changes the event type, so like a
+//! `MapList` it is not an adapter: the builder gives the chain before it a
+//! node, and makes the pick `map(..).node(b)` over that node, which a hold
+//! of tokens reads. The pick is compiled once per node type and token type
+//! rather than once per chain type (finding F36).
+//!
+//! The tokens are shared streams of integers or booleans, `Shared<i64>`,
+//! and cells of integers, `Cell<i64>` or `State<i64>`: `switch_stream`
+//! gives a `Stream<i64>`, `switch_cell` over cells a `Cell<i64>` and over
+//! `State`s a `State<i64>`. A cell of linear streams needs `construct`
+//! (stage 6), so a stream a switch may follow is a `Share`. The engine
+//! types a `Cell` and a `State` apart, so the cells one outer holds are all
+//! of one kind; and it has no switch over a `State` of cells, so a
+//! `MapPickCell` reads a `Cell`. A stream of tokens has one reader, a hold
+//! of them, and a cell of tokens is read by switches alone, never observed.
+//!
+//! A pick's function and a `MapPickCell`'s capture the tokens they list,
+//! and the collector cannot see a closure's captures (RFD 3). A hold's
+//! value reaches the token it holds, and a switch its current inner, but a
+//! token no selection has reached yet is reached by nothing else, and
+//! would be collected before the pick selects it, which is then a stale
+//! token. So the builder declares, with `Build::depends`, that a pick's
+//! node and a `MapPickCell` keep every token they list.
 //!
 //! Expressions evaluate as the protocol says ([`evaluate`]): 64-bit
 //! wrapping arithmetic, `Modulo` as `rem_euclid`, a boolean read as 0 or 1,
@@ -117,7 +152,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
     Build, Cell, CellLoop, CellRef, Graph, Lift, Listener, Local, Node, Shared, Source, State,
-    StateLoop, Stream, StreamLoop, Trace, Tracer, Transaction,
+    StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
 
 use crate::program::{Definition, Expression, Input, Program, Reference, Type, Value};
@@ -144,6 +179,8 @@ pub type FoldFn<A> = Box<dyn Fn(A, A) -> A + Send>;
 pub type CellFn<A, B> = Box<dyn Fn(&A) -> B + Send>;
 /// A `MapList`'s function: an event to a list, which a split reads.
 pub type ListFn = Box<dyn Fn(i64) -> Vec<i64> + Send>;
+/// A pick's function: an event to one of the tokens it lists.
+pub type PickFn<T> = Box<dyn Fn(i64) -> T + Send>;
 /// A stream listener.
 pub type StreamSink = Box<dyn FnMut(i64) + Send>;
 /// A cell listener.
@@ -217,6 +254,18 @@ pub trait EngineMode: bough::Mode {
     fn split(b: &mut Build<Self>, lists: Stream<Vec<i64>>) -> Stream<i64>;
     /// `closer.close(b, chain)`: the chain fused into the forward's node.
     fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>);
+    /// `node.map(f).node(b)`: a stream of tokens, for a hold of them to read.
+    fn pick<S: Chain, T: Send + 'static>(b: &mut Build<Self>, node: S, f: PickFn<T>) -> Stream<T>;
+    /// `tokens.hold(b, initial)`: a cell of tokens.
+    fn hold_tokens<T: Trace + Send + 'static>(
+        b: &mut Build<Self>,
+        tokens: Stream<T>,
+        initial: T,
+    ) -> Cell<T>;
+    /// `b.constant(token)`: a cell of tokens that never steps.
+    fn constant_token<T: Trace + Send + 'static>(b: &mut Build<Self>, token: T) -> Cell<T>;
+    /// `outer.switch_stream(b)` over shared streams.
+    fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64>;
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut Build<Self>,
@@ -358,6 +407,26 @@ macro_rules! engine_mode {
             }
             fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>) {
                 closer.close(b, chain)
+            }
+            fn pick<S: Chain, T: Send + 'static>(
+                b: &mut Build<Self>,
+                node: S,
+                f: PickFn<T>,
+            ) -> Stream<T> {
+                node.map(f).node(b)
+            }
+            fn hold_tokens<T: Trace + Send + 'static>(
+                b: &mut Build<Self>,
+                tokens: Stream<T>,
+                initial: T,
+            ) -> Cell<T> {
+                tokens.hold(b, initial)
+            }
+            fn constant_token<T: Trace + Send + 'static>(b: &mut Build<Self>, token: T) -> Cell<T> {
+                b.constant(token)
+            }
+            fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64> {
+                outer.switch_stream(b)
             }
             fn map_cell<A: 'static, B: Send + 'static>(
                 b: &mut Build<Self>,
@@ -508,6 +577,29 @@ impl Scalar {
     }
 }
 
+/// The tokens a stream of tokens carries or a cell of them holds, which a
+/// switch switches among.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// Shared streams of the scalar: `Shared<i64>`, a boolean as 0 or 1.
+    Streams(Scalar),
+    /// Cells of integers: `Cell<i64>`, or `State<i64>` when `state`.
+    Cells {
+        /// `State`s rather than `Cell`s.
+        state: bool,
+    },
+}
+
+impl fmt::Display for Held {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Held::Streams(scalar) => write!(formatter, "shared streams of {}", scalar.plural()),
+            Held::Cells { state: false } => formatter.write_str("cells of integers"),
+            Held::Cells { state: true } => formatter.write_str("States of integers"),
+        }
+    }
+}
+
 /// What a node of the subset makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeType {
@@ -516,14 +608,19 @@ pub enum NodeType {
     /// A stream of lists of integers: a `MapList`, which only a `Split`
     /// reads.
     Lists,
+    /// A stream of tokens: a pick, which only a hold of tokens reads.
+    Tokens(Held),
     /// A cell; `state` when it is a `State`, which has no stream view.
     Cell {
         /// What it holds.
         value: Scalar,
-        /// An in-place accumulator, a read-through cell over one, or a
-        /// loop's forward whose definition is one of those.
+        /// An in-place accumulator, a read-through cell over one, a switch
+        /// over them, or a loop's forward whose definition is one of those.
         state: bool,
     },
+    /// A cell of tokens, a switch's outer: a hold or a constant of tokens,
+    /// or a `MapPickCell`. Only a switch reads it.
+    Outer(Held),
     /// A `Close`, which makes no node.
     Closed,
 }
@@ -533,6 +630,7 @@ impl fmt::Display for NodeType {
         match self {
             NodeType::Stream(scalar) => write!(formatter, "a stream of {}", scalar.plural()),
             NodeType::Lists => formatter.write_str("a stream of lists"),
+            NodeType::Tokens(held) => write!(formatter, "a stream of {held}"),
             NodeType::Cell {
                 value,
                 state: false,
@@ -540,6 +638,7 @@ impl fmt::Display for NodeType {
             NodeType::Cell { value, state: true } => {
                 write!(formatter, "a State of {}", value.plural())
             }
+            NodeType::Outer(held) => write!(formatter, "a cell of {held}"),
             NodeType::Closed => formatter.write_str("a Close, which makes no node"),
         }
     }
@@ -618,7 +717,11 @@ pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
         | Definition::Hold { source, .. }
         | Definition::Accumulate { source, .. }
         | Definition::AccumulateMut { source, .. }
-        | Definition::MapList { source, .. } => vec![*source],
+        | Definition::MapList { source, .. }
+        | Definition::PickStream { source, .. }
+        | Definition::PickCell { source, .. }
+        | Definition::HoldStream { source, .. }
+        | Definition::HoldCell { source, .. } => vec![*source],
         Definition::Once(source)
         | Definition::Node(source)
         | Definition::Share(source)
@@ -632,39 +735,51 @@ pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
     }
 }
 
+/// The streams or cells a switch over the outer at `outer` may follow: a
+/// hold of tokens' initial token and every token its pick lists, a
+/// constant's token, or every cell a `MapPickCell` lists. Each is a
+/// potential dependency of the switch: a `switch_cell` depends on the cell
+/// it follows, and a `switch_stream` on the stream. Empty for a node that
+/// is not an outer.
+pub fn switch_candidates(definitions: &[Definition], outer: usize) -> Vec<Reference> {
+    match definitions.get(outer) {
+        Some(
+            Definition::HoldStream { initial, source } | Definition::HoldCell { initial, source },
+        ) => {
+            let mut candidates = vec![*initial];
+            if let Reference::TopLevel(pick) = source {
+                match definitions.get(*pick) {
+                    Some(Definition::PickStream {
+                        streams: listed, ..
+                    })
+                    | Some(Definition::PickCell { cells: listed, .. }) => {
+                        candidates.extend(listed.iter().copied());
+                    }
+                    _ => {}
+                }
+            }
+            candidates
+        }
+        Some(Definition::ConstantStream(token) | Definition::ConstantCell(token)) => vec![*token],
+        Some(Definition::MapPickCell { cells, .. }) => cells.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// Checks that a program is in the subset and well formed, and returns what
 /// each node makes. Every error names the node at fault where there is one.
 ///
 /// A cell loop is a `State` when the definition its `Close` names is one,
-/// and the `Close` comes later: the definitions are checked with every
-/// loop a `Cell`, then again with each loop whose definition was a `State`
-/// made a `State`, until no loop changes. A loop only ever changes from a
-/// `Cell` to a `State`, so this ends after at most one pass per loop.
+/// and the `Close` comes later. So [`states`] first works out which cells
+/// are `State`s, loops included, and the definitions are checked once,
+/// each loop declared as what its definition is.
 pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
     let mut inputs = Vec::with_capacity(program.inputs.len());
     for (index, input) in program.inputs.iter().enumerate() {
         inputs.push(check_input(index, input)?);
     }
-    let mut states = vec![false; program.definitions.len()];
-    let types = loop {
-        let types = check_definitions(program, &inputs, &states)?;
-        let mut changed = false;
-        for definition in &program.definitions {
-            if let Definition::Close {
-                forward,
-                definition: Reference::TopLevel(node),
-            } = definition
-            {
-                if matches!(types[*node], NodeType::Cell { state: true, .. }) && !states[*forward] {
-                    states[*forward] = true;
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break types;
-        }
-    };
+    let states = states(program);
+    let types = check_definitions(program, &inputs, &states)?;
     if program.observe.is_empty() {
         return Err(BuildError::program("observe: the program observes no node"));
     }
@@ -675,7 +790,12 @@ pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
                     "observe: there is no node {node}"
                 )));
             }
-            Some(made @ (NodeType::Lists | NodeType::Closed)) => {
+            Some(
+                made @ (NodeType::Lists
+                | NodeType::Tokens(_)
+                | NodeType::Outer(_)
+                | NodeType::Closed),
+            ) => {
                 return Err(BuildError::program(format!(
                     "observe: node {node} is {made}; the comparison observes streams and cells \
                      of integers and booleans"
@@ -687,6 +807,60 @@ pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
     check_linearity(program, &types)?;
     check_schedule(program, &inputs)?;
     Ok(types)
+}
+
+/// Which nodes are `State`s, if the program is well typed: an in-place
+/// accumulator; a read-through cell over a `State`; a switch that may
+/// select one; and a cell loop whose definition is one. A loop's
+/// definition comes after it, so this repeats until nothing changes; a
+/// node only ever turns into a `State`, so it ends after at most one pass
+/// per loop. [`check_definitions`] reports a program that is not well
+/// typed.
+fn states(program: &Program) -> Vec<bool> {
+    let definitions = &program.definitions;
+    let mut states = vec![false; definitions.len()];
+    let mut closes = vec![None; definitions.len()];
+    for definition in definitions {
+        if let Definition::Close {
+            forward,
+            definition: Reference::TopLevel(node),
+        } = definition
+        {
+            if let Some(close) = closes.get_mut(*forward) {
+                *close = Some(*node);
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (index, definition) in definitions.iter().enumerate() {
+            let state = |reference: &Reference| match reference {
+                Reference::TopLevel(node) => states.get(*node).copied().unwrap_or(false),
+                Reference::Local(_) => false,
+            };
+            let candidates = |outer: &Reference| match outer {
+                Reference::TopLevel(outer) => switch_candidates(definitions, *outer),
+                Reference::Local(_) => Vec::new(),
+            };
+            let is = match definition {
+                Definition::AccumulateMut { .. } => true,
+                Definition::MapCell { cell, .. } | Definition::ToBoolean(cell) => state(cell),
+                Definition::Lift { cells, .. } => cells.iter().any(state),
+                Definition::SwitchCell(outer) => candidates(outer).iter().any(state),
+                Definition::CellLoop(_) => {
+                    closes[index].is_some_and(|node| states.get(node).copied().unwrap_or(false))
+                }
+                _ => false,
+            };
+            if is && !states[index] {
+                states[index] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return states;
+        }
+    }
 }
 
 /// Checks every definition in order, the cell loops `states` marks taken
@@ -784,9 +958,14 @@ impl Scope<'_> {
         let node = self.node(reference)?;
         match self.types[node] {
             NodeType::Stream(scalar) => Ok(scalar),
-            NodeType::Cell { .. } => Err(format!("{reference} is a cell, not a stream")),
+            NodeType::Cell { .. } | NodeType::Outer(_) => {
+                Err(format!("{reference} is a cell, not a stream"))
+            }
             NodeType::Lists => Err(format!(
                 "{reference} is a stream of lists, which only a Split reads"
+            )),
+            NodeType::Tokens(held) => Err(format!(
+                "{reference} is a stream of {held}, which only a hold of them reads"
             )),
             NodeType::Closed => Err(format!("{reference} is a Close, which makes no node")),
         }
@@ -796,10 +975,91 @@ impl Scope<'_> {
         let node = self.node(reference)?;
         match self.types[node] {
             NodeType::Cell { value, state } => Ok((value, state)),
-            NodeType::Stream(_) | NodeType::Lists => {
+            NodeType::Stream(_) | NodeType::Lists | NodeType::Tokens(_) => {
                 Err(format!("{reference} is a stream, not a cell"))
             }
+            NodeType::Outer(held) => Err(format!(
+                "{reference} is a cell of {held}, which only a switch reads"
+            )),
             NodeType::Closed => Err(format!("{reference} is a Close, which makes no node")),
+        }
+    }
+
+    /// A stream a switch may follow: a `Share`, of integers or booleans.
+    fn shared(&self, reference: &Reference) -> Result<Scalar, String> {
+        let scalar = self.stream(reference)?;
+        match self.program.definitions[self.node(reference)?] {
+            Definition::Share(_) => Ok(scalar),
+            _ => Err(format!(
+                "{reference} is a linear stream; a cell of linear streams needs construct \
+                 (stage 6), so a switch here follows a Share"
+            )),
+        }
+    }
+
+    /// The streams a pick lists: one or more `Share`s of one scalar.
+    fn shared_list(&self, streams: &[Reference]) -> Result<Scalar, String> {
+        let mut scalars = streams.iter().map(|stream| self.shared(stream));
+        let Some(first) = scalars.next() else {
+            return Err("the list of choices is empty".into());
+        };
+        let first = first?;
+        for scalar in scalars {
+            if scalar? != first {
+                return Err("the listed streams must have one type".into());
+            }
+        }
+        Ok(first)
+    }
+
+    /// A cell a switch may follow: a cell of integers, whether it is a
+    /// `State`.
+    fn integer_cell(&self, reference: &Reference) -> Result<bool, String> {
+        match self.cell(reference)? {
+            (Scalar::Integer, state) => Ok(state),
+            (Scalar::Boolean, _) => Err(format!(
+                "{reference} is a cell of booleans; a switch here follows cells of integers"
+            )),
+        }
+    }
+
+    /// The cells a pick lists: one or more cells of integers, all `Cell`s
+    /// or all `State`s, which the engine types apart.
+    fn cell_list(&self, cells: &[Reference]) -> Result<bool, String> {
+        let mut states = cells.iter().map(|cell| self.integer_cell(cell));
+        let Some(first) = states.next() else {
+            return Err("the list of choices is empty".into());
+        };
+        let first = first?;
+        for state in states {
+            if state? != first {
+                return Err(
+                    "the listed cells mix Cells and States, which the engine types apart".into(),
+                );
+            }
+        }
+        Ok(first)
+    }
+
+    /// What a hold of tokens reads: a pick's stream of tokens.
+    fn tokens(&self, reference: &Reference) -> Result<Held, String> {
+        let node = self.node(reference)?;
+        match self.types[node] {
+            NodeType::Tokens(held) => Ok(held),
+            made => Err(format!(
+                "{reference} is {made}; a hold of tokens reads a pick's stream of tokens"
+            )),
+        }
+    }
+
+    /// What a switch reads: a cell of tokens.
+    fn outer(&self, reference: &Reference) -> Result<Held, String> {
+        let node = self.node(reference)?;
+        match self.types[node] {
+            NodeType::Outer(held) => Ok(held),
+            made => Err(format!(
+                "{reference} is {made}; a switch reads a cell of tokens"
+            )),
         }
     }
 
@@ -810,8 +1070,12 @@ impl Scope<'_> {
     /// Whether the build closure can read cell `node` here. A loop's
     /// forward has no value before its `Close`, so it can be read once
     /// closed, if its definition can be; a read-through cell can be read if
-    /// every cell it reads can be. `depth` ends the walk on a loop closed
-    /// through itself, which the engine refuses at its close.
+    /// every cell it reads can be, and a switch if its outer and every cell
+    /// the outer may select can be. `depth` ends the walk on a loop closed
+    /// through itself, which the engine refuses at its close, or through a
+    /// switch that may select it, which it refuses at the switch's first
+    /// link or move, and where a read before that goes round the cycle and
+    /// panics (finding F49).
     fn readable(&self, node: usize, depth: usize) -> Result<(), String> {
         if depth > self.types.len() {
             return Err(format!(
@@ -830,8 +1094,21 @@ impl Scope<'_> {
                      the engine has no value for it before its Close"
                 )),
             },
-            Definition::MapCell { cell, .. } | Definition::ToBoolean(cell) => read(cell),
+            Definition::MapCell { cell, .. }
+            | Definition::ToBoolean(cell)
+            | Definition::MapPickCell { cell, .. } => read(cell),
             Definition::Lift { cells, .. } => cells.iter().try_for_each(read),
+            Definition::SwitchCell(outer) => {
+                read(outer)?;
+                match outer {
+                    Reference::TopLevel(outer) => {
+                        switch_candidates(&self.program.definitions, *outer)
+                            .iter()
+                            .try_for_each(read)
+                    }
+                    Reference::Local(_) => Ok(()),
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -1065,19 +1342,90 @@ impl Scope<'_> {
                 }
                 NodeType::Closed
             }
-            Definition::Literal { .. }
-            | Definition::PickStream { .. }
-            | Definition::PickCell { .. }
-            | Definition::SwitchStream(_)
-            | Definition::Construct { .. }
-            | Definition::HoldStream { .. }
-            | Definition::HoldCell { .. }
-            | Definition::ConstantStream(_)
-            | Definition::ConstantCell(_)
-            | Definition::MapPickCell { .. }
-            | Definition::SwitchCell(_) => {
+            Definition::PickStream {
+                index,
+                streams,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(index, 1)?;
+                NodeType::Tokens(Held::Streams(self.shared_list(streams)?))
+            }
+            Definition::PickCell {
+                index,
+                cells,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(index, 1)?;
+                NodeType::Tokens(Held::Cells {
+                    state: self.cell_list(cells)?,
+                })
+            }
+            Definition::HoldStream { initial, source } => {
+                let held = self.tokens(source)?;
+                let scalar = self.shared(initial)?;
+                if held != Held::Streams(scalar) {
+                    return Err(format!(
+                        "{source} carries {held}, and the initial {initial} is a shared stream \
+                         of {}",
+                        scalar.plural()
+                    ));
+                }
+                NodeType::Outer(held)
+            }
+            Definition::HoldCell { initial, source } => {
+                let held = self.tokens(source)?;
+                let state = self.integer_cell(initial)?;
+                if held != (Held::Cells { state }) {
+                    return Err(format!(
+                        "{source} carries {held}, and the initial {initial} is {}",
+                        self.types[self.node(initial)?]
+                    ));
+                }
+                NodeType::Outer(held)
+            }
+            Definition::ConstantStream(stream) => {
+                NodeType::Outer(Held::Streams(self.shared(stream)?))
+            }
+            Definition::ConstantCell(cell) => NodeType::Outer(Held::Cells {
+                state: self.integer_cell(cell)?,
+            }),
+            Definition::MapPickCell { index, cells, cell } => {
+                let (_, state) = self.cell(cell)?;
+                if state {
+                    return Err(format!(
+                        "{cell} is a State; a map_cell of it would be a State of cells, which \
+                         the engine has no switch over"
+                    ));
+                }
+                self.expression(index, 1)?;
+                NodeType::Outer(Held::Cells {
+                    state: self.cell_list(cells)?,
+                })
+            }
+            Definition::SwitchStream(outer) => match self.outer(outer)? {
+                Held::Streams(scalar) => NodeType::Stream(scalar),
+                held => {
+                    return Err(format!(
+                        "{outer} is a cell of {held}; switch_stream needs a cell of streams"
+                    ));
+                }
+            },
+            Definition::SwitchCell(outer) => match self.outer(outer)? {
+                Held::Cells { state } => NodeType::Cell {
+                    value: Scalar::Integer,
+                    state,
+                },
+                held => {
+                    return Err(format!(
+                        "{outer} is a cell of {held}; switch_cell needs a cell of cells"
+                    ));
+                }
+            },
+            Definition::Literal { .. } | Definition::Construct { .. } => {
                 return Err(format!(
-                    "{} is outside the subset of stages 1 to 4",
+                    "{} is outside the subset of stages 1 to 5",
                     name(definition)
                 ));
             }
@@ -1154,13 +1502,16 @@ fn check_expression(
 }
 
 /// A stream node other than a `Share` has at most one consumer, the
-/// observation included; so has a stream of lists.
+/// observation included; so has a stream of lists or of tokens.
 fn check_linearity(program: &Program, types: &[NodeType]) -> Result<(), BuildError> {
     let mut consumers: Vec<Vec<String>> = vec![Vec::new(); types.len()];
     for (index, definition) in program.definitions.iter().enumerate() {
         for reference in consumed_streams(definition) {
             if let Reference::TopLevel(node) = reference {
-                if matches!(types[node], NodeType::Stream(_) | NodeType::Lists) {
+                if matches!(
+                    types[node],
+                    NodeType::Stream(_) | NodeType::Lists | NodeType::Tokens(_)
+                ) {
                     consumers[node].push(format!("node {index}"));
                 }
             }
@@ -1631,6 +1982,90 @@ fn lift<M: EngineMode>(b: &mut Build<M>, cells: &[IntegerCell], e: Expression) -
     }
 }
 
+// ----- switches -----
+
+/// A pick's stream of tokens, as its tokens' type says.
+enum Tokens {
+    Streams(Stream<Shared<i64>>),
+    Cells(Stream<Cell<i64>>),
+    States(Stream<State<i64>>),
+}
+
+/// A cell of tokens, which a switch reads, as its tokens' type says.
+#[derive(Clone, Copy)]
+enum Outer {
+    Streams(Cell<Shared<i64>>),
+    Cells(Cell<Cell<i64>>),
+    States(Cell<State<i64>>),
+}
+
+/// The cells one outer may select: all `Cell`s or all `State`s.
+#[derive(Clone)]
+enum Choices {
+    Cells(Vec<Cell<i64>>),
+    States(Vec<State<i64>>),
+}
+
+impl Choices {
+    /// Declares that `node`, whose function captures these cells, keeps
+    /// them alive.
+    fn declare<M: EngineMode>(&self, b: &mut Build<M>, node: &impl TokenRef) {
+        match self {
+            Choices::Cells(cells) => declare(b, node, cells),
+            Choices::States(states) => declare(b, node, states),
+        }
+    }
+
+    fn of(tokens: Vec<CellToken>) -> Choices {
+        match tokens.first() {
+            Some(CellToken::IntegerState(_)) => Choices::States(
+                tokens
+                    .into_iter()
+                    .map(|token| match token {
+                        CellToken::IntegerState(state) => state,
+                        _ => unreachable!("bough-oracle: check lists States or Cells, not both"),
+                    })
+                    .collect(),
+            ),
+            _ => Choices::Cells(
+                tokens
+                    .into_iter()
+                    .map(|token| match token {
+                        CellToken::Integer(cell) => cell,
+                        _ => unreachable!("bough-oracle: check lists cells of integers"),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// The token an index picks: `choices[index mod n]`, Haskell's `mod` for
+/// a positive `n`.
+fn picked<T: Copy>(choices: &[T], index: i64) -> T {
+    choices[index.rem_euclid(choices.len() as i64) as usize]
+}
+
+/// A pick's function: the index expression of the event, to a token.
+fn picker<T: Copy + Send + 'static>(index: Expression, choices: Vec<T>) -> PickFn<T> {
+    Box::new(move |x| picked(&choices, evaluate(&index, &[x])))
+}
+
+/// Declares that `node`, whose function captures `tokens`, keeps them
+/// alive: the collector cannot see a closure's captures (RFD 3).
+fn declare<M: EngineMode, T: TokenRef>(b: &mut Build<M>, node: &impl TokenRef, tokens: &[T]) {
+    let on: Vec<&dyn TokenRef> = tokens.iter().map(|token| token as &dyn TokenRef).collect();
+    b.depends(node, &on);
+}
+
+/// `map(f).node(b)` over a materialized stream.
+fn pick<M: EngineMode, T: Send + 'static>(b: &mut Build<M>, node: Base, f: PickFn<T>) -> Stream<T> {
+    match node {
+        Base::Stream(stream) => M::pick(b, stream, f),
+        Base::Shared(shared) => M::pick(b, shared, f),
+    }
+}
+
 // ----- building -----
 
 /// A node of the program while the build closure runs.
@@ -1638,9 +2073,13 @@ enum Built<M: EngineMode> {
     Stream(Chained<M>),
     /// A `MapList`'s node, moved into the split that reads it.
     Lists(Stream<Vec<i64>>),
+    /// A pick's node, moved into the hold that reads it.
+    Tokens(Tokens),
     /// A linear stream, moved into its one consumer.
     Consumed,
     Cell(CellToken),
+    /// A cell of tokens, which switches read.
+    Outer(Outer),
     /// A `Close`, which makes no node.
     Closed,
 }
@@ -1716,7 +2155,11 @@ impl<M: EngineMode> Builder<'_, M> {
             Built::Consumed => {
                 unreachable!("bough-oracle: check refuses a second consumer of node {node}")
             }
-            Built::Lists(_) | Built::Cell(_) | Built::Closed => {
+            Built::Lists(_)
+            | Built::Tokens(_)
+            | Built::Cell(_)
+            | Built::Outer(_)
+            | Built::Closed => {
                 unreachable!("bough-oracle: check refuses node {node} as a stream of the subset")
             }
         }
@@ -1731,6 +2174,35 @@ impl<M: EngineMode> Builder<'_, M> {
         }
     }
 
+    /// The tokens a hold of them reads, moved out of the pick's node.
+    fn take_tokens(&mut self, reference: &Reference) -> Tokens {
+        let node = top(reference);
+        match mem::replace(&mut self.nodes[node], Built::Consumed) {
+            Built::Tokens(tokens) => tokens,
+            _ => unreachable!("bough-oracle: check lets a hold of tokens read only a pick, once"),
+        }
+    }
+
+    /// A shared stream, as a token a switch may follow.
+    fn shared(&self, reference: &Reference) -> Shared<i64> {
+        match &self.nodes[top(reference)] {
+            Built::Stream(Chained::Shared(shared)) => *shared,
+            _ => unreachable!("bough-oracle: check lets a switch follow a Share only"),
+        }
+    }
+
+    /// The cells a pick or a `MapPickCell` lists.
+    fn choices(&self, cells: &[Reference]) -> Choices {
+        Choices::of(cells.iter().map(|cell| self.cell(cell)).collect())
+    }
+
+    fn outer(&self, reference: &Reference) -> Outer {
+        match &self.nodes[top(reference)] {
+            Built::Outer(outer) => *outer,
+            _ => unreachable!("bough-oracle: check lets a switch read only a cell of tokens"),
+        }
+    }
+
     fn cell(&self, reference: &Reference) -> CellToken {
         match &self.nodes[top(reference)] {
             Built::Cell(cell) => *cell,
@@ -1741,7 +2213,7 @@ impl<M: EngineMode> Builder<'_, M> {
     fn scalar(&self, reference: &Reference) -> Scalar {
         match self.types[top(reference)] {
             NodeType::Stream(scalar) | NodeType::Cell { value: scalar, .. } => scalar,
-            NodeType::Lists | NodeType::Closed => {
+            NodeType::Lists | NodeType::Tokens(_) | NodeType::Outer(_) | NodeType::Closed => {
                 unreachable!("bough-oracle: check refuses {reference} where a scalar is read")
             }
         }
@@ -2045,6 +2517,125 @@ impl<M: EngineMode> Builder<'_, M> {
                 let chain = self.take(source);
                 Built::Stream(Chained::Stream(chain.defer(b)))
             }
+            Definition::PickStream {
+                index,
+                streams,
+                source,
+            } => {
+                let index = self.resolve(b, index);
+                let streams: Vec<Shared<i64>> = streams.iter().map(|s| self.shared(s)).collect();
+                let node = self.take(source).materialized(b);
+                let tokens = pick(b, node, picker(index, streams.clone()));
+                declare(b, &tokens, &streams);
+                Built::Tokens(Tokens::Streams(tokens))
+            }
+            Definition::PickCell {
+                index,
+                cells,
+                source,
+            } => {
+                let index = self.resolve(b, index);
+                let choices = self.choices(cells);
+                let node = self.take(source).materialized(b);
+                Built::Tokens(match choices {
+                    Choices::Cells(cells) => {
+                        let tokens = pick(b, node, picker(index, cells.clone()));
+                        declare(b, &tokens, &cells);
+                        Tokens::Cells(tokens)
+                    }
+                    Choices::States(states) => {
+                        let tokens = pick(b, node, picker(index, states.clone()));
+                        declare(b, &tokens, &states);
+                        Tokens::States(tokens)
+                    }
+                })
+            }
+            Definition::HoldStream { initial, source } => {
+                let initial = self.shared(initial);
+                let Tokens::Streams(tokens) = self.take_tokens(source) else {
+                    unreachable!("bough-oracle: check holds streams from a pick of streams")
+                };
+                Built::Outer(Outer::Streams(M::hold_tokens(b, tokens, initial)))
+            }
+            Definition::HoldCell { initial, source } => {
+                let outer = match (self.take_tokens(source), self.cell(initial)) {
+                    (Tokens::Cells(tokens), CellToken::Integer(cell)) => {
+                        Outer::Cells(M::hold_tokens(b, tokens, cell))
+                    }
+                    (Tokens::States(tokens), CellToken::IntegerState(state)) => {
+                        Outer::States(M::hold_tokens(b, tokens, state))
+                    }
+                    _ => unreachable!("bough-oracle: check holds cells of one kind"),
+                };
+                Built::Outer(outer)
+            }
+            Definition::ConstantStream(stream) => {
+                let stream = self.shared(stream);
+                Built::Outer(Outer::Streams(M::constant_token(b, stream)))
+            }
+            Definition::ConstantCell(cell) => Built::Outer(match self.cell(cell) {
+                CellToken::Integer(cell) => Outer::Cells(M::constant_token(b, cell)),
+                CellToken::IntegerState(state) => Outer::States(M::constant_token(b, state)),
+                _ => unreachable!("bough-oracle: check holds cells of integers"),
+            }),
+            Definition::MapPickCell { index, cells, cell } => {
+                let index = self.resolve(b, index);
+                let listed = self.choices(cells);
+                let outer = match (self.cell(cell), listed.clone()) {
+                    (CellToken::Integer(cell), Choices::Cells(choices)) => {
+                        Outer::Cells(M::map_cell(
+                            b,
+                            cell,
+                            Box::new(move |v: &i64| picked(&choices, evaluate(&index, &[*v]))),
+                        ))
+                    }
+                    (CellToken::Integer(cell), Choices::States(choices)) => {
+                        Outer::States(M::map_cell(
+                            b,
+                            cell,
+                            Box::new(move |v: &i64| picked(&choices, evaluate(&index, &[*v]))),
+                        ))
+                    }
+                    (CellToken::Boolean(cell), Choices::Cells(choices)) => {
+                        Outer::Cells(M::map_cell(
+                            b,
+                            cell,
+                            Box::new(move |v: &bool| {
+                                picked(&choices, evaluate(&index, &[i64::from(*v)]))
+                            }),
+                        ))
+                    }
+                    (CellToken::Boolean(cell), Choices::States(choices)) => {
+                        Outer::States(M::map_cell(
+                            b,
+                            cell,
+                            Box::new(move |v: &bool| {
+                                picked(&choices, evaluate(&index, &[i64::from(*v)]))
+                            }),
+                        ))
+                    }
+                    _ => unreachable!("bough-oracle: check refuses a MapPickCell over a State"),
+                };
+                match outer {
+                    Outer::Cells(outer) => listed.declare(b, &outer),
+                    Outer::States(outer) => listed.declare(b, &outer),
+                    Outer::Streams(_) => unreachable!("bough-oracle: a MapPickCell lists cells"),
+                }
+                Built::Outer(outer)
+            }
+            Definition::SwitchStream(outer) => {
+                let Outer::Streams(outer) = self.outer(outer) else {
+                    unreachable!("bough-oracle: check switches streams over a cell of streams")
+                };
+                Built::Stream(Chained::Stream(M::switch_stream(b, outer)))
+            }
+            Definition::SwitchCell(outer) => Built::Cell(match self.outer(outer) {
+                Outer::Cells(outer) => CellToken::Integer(outer.switch_cell(b)),
+                Outer::States(outer) => CellToken::IntegerState(outer.switch_cell(b)),
+                Outer::Streams(_) => {
+                    unreachable!("bough-oracle: check switches cells over a cell of cells")
+                }
+            }),
             Definition::CellLoop(_) => {
                 let index = self.nodes.len();
                 let NodeType::Cell { value, state } = self.types[index] else {
@@ -2133,7 +2724,11 @@ impl<M: EngineMode> Builder<'_, M> {
                 Base::Stream(stream) => Observed::Stream(stream),
                 Base::Shared(shared) => Observed::Shared(shared),
             },
-            Built::Consumed | Built::Lists(_) | Built::Closed => {
+            Built::Consumed
+            | Built::Lists(_)
+            | Built::Tokens(_)
+            | Built::Outer(_)
+            | Built::Closed => {
                 unreachable!("bough-oracle: check refuses observing node {node}")
             }
         }

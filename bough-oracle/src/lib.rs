@@ -123,8 +123,8 @@ mod program;
 
 pub use answer::{Answer, Datum, MalformedAnswer, Observation};
 pub use build::{
-    BuildError, Call, Chain, EngineMode, EngineObservation, EngineRun, ListFn, Listened, MAX_FUSED,
-    NodeType, RunOptions, Scalar, check, evaluate, name, run,
+    BuildError, Call, Chain, EngineMode, EngineObservation, EngineRun, Held, ListFn, Listened,
+    MAX_FUSED, NodeType, PickFn, RunOptions, Scalar, check, evaluate, name, run, switch_candidates,
 };
 pub use compare::{Engine, Expected, Failure, Report, check_program, compare, expected};
 pub use generate::{
