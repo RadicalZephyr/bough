@@ -112,6 +112,8 @@ mod error;
 mod graph;
 mod lift;
 mod mode;
+#[cfg(doctest)]
+mod refusals;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 mod slot;
 #[cfg(feature = "smoke")]
