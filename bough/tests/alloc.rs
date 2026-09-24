@@ -1,11 +1,13 @@
 //! RFD 3's rule, a claim under test from stage 1: a graph that is not
-//! growing never allocates per transaction. A counting global allocator,
-//! alone in its test binary so no other test allocates concurrently. It
-//! counts the allocations of the thread that drives the graph, where every
-//! transaction runs: the test harness's own thread allocates now and then
-//! while a test runs (four blocks of 96 bytes in about one release run in
-//! 150 to 400, before stage 3 as after), which a process-wide count would
-//! blame on the engine.
+//! growing never allocates per transaction, and from stage 7 a collection
+//! in the steady state allocates nothing either. A counting global
+//! allocator, alone in its test binary. It counts, per thread, the
+//! allocations of a thread that drives a graph, where every transaction
+//! runs: the test harness's own thread allocates now and then while a
+//! test runs (four blocks of 96 bytes in about one release run in 150 to
+//! 400, before stage 3 as after), which a process-wide count would blame
+//! on the engine, and so would the other test here, which runs on a
+//! thread of its own at the same time.
 //!
 //! The graph covers a share, a fused chain, a coalescing input, a merge,
 //! an or_else, snapshots, a gate, a hold, a stream listener and cell
@@ -33,19 +35,24 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bough::{Graph, Lift, Source};
+use bough::{Cell, CollectionPolicy, Graph, Lift, Source};
 
 struct Counting;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
 thread_local! {
-    /// Set on the thread that drives the graph. A const-initialized flag
-    /// with no destructor: reading it allocates nothing.
+    /// Set on a thread that drives a graph. Const-initialized cells with
+    /// no destructor: using them allocates nothing.
     static DRIVER: StdCell<bool> = const { StdCell::new(false) };
+    /// The allocations of this thread since it became a driver.
+    static ALLOCATIONS: StdCell<usize> = const { StdCell::new(0) };
+}
+
+/// The allocations the calling thread has made as a driver.
+fn allocations() -> usize {
+    ALLOCATIONS.with(StdCell::get)
 }
 
 // Test scaffolding: `GlobalAlloc` is an unsafe trait. The crate under test
@@ -54,7 +61,7 @@ thread_local! {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if DRIVER.try_with(StdCell::get).unwrap_or(false) {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
         }
         unsafe { System.alloc(layout) }
     }
@@ -336,13 +343,13 @@ fn steady_state_transactions_do_not_allocate() {
     for i in 0..100 {
         drive(&mut graph, i); // warm up: reused buffers reach their size
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     let views_before = switch_views.get();
     let relinks_before = relinks(&graph);
     for i in 0..10_000 {
         drive(&mut graph, i);
     }
-    let plain = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    let plain = allocations() - before;
     // The switch_cell steps at every transaction whose outer steps.
     assert!(switch_views.get() - views_before >= 20_000);
     if let (Some(after), Some(before)) = (relinks(&graph), relinks_before) {
@@ -354,40 +361,34 @@ fn steady_state_transactions_do_not_allocate() {
     for i in 0..100 {
         drive(&mut graph, i);
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     for i in 0..10_000 {
         drive(&mut graph, i);
     }
-    let shuffled = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    let shuffled = allocations() - before;
 
     assert_eq!(plain, 0, "allocations in 30,000 steady-state transactions");
     assert_eq!(shuffled, 0, "allocations with the shuffle on");
     // Negative controls: the counter sees what does allocate. A construct
     // that fires builds nodes.
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     graph.listen_steps(total, |_| ()).keep();
-    assert!(
-        ALLOCATIONS.load(Ordering::Relaxed) > before,
-        "listen allocates"
-    );
+    assert!(allocations() > before, "listen allocates");
     let live = graph.live_nodes();
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     graph.send(opens_in, 1000);
-    assert!(
-        ALLOCATIONS.load(Ordering::Relaxed) > before,
-        "a construct that fires allocates"
-    );
+    assert!(allocations() > before, "a construct that fires allocates");
     assert_eq!(graph.live_nodes(), live + 2, "its closure built two nodes");
     // The graph it grew is steady again.
     for i in 0..100 {
         drive(&mut graph, i);
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     for i in 0..1_000 {
         drive(&mut graph, i);
     }
     assert_eq!(
-        ALLOCATIONS.load(Ordering::Relaxed) - before,
+        allocations() - before,
         0,
         "allocations in 3,000 transactions after the construct fired"
     );
@@ -422,4 +423,65 @@ fn steady_state_transactions_do_not_allocate() {
     // The stage 5 listeners kept up with the switches.
     assert_eq!(switch_steps.get(), *graph.sample(switched));
     assert!(follows.get() > 0 && takes.get() > 0);
+}
+
+/// RFD 3's claim for collection itself: its marking stack, the tracer's
+/// buffer and the free list are reused, so a collection in the steady
+/// state allocates nothing, whether it frees nodes or not. Each round, a
+/// construct builds a counter and a map_cell over it, which a switch
+/// follows, and a collection frees the pair the switch left: the freed
+/// slots are taken again, oldest first, so the live count stays put and
+/// the new nodes cycle through a few slots. The construct's own
+/// allocations, the closure's nodes, happen in the send and are not
+/// counted.
+#[test]
+fn steady_state_collections_do_not_allocate() {
+    DRIVER.with(|driver| driver.set(true));
+    let (mut graph, (go_in, clicks_in, made, shown)) = Graph::build(|b| {
+        let (clicks, clicks_in) = b.input::<u64>();
+        let clicks = clicks.share(b);
+        let (go, go_in) = b.input::<u64>();
+        let made = go.construct(b, move |b, start| {
+            clicks
+                .accumulate(b, start, |c, n| n + c)
+                .map_cell(b, |n| n * 2)
+        });
+        b.depends(&made, &[&clicks]);
+        let made = made.share(b);
+        let zero = b.constant(0u64);
+        let shown = made.hold(b, zero).switch_cell(b);
+        (go_in, clicks_in, made, shown)
+    });
+    graph.set_collection_policy(CollectionPolicy::Manual);
+    let newest: Rc<StdCell<Option<Cell<u64>>>> = Rc::new(StdCell::new(None));
+    let writer = newest.clone();
+    graph.listen(made, move |c| writer.set(Some(c))).keep();
+    let round = |graph: &mut Graph, k: u64| -> usize {
+        graph.send(go_in, k);
+        graph.send(clicks_in, 1);
+        let before = allocations();
+        graph.collect_garbage();
+        allocations() - before
+    };
+    for k in 0..100 {
+        round(&mut graph, k); // warm up: reused buffers reach their size
+    }
+    let live = graph.live_nodes();
+    let mut slots = BTreeSet::new();
+    let mut collecting = 0;
+    for k in 100..1100 {
+        collecting += round(&mut graph, k);
+        assert_eq!(graph.live_nodes(), live);
+        slots.insert(format!("{:?}", newest.get().expect("a counter was made")));
+    }
+    assert_eq!(
+        collecting, 0,
+        "allocations in 1,000 collections that freed nodes"
+    );
+    let before = allocations();
+    graph.collect_garbage();
+    graph.collect_garbage();
+    assert_eq!(allocations() - before, 0, "collections that free nothing");
+    assert!(slots.len() <= 4, "the new nodes took {} slots", slots.len());
+    assert_eq!(*graph.sample(shown), 2 * 1100);
 }
