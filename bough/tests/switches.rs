@@ -601,6 +601,50 @@ fn r10b_the_relink_check_finds_the_cycle_without_a_reader() {
     }
 }
 
+/// Two switches reverse a dependency between them in one instant. Before
+/// [1], B follows p = A + 10, so B depends on A; at [1], A moves to
+/// y = B + 100 while B moves to a constant, so A depends on B. The graph
+/// the two moves make together is acyclic. A depends on B through its new
+/// inner only once B has left p, and A settles first, since B depends on
+/// it: a relink that checked each move as it made it would find the cycle
+/// y, B, p, the loop, A through B's old inner and refuse a legal program.
+/// Relink checks once every switch has moved. Stage5.hs:
+///
+/// ```text
+/// reversal: steps a: (1,[([0],1),([1],102)])
+/// reversal: steps b: (11,[([0],11),([1],2)])
+/// reversal: samples a, b, p, y: ([1,102,102],[11,2,2],[11,112,112],[111,102,102])
+/// ```
+#[test]
+fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
+    let (steps, samples) = every_order(|order| {
+        let (mut graph, (sel_in, logs, cells)) = Graph::build(|b| {
+            let (sel, sel_in) = b.input::<()>();
+            let sel = sel.share(b);
+            let x = b.constant(1u32);
+            let q = b.constant(2u32);
+            let (a_forward, a_loop) = b.cell_loop::<u32>();
+            let p = a_forward.map_cell(b, |v| v + 10);
+            let b_outer = sel.map(move |_| q).hold(b, p);
+            let b_switch = b_outer.switch_cell(b);
+            let y = b_switch.map_cell(b, |v| v + 100);
+            let a_outer = sel.map(move |_| y).hold(b, x);
+            let a_switch = a_outer.switch_cell(b);
+            a_loop.close(b, a_switch);
+            let logs = [log_steps(b, a_switch), log_steps(b, b_switch)];
+            (sel_in, logs, [a_switch, b_switch, p, y])
+        });
+        let schedule = [vec![send(sel_in, ())], vec![]];
+        drive(&mut graph, order, &schedule, &logs, &cells)
+    });
+    assert_eq!(steps[0], [(0, 1), (1, 102)]);
+    assert_eq!(steps[1], [(0, 11), (1, 2)]);
+    assert_eq!(
+        samples,
+        [[1, 102, 102], [11, 2, 2], [11, 112, 112], [111, 102, 102]]
+    );
+}
+
 /// A switch whose first link would close a cycle is refused where it links,
 /// at the end of the build.
 #[test]
