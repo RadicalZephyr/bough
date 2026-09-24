@@ -37,10 +37,14 @@
 //! is its dependencies, the tokens [`Trace`] finds in a stateful cell's
 //! value, and what [`Build::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a
-//! stale token is an error. The I/O edge, `Remote`, `pump`, input slots
-//! and the waker, still has `todo!()` bodies. The examples in the
-//! documentation that call only working operations run, the rest compile,
-//! and the guarantees the RFDs make are fixed by `compile_fail` doc tests.
+//! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
+//! [`InputSlot`] holds one pending event folded in place, and
+//! [`pump`](Graph::pump) runs each pending slot as a transaction of its
+//! own, in connection order; a write wakes the waker the driver registered
+//! with [`set_waker`](Graph::set_waker). `Remote` still has `todo!()`
+//! bodies. The examples in the documentation that call only working
+//! operations run, the rest compile, and the guarantees the RFDs make are
+//! fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!
@@ -50,7 +54,10 @@
 //! no pointer atomics, on a Cortex-M0, `Threaded`, `Remote` and the unit queue
 //! do not exist, and the path from an interrupt handler into the graph is an
 //! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
-//! a web build keeps `std` (RFD 7).
+//! a web build keeps `std` (RFD 7). A slot needs one of the two locks: with
+//! no `unsafe` in the crate there is none to build from atomics, so a
+//! `no_std` build without `critical-section` has no slots, and keeps
+//! [`pump`](Graph::pump) and [`set_waker`](Graph::set_waker).
 //!
 //! RFD 2's example: a click counter and its label, a listener that fires
 //! now and on every step, one send, and a transaction.
@@ -102,6 +109,7 @@ mod error;
 mod graph;
 mod lift;
 mod mode;
+#[cfg(any(feature = "std", feature = "critical-section"))]
 mod slot;
 #[cfg(feature = "smoke")]
 mod smoke;
@@ -127,6 +135,7 @@ pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
+#[cfg(any(feature = "std", feature = "critical-section"))]
 pub use slot::InputSlot;
 #[cfg(feature = "smoke")]
 #[doc(hidden)]

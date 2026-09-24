@@ -5,6 +5,7 @@ use core::any::Any;
 
 use super::Marker;
 use crate::build::Build;
+use crate::engine::edge::fire_input;
 use crate::engine::{Cx, Data, NodeOps, Ops, clear_slot, part, slot_mut};
 use crate::mode::Mode;
 use crate::source::Source;
@@ -17,6 +18,7 @@ pub(crate) struct SlotNode<A>(Marker<A>);
 impl<M: Mode, A: 'static> NodeOps<M> for SlotNode<A> {
     const OPS: Ops<M> = Ops {
         clear_slot: clear_slot::<M, A>,
+        fire: fire_input::<M, A>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -54,6 +56,7 @@ where
     const OPS: Ops<M> = Ops {
         coalesce: coalesce_input::<M, A, F>,
         clear_slot: clear_slot::<M, A>,
+        fire: fire_input::<M, A>,
         ..Ops::<M>::DEFAULT
     };
 }

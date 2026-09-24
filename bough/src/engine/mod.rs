@@ -35,6 +35,7 @@ macro_rules! count {
 
 mod children;
 mod collect;
+pub(crate) mod edge;
 mod loops;
 pub(crate) mod nodes;
 mod pull;
@@ -58,6 +59,7 @@ pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
 pub use sched::Statistics;
 pub(crate) use store::{Store, TokenFault};
+pub(crate) use tx::DoubleSend;
 
 /// A transaction serial: one per instant, child instants included, so a
 /// stamp equal to the current serial means "in this instant". `u64`, so it
@@ -261,6 +263,8 @@ pub(crate) type EvalFn<M> = fn(&mut [<M as Mode>::Carrier], &mut Build<M>, u32);
 pub(crate) type CoalesceFn<M> = fn(&mut [<M as Mode>::Carrier], &mut Data<M>, &mut dyn Any);
 /// Collection visits the tokens a committed value holds.
 pub(crate) type TraceFn<M> = fn(&Data<M>, &[<M as Mode>::Carrier], &mut Tracer);
+/// An input starts with an event whose type its caller does not know.
+pub(crate) type FireFn<M> = fn(&mut Build<M>, u32, &mut dyn Any) -> Result<(), DoubleSend>;
 
 /// A node type's static functions, monomorphized at materialization and
 /// promoted to `'static`. Entries a kind does not use are no-ops.
@@ -298,6 +302,9 @@ pub(crate) struct Ops<M: Mode> {
     /// Collection: empties a stream slot, so an event holding a token
     /// neither roots nor dangles, and an event type needs no `Trace`.
     pub(crate) clear_slot: fn(&mut Data<M>),
+    /// An input: starts it with the event in an `&mut Option<A>`, for the
+    /// senders that do not know `A`, an input slot and a remote unit.
+    pub(crate) fire: FireFn<M>,
 }
 
 fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) {}
@@ -317,6 +324,9 @@ fn no_end_children<M: Mode>(_: &mut [M::Carrier]) {}
 fn no_coalesce<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>, _: &mut dyn Any) {}
 fn no_trace<M: Mode>(_: &Data<M>, _: &[M::Carrier], _: &mut Tracer) {}
 fn no_clear_slot<M: Mode>(_: &mut Data<M>) {}
+fn no_fire<M: Mode>(_: &mut Build<M>, n: u32, _: &mut dyn Any) -> Result<(), DoubleSend> {
+    unreachable!("bough engine: node {n} is not an input")
+}
 
 impl<M: Mode> Ops<M> {
     /// Every entry a no-op: node 0, inputs, constants, `never`.
@@ -332,6 +342,7 @@ impl<M: Mode> Ops<M> {
         coalesce: no_coalesce::<M>,
         trace: no_trace::<M>,
         clear_slot: no_clear_slot::<M>,
+        fire: no_fire::<M>,
     };
 }
 

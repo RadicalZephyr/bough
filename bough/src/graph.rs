@@ -11,6 +11,8 @@ use crate::Build;
 use crate::cell::CellRef;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
+#[cfg(any(feature = "std", feature = "critical-section"))]
+use crate::engine::edge::Connection;
 use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(target_has_atomic = "ptr")]
@@ -683,25 +685,107 @@ impl<M: Mode> Graph<M> {
     ///
     /// Called by the driver from wherever it sits: a thread the waker wakes,
     /// a future's `poll`, or a bare-metal main loop. Latency is the distance
-    /// from a send to the next pump.
+    /// from a send to the next pump. A slot written while the pump runs, by
+    /// a listener or by another thread, is drained now if its turn has not
+    /// come and at the next pump otherwise. A collection that is due runs
+    /// before each transaction opens, as for [`send`](Graph::send).
+    ///
+    /// Panics on a poisoned graph. A slot connected to an input collected
+    /// since is a send to a collected input: a panic in a debug build, and
+    /// in a release build a no-op that
+    /// [`stale_operations`](Graph::stale_operations) counts; either way the
+    /// slot is disconnected, its event dropped, and a panic leaves the rest
+    /// pending for the next pump.
     pub fn pump(&mut self) {
-        todo!()
+        self.enter();
+        if let Err(error) = self.pump_all(!cfg!(debug_assertions)) {
+            match error {
+                PumpError::Stale => self.stale_operation(SEND),
+                PumpError::DoubleSend => {
+                    panic!("bough: a second send to a non-coalescing input in one remote unit")
+                }
+                PumpError::Poisoned => unreachable!("bough engine: pump checks the poison first"),
+            }
+        }
     }
 
-    /// [`pump`](Graph::pump), returning the error instead of panicking.
+    /// [`pump`](Graph::pump), returning the error instead of panicking. The
+    /// first slot or unit that fails is dropped, and the error returned;
+    /// the rest stay pending for the next call.
     pub fn try_pump(&mut self) -> Result<(), PumpError> {
-        todo!()
+        if self.poisoned() {
+            return Err(PumpError::Poisoned);
+        }
+        self.pump_all(false)
+    }
+
+    /// The slots, then the units. With `skip_stale`, the panicking pump's
+    /// release build, a stale send is counted and skipped rather than
+    /// returned.
+    fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+        #[cfg(any(feature = "std", feature = "critical-section"))]
+        self.pump_slots(skip_stale)?;
+        Ok(())
+    }
+
+    /// Each pending slot, in connection order, as a transaction of its own.
+    /// The event leaves the slot under its lock, and the transaction runs
+    /// after the lock is released.
+    #[cfg(any(feature = "std", feature = "critical-section"))]
+    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+        let mut k = 0;
+        while k < self.build.edge.slots.len() {
+            let Connection { input, slot } = self.build.edge.slots[k];
+            let mut live = true;
+            slot.drain(&mut |event| {
+                self.collect_if_due();
+                match self.build.lookup(input) {
+                    Ok(i) => {
+                        self.build.begin();
+                        let fire = self.build.store.ops[i as usize].fire;
+                        fire(&mut self.build, i, event)
+                            .expect("bough engine: a slot's event is its transaction's only send");
+                        self.build.finish();
+                    }
+                    // `connect` checked the graph, so the input was collected.
+                    Err(_) => live = false,
+                }
+            });
+            if live {
+                k += 1;
+                continue;
+            }
+            self.build.edge.slots.remove(k);
+            slot.disconnect();
+            if !skip_stale {
+                return Err(PumpError::Stale);
+            }
+            self.stale_operations += 1;
+        }
+        Ok(())
     }
 
     /// Registers the waker that a slot write or a remote send wakes, so the
-    /// driver knows to pump.
+    /// driver knows to pump: it reaches every connected slot, and a slot
+    /// connected later.
     ///
     /// A driver that is a future stores `cx.waker().clone()` on each poll and
     /// returns pending after pumping; a thread driver builds one from an
     /// `Arc` through `alloc::task::Wake`; a bare-metal main loop that sleeps
-    /// on the interrupt itself gives `Waker::noop()`.
+    /// on the interrupt itself gives `Waker::noop()`. A waker that would
+    /// wake the same task as the one registered changes nothing.
     pub fn set_waker(&mut self, waker: Waker) {
-        todo!()
+        #[cfg(any(feature = "std", feature = "critical-section"))]
+        {
+            let edge = &mut self.build.edge;
+            if edge.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
+                return;
+            }
+            for connection in &edge.slots {
+                connection.slot.set_waker(Some(waker.clone()));
+            }
+            edge.waker = Some(waker);
+        }
     }
 
     /// An endpoint other threads use to send into this graph.

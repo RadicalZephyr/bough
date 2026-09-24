@@ -5,10 +5,14 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cell::CellRef;
+use crate::engine::edge::Edge;
+#[cfg(any(feature = "std", feature = "critical-section"))]
+use crate::engine::edge::{Connection, Drain};
 use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::mode::{Accepts, Erase, Local, Mode};
+#[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::slot::InputSlot;
 use crate::source::Source;
 use crate::token::{Cell, Input, State, Stream, Token, TokenRef};
@@ -49,6 +53,8 @@ pub struct Build<M: Mode = Local> {
     /// The transaction-in-progress flag, which is also the poison.
     pub(crate) in_tx: bool,
     pub(crate) s: Sched,
+    /// The I/O edge: connected slots and the driver's waker.
+    pub(crate) edge: Edge,
 }
 
 impl<M: Mode> Build<M> {
@@ -59,6 +65,7 @@ impl<M: Mode> Build<M> {
             tx: 0,
             in_tx: false,
             s: Sched::default(),
+            edge: Edge::new(),
         }
     }
 
@@ -345,12 +352,33 @@ impl<M: Mode> Build<M> {
     /// [`pump`](crate::Graph::pump) drains it (RFD 7).
     ///
     /// Callable more than once for one input, one slot per producer; the
-    /// driver drains slots in connection order, each as its own transaction.
-    /// The slot's fold and the input's coalescing function are independent:
-    /// the fold combines a burst between two pumps, the coalescing function
-    /// combines two sends inside one transaction, which slots never cause.
+    /// driver drains slots in connection order, each pending one as a
+    /// transaction of its own, so two slots are never simultaneous, even
+    /// on one input. The slot's fold and the input's coalescing function
+    /// are independent: the fold combines a burst between two pumps, the
+    /// coalescing function combines two sends inside one transaction, which
+    /// slots never cause.
+    ///
+    /// A slot feeds one input of one graph, and panics if it is connected
+    /// already; the graph disconnects it when it is dropped. A connection
+    /// is not a root: the input lives while something else reaches it, and
+    /// an event for an input collected since is a stale send, found at
+    /// `pump`, which drops the slot.
+    ///
+    /// The slot exists where a lock for it does: under `std`, and with the
+    /// `critical-section` feature.
+    #[cfg(any(feature = "std", feature = "critical-section"))]
     pub fn connect<A: Send + 'static>(&mut self, input: Input<A>, slot: &'static InputSlot<A>) {
-        todo!()
+        self.check(input.token);
+        assert!(
+            Drain::connect(slot, self.graph_id, self.edge.waker.as_ref()),
+            "bough: an input slot connected twice: a slot feeds one input of one graph; \
+             give a second producer or a second input a slot of its own"
+        );
+        self.edge.slots.push(Connection {
+            input: input.token,
+            slot,
+        });
     }
 }
 
