@@ -99,6 +99,35 @@ fn the_capped_counter_the_lazy_semantics_cannot_run_steps_ten_times() {
     assert_eq!(*graph.sample(count), 10);
 }
 
+/// A loop through a gate: the counter's ticks pass while a read-through
+/// cell over its own forward says the count is below 3. The gate reads the
+/// cell's value from before the instant, so the read-through cell depends
+/// on the forward and nothing depends on it, and the loop is legal. In the
+/// semantics a gate is a filter of a snapshot, so this is fact 1's capped
+/// counter with the cap read through a map: 1, 2, 3 at `[1]` to `[3]`, then
+/// no step.
+#[test]
+fn a_loop_through_a_gate_on_a_read_through_cell_of_its_forward() {
+    let (mut graph, (ticks_in, count, below)) = Graph::build(|b| {
+        let (count, count_loop) = b.cell_loop::<u32>();
+        let below = count.map_cell(b, |n| *n < 3);
+        let (ticks, ticks_in) = b.input::<()>();
+        let next = ticks
+            .gate(below)
+            .snapshot(count, |_, n| n + 1)
+            .hold(b, 0u32);
+        count_loop.close(b, next);
+        (ticks_in, count, below)
+    });
+    let (steps, mut on_step) = recorder();
+    graph.listen_steps(count, move |n| on_step(*n)).keep();
+    for _ in 0..5 {
+        graph.send(ticks_in, ());
+    }
+    assert_eq!(*steps.borrow(), [1, 2, 3]);
+    assert!(!*graph.sample(below));
+}
+
 /// Two accumulators read each other, one through a forward token; the loop
 /// closes with an accumulate. GHC: `accumulate pair: a
 /// (1,[([1],1),([2],5),([3],20),([4],72)]) b
