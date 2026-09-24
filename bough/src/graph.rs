@@ -10,13 +10,13 @@ use core::task::Waker;
 use crate::Build;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
-use crate::engine::TokenFault;
+use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(target_has_atomic = "ptr")]
 use crate::error::{RemoteSendError, RemoteTransactionError};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
-use crate::mode::{Accepts, Local, Mode};
+use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
 use crate::source::Node;
 use crate::token::{Cell, Input, Token, TokenRef};
 use crate::trace::{Trace, Tracer};
@@ -93,6 +93,31 @@ impl Graph<Threaded> {
 }
 
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
+
+/// A stream listener's call: take the event from a linear stream, clone it
+/// from a shared one.
+fn call_stream<M, S, F>(f: &mut M::Carrier, b: &mut Build<M>, n: u32)
+where
+    M: Mode,
+    S: Node,
+    F: FnMut(S::Event) + 'static,
+{
+    if let Some(v) = S::pull_inner(&mut Cx { b }, n) {
+        part::<M, F>(f)(v)
+    }
+}
+
+/// A cell listener's call: the committed value, which after commit is the
+/// value the step produced.
+fn call_cell<M, A, F>(f: &mut M::Carrier, b: &mut Build<M>, n: u32)
+where
+    M: Mode,
+    A: 'static,
+    F: FnMut(&A) + 'static,
+{
+    let v = b.value::<A>(n);
+    part::<M, F>(f)(v)
+}
 
 impl<M: Mode> Graph<M> {
     /// Whether a transaction never finished. Every entry checks this.
@@ -217,7 +242,9 @@ impl<M: Mode> Graph<M> {
         F: FnMut(S::Event) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        self.enter();
+        let i = self.build.check(source.node_token());
+        self.attach(i, f, call_stream::<M, S, F>)
     }
 
     /// [`listen`](Graph::listen), returning the error instead of panicking.
@@ -228,30 +255,43 @@ impl<M: Mode> Graph<M> {
         F: FnMut(S::Event) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        let i = self.lookup(source.node_token())?;
+        Ok(self.attach(i, f, call_stream::<M, S, F>))
     }
 
     /// Listens to a cell: fires once now with the current value, then on
     /// every step, with the value by reference. The I/O form of
     /// [`steps_with_current`](Cell::steps_with_current), Sodium's `value`.
-    pub fn listen_cell<A, F>(&mut self, cell: Cell<A>, f: F) -> Listener<M>
+    ///
+    /// The call at registration runs outside any transaction, so a panic in
+    /// it leaves the graph usable. A step to an equal value is a step.
+    pub fn listen_cell<A, F>(&mut self, cell: Cell<A>, mut f: F) -> Listener<M>
     where
         A: 'static,
         F: FnMut(&A) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        self.enter();
+        let i = self.build.check(cell.token);
+        f(self.build.value::<A>(i));
+        self.attach(i, f, call_cell::<M, A, F>)
     }
 
     /// [`listen_cell`](Graph::listen_cell), returning the error instead of
     /// panicking.
-    pub fn try_listen_cell<A, F>(&mut self, cell: Cell<A>, f: F) -> Result<Listener<M>, TokenError>
+    pub fn try_listen_cell<A, F>(
+        &mut self,
+        cell: Cell<A>,
+        mut f: F,
+    ) -> Result<Listener<M>, TokenError>
     where
         A: 'static,
         F: FnMut(&A) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        let i = self.lookup(cell.token)?;
+        f(self.build.value::<A>(i));
+        Ok(self.attach(i, f, call_cell::<M, A, F>))
     }
 
     /// Listens to a cell's steps only, with the new value by reference, and
@@ -263,7 +303,9 @@ impl<M: Mode> Graph<M> {
         F: FnMut(&A) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        self.enter();
+        let i = self.build.check(cell.token);
+        self.attach(i, f, call_cell::<M, A, F>)
     }
 
     /// [`listen_steps`](Graph::listen_steps), returning the error instead of
@@ -274,7 +316,30 @@ impl<M: Mode> Graph<M> {
         F: FnMut(&A) + 'static,
         M: Accepts<F>,
     {
-        todo!()
+        let i = self.lookup(cell.token)?;
+        Ok(self.attach(i, f, call_cell::<M, A, F>))
+    }
+
+    /// Registers a listener on node `i`. Its entry and its handle share a
+    /// flag; dispatch skips an entry whose flag is cleared and then drops it.
+    fn attach<F: 'static>(
+        &mut self,
+        i: u32,
+        f: F,
+        call: fn(&mut M::Carrier, &mut Build<M>, u32),
+    ) -> Listener<M>
+    where
+        M: Accepts<F>,
+    {
+        let flag = M::Flag::live();
+        let store = &mut self.build.store;
+        store.listeners[i as usize].push(Entry {
+            flag: flag.clone(),
+            f: <M as Accepts<F>>::erase(Erase::Value(f)),
+            call,
+        });
+        store.hot[i as usize].flags |= LISTENERS;
+        Listener { alive: Some(flag) }
     }
 
     /// Anchors a node that I/O code wants to hold without listening to it,
@@ -475,18 +540,28 @@ impl<M: Mode> Transaction<'_, M> {
 /// an atomic in `Threaded`, which is why the handle carries the mode; the
 /// parameter is defaulted, so `Local` code never writes it.
 pub struct Listener<M: Mode = Local> {
-    alive: M::Flag,
+    /// The flag shared with the node's entry; `None` once kept.
+    alive: Option<M::Flag>,
 }
 
 impl<M: Mode> Listener<M> {
     /// Stops listening now, the same as dropping the handle.
     pub fn unlisten(self) {
-        todo!()
+        drop(self);
     }
 
     /// Keeps listening for the life of the graph, without a handle to hold.
-    pub fn keep(self) {
-        todo!()
+    /// The handle gives up its share of the flag without clearing it.
+    pub fn keep(mut self) {
+        self.alive = None;
+    }
+}
+
+impl<M: Mode> Drop for Listener<M> {
+    fn drop(&mut self) {
+        if let Some(flag) = self.alive.take() {
+            flag.clear();
+        }
     }
 }
 
@@ -497,7 +572,8 @@ impl<M: Mode> Listener<M> {
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
 /// which is the concept this is one kind of.
 pub struct Anchor<M: Mode = Local> {
-    alive: M::Flag,
+    /// The flag shared with the anchored node; `None` once kept.
+    alive: Option<M::Flag>,
 }
 
 impl<M: Mode> Anchor<M> {

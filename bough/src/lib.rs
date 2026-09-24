@@ -10,10 +10,16 @@
 //!
 //! # Status
 //!
-//! This is the API skeleton: every public signature, with `todo!()` bodies.
-//! The examples in the documentation compile against it, and the guarantees
-//! the RFDs make are fixed by `compile_fail` doc tests. The engine lands
-//! behind these signatures one increment at a time.
+//! The engine is being built behind these signatures in stages. Stage 1,
+//! the first-order core, works: inputs, coalescing or not, input cells,
+//! constants and `never`; the adapters `map`, `filter`, `filter_map`,
+//! `map_to`, `snapshot`, `gate` and `once`, which fuse into the one node
+//! that materializes them; the materializers `hold`, `node`, `share`,
+//! `merge` and `or_else`; and on [`Graph`] transactions, listeners and
+//! `sample`. Every other operation still has a `todo!()` body. The examples
+//! in the documentation that call only stage 1 operations run, the rest
+//! compile, and the guarantees the RFDs make are fixed by `compile_fail`
+//! doc tests.
 //!
 //! # Targets
 //!
@@ -44,8 +50,9 @@
 //! });
 //! ```
 
-// The bodies are `todo!()` until the engine lands, so parameters and fields
-// are unused for now. The names are the documentation, so they stay.
+// The later stages' bodies are still `todo!()`, so their parameters and
+// fields are unused, and the engine carries the kinds, fields and entries
+// those stages fill in. The names are the documentation, so they stay.
 #![allow(dead_code, unused_variables)]
 #![warn(missing_docs)]
 #![no_std]
