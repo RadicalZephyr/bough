@@ -61,21 +61,6 @@ impl<M: Mode> Build<M> {
         }
     }
 
-    /// Opens a scope: the build closure, or one run of a construct closure.
-    pub(crate) fn push_scope(&mut self) {
-        self.s.scopes.push(self.s.open_loops.len());
-    }
-
-    /// Closes a scope. A loop declared in it and still open is a build-time
-    /// panic (stage 3 declares loops).
-    pub(crate) fn pop_scope(&mut self) {
-        let start = self.s.scopes.pop().expect("bough engine: a scope is open");
-        assert!(
-            self.s.open_loops.len() == start,
-            "bough: a loop declared in this scope was never closed"
-        );
-    }
-
     /// The hold of an input cell. Its chain is the input's own stream token,
     /// which is `Send` whatever `A` is, so it is erased through
     /// `erase_send` and needs no `Accepts<Stream<A>>` bound.
@@ -180,26 +165,56 @@ impl<M: Mode> Build<M> {
     }
 
     /// Declares a cell loop: a forward token usable anywhere, and the closer
-    /// that later defines it.
+    /// that later defines it. Once closed, the forward token is its
+    /// definition: it reads through to the definition's value and steps
+    /// when the definition steps.
     ///
-    /// ```no_run
+    /// ```
     /// use bough::{Graph, Source};
     ///
-    /// let (graph, count) = Graph::build(|b| {
+    /// let (mut graph, (ticks_in, count)) = Graph::build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
-    ///     let (ticks, _ticks_in) = b.input::<()>();
+    ///     let (ticks, ticks_in) = b.input::<()>();
     ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
     ///     count_loop.close(b, next);                             // close
-    ///     count
+    ///     (ticks_in, count)
     /// });
+    /// graph.send(ticks_in, ());
+    /// graph.send(ticks_in, ());
+    /// assert_eq!(*graph.sample(count), 2);
     /// ```
     ///
-    /// Every path from the definition back to the forward token must pass
-    /// through a hold, an accumulator, a `split` or a `defer`; the check runs
-    /// at close. A loop declared and never closed is a build-time panic at
-    /// the end of the scope that declared it.
+    /// A loop is legal when the dependency graph stays acyclic, which
+    /// [`close`](CellLoop::close) checks. Reading a cell's value with
+    /// `snapshot`, `gate` or `sample` is not a dependency, since the read
+    /// sees the value from before the instant. Neither is a
+    /// `switch_stream`'s selection, nor [`depends`](Build::depends); and
+    /// the output of a `split` or a `defer` fires in a later child instant,
+    /// so it does not depend on the input. Every other use of a cell is a
+    /// dependency: `map_cell`, `lift`, the stream views `steps` and
+    /// `steps_with_current`, and a `switch_cell`'s outer and the inner it
+    /// selects. So a definition
+    /// may reach its own forward token only through those reads, as `next`
+    /// does above through a snapshot. A hold does not delay its stream
+    /// views, so closing with `hold(merge(ticks, forward.steps(b).map(f)))`
+    /// is refused, and so is closing with `forward.map_cell(f)` or with a
+    /// `lift` over the forward: each defines the cell's value at an instant
+    /// in terms of itself at that instant. The panic names the nodes of the
+    /// cycle.
+    ///
+    /// A loop must close in the scope that declared it: the build closure,
+    /// or one run of a `construct` closure. A loop still open when that
+    /// scope ends is a panic there, and so is sampling the forward token
+    /// before the loop is closed, since there is no value to return.
     pub fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
-        todo!()
+        let token = self.loop_node();
+        (
+            Cell::from_token(token),
+            CellLoop {
+                token,
+                event: PhantomData,
+            },
+        )
     }
 
     /// Declares a stream loop: a linear forward stream, and the closer that
@@ -228,10 +243,26 @@ impl<M: Mode> Build<M> {
     }
 }
 
-/// The closer of a cell loop.
+/// The closer of a cell loop, from [`Build::cell_loop`], which states the
+/// rule its [`close`](CellLoop::close) checks: the dependency graph stays
+/// acyclic, and a read of a cell's value from before the instant is not a
+/// dependency.
 ///
-/// Consumed by [`close`](CellLoop::close), so a loop cannot close twice. It
-/// cannot be used from inside a `construct` closure either:
+/// Consumed by `close`, so a loop cannot close twice:
+///
+/// ```compile_fail,E0382
+/// use bough::{Graph, Source};
+///
+/// let (_graph, _) = Graph::build(|b| {
+///     let (count, count_loop) = b.cell_loop::<u32>();
+///     let (ticks, _ticks_in) = b.input::<()>();
+///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
+///     count_loop.close(b, next);
+///     count_loop.close(b, next); // error: use of moved value: `count_loop`
+/// });
+/// ```
+///
+/// It cannot be used from inside a `construct` closure either:
 ///
 /// ```compile_fail,E0507
 /// use bough::{Graph, Source};
@@ -251,9 +282,15 @@ pub struct CellLoop<A> {
 }
 
 impl<A: 'static> CellLoop<A> {
-    /// Defines the loop: the forward token becomes `definition`.
+    /// Defines the loop: the forward token becomes `definition`. The
+    /// forward's node depends on the definition from now on, steps when it
+    /// steps, and reads through to its value before and after each instant,
+    /// so a stream view of the forward carries the definition's steps.
+    ///
+    /// Panics if the loop was declared in another scope, and if the new
+    /// dependency would close a cycle, naming the cycle's nodes.
     pub fn close<M: Mode>(self, build: &mut Build<M>, definition: Cell<A>) {
-        todo!()
+        build.close_cell_loop(self.token, definition.token);
     }
 }
 

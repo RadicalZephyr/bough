@@ -33,6 +33,7 @@ macro_rules! count {
     };
 }
 
+mod loops;
 pub(crate) mod nodes;
 mod pull;
 mod sched;
@@ -70,9 +71,9 @@ pub(crate) const IN_PROGRESS: u32 = u32::MAX;
 pub(crate) const START: u32 = u32::MAX;
 
 /// What a node is, which decides how the evaluation loop, `value`,
-/// `prepare`, `post` and commit treat it. Stage 1 creates the first six
-/// and stage 2 the next two; the rest are here so that the evaluation loop
-/// and the data plane need no rewrite later.
+/// `prepare`, `post` and commit treat it. Stage 1 creates the first six,
+/// stage 2 the next two and stage 3 `Loop`; the rest are here so that the
+/// evaluation loop and the data plane need no rewrite later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Index 0.
@@ -93,7 +94,9 @@ pub(crate) enum Kind {
     InPlace,
     /// `map_cell`, `lift`: settled in order, computed on read.
     ReadThrough,
-    /// A cell loop's forward node: settles like a read-through cell.
+    /// A cell loop's forward node: no dependency until close, then one,
+    /// its definition, which it settles after like a read-through cell and
+    /// reads through to.
     Loop,
     /// The capture side of `split` and `defer`: takes the event at t.
     SplitCapture,
@@ -208,7 +211,8 @@ impl<A> Memo<A> {
 
 /// A node's data plane: what other nodes, samples and listeners read.
 pub(crate) enum Data<M: Mode> {
-    /// Node 0, `never`, a cell loop, a split capture, a switch_cell.
+    /// Node 0, `never`, a cell loop, a stream loop until its close creates
+    /// its slot, a split capture, a switch_cell.
     Empty,
     /// `Option<A>`: every stream node.
     Slot(M::Carrier),

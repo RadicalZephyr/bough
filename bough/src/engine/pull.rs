@@ -70,7 +70,8 @@ impl<M: Mode> Build<M> {
 
     /// The value before the instant, the semantics' `at c t`. Committed
     /// values change only at commit, so every read during a transaction
-    /// sees this. Stages 3 and 5 add the loop and switch arms.
+    /// sees this. A cell loop's forward reads through to its definition,
+    /// and has no value before it is closed. Stage 5 adds the switch arm.
     pub(crate) fn value<A: 'static>(&self, i: u32) -> &A {
         let data = &self.store.data[i as usize];
         match self.store.hot[i as usize].kind {
@@ -79,6 +80,7 @@ impl<M: Mode> Build<M> {
             Kind::ReadThrough => (self.store.ops[i as usize].value)(self, i)
                 .downcast_ref::<A>()
                 .expect("bough engine: cell type"),
+            Kind::Loop => self.value::<A>(self.loop_target(i)),
             k => panic!("bough engine: node {i} ({k:?}) is not a cell"),
         }
     }
@@ -118,7 +120,12 @@ impl<M: Mode> Build<M> {
                     let ops = self.store.ops[x as usize];
                     (ops.compute_post)(self, x);
                 }
-                Kind::Loop => todo!("stage 3: a loop's value after the instant is its target's"),
+                // A loop steps iff its definition did, and its value after
+                // the instant is its definition's.
+                Kind::Loop => {
+                    let target = self.loop_target(x);
+                    self.prepare(target);
+                }
                 Kind::SwitchCell => {
                     todo!("stage 5: prepare the outer and the inner it selects after the instant")
                 }
@@ -154,7 +161,9 @@ impl<M: Mode> Build<M> {
                 "bough engine: node {x} is an in-place accumulator, whose value after the \
                  instant does not exist before commit; a State has no stream view"
             ),
-            Kind::Loop => todo!("stage 3: a loop's value after the instant is its target's"),
+            // Whether or not the loop stepped: its definition's value after
+            // the instant is the definition's own value when it did not.
+            Kind::Loop => self.post::<A>(self.loop_target(x)),
             Kind::SwitchCell => todo!("stage 5: the value after the instant of the selected inner"),
             k => panic!("bough engine: node {x} ({k:?}) is not a cell"),
         }
