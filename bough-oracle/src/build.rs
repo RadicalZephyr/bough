@@ -118,7 +118,11 @@
 //! depend on, and that no other root reaches, would be collected before
 //! the closure's next run uses it: the stale token of finding F62. So the
 //! builder declares, with `Build::depends`, that the construct's node keeps
-//! every token its closure captured, as a user must.
+//! every token its closure captured, as a user must. Each kind of capture
+//! needs it: without the declarations of shared streams, of cells, or of
+//! cells of tokens, the random programs fail on a stale token, the
+//! smallest a body that holds a share, samples a cell, or switches over a
+//! cell of cells that nothing else reads.
 //!
 //! Expressions evaluate as the protocol says ([`evaluate`]): 64-bit
 //! wrapping arithmetic, `Modulo` as `rem_euclid`, a boolean read as 0 or 1,
@@ -167,6 +171,13 @@
 //! the switches are compiled once per node type and token type. One build
 //! after the other on one machine, the release build of the test binary
 //! took 56.6 s twice before stage 5, and 57.1 s and 57.5 s after.
+//!
+//! Constructs add none either: a construct gives the chain before it a
+//! `node`, and its closure is a boxed [`ConstructFn`], compiled once per
+//! node type and result type. The fold law's runs share the transaction
+//! loop of the others. One build after the other on one machine, the
+//! release build of the test binary took 55.6 s and 55.9 s before the
+//! constructs and the fold law, and 55.0 s and 56.1 s after.
 //!
 //! # Linearity
 //!
