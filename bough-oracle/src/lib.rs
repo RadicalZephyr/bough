@@ -116,6 +116,8 @@
 
 mod answer;
 mod build;
+mod compare;
+mod generate;
 mod ghc;
 mod program;
 
@@ -124,6 +126,8 @@ pub use build::{
     BuildError, Chain, EngineMode, EngineObservation, EngineRun, MAX_FUSED, NodeType, RunOptions,
     Scalar, check, evaluate, name, run,
 };
+pub use compare::{Engine, Expected, Failure, Report, check_program, compare, expected};
+pub use generate::{MAX_DEFINITIONS, programs, reduce, references};
 pub use ghc::{
     Error, INSTALL_HINT, Oracle, Plan, build, compile_haskell, for_tests, ghc_command,
     haskell_directory, plan,

@@ -11,6 +11,5 @@ publish = false
 
 [dependencies]
 bough.workspace = true
-
-[dev-dependencies]
+# The strategies of `generate` are library code.
 proptest.workspace = true
