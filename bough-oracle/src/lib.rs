@@ -123,13 +123,14 @@ mod program;
 
 pub use answer::{Answer, Datum, MalformedAnswer, Observation};
 pub use build::{
-    BuildError, Call, Chain, ConstructFn, EngineMode, EngineObservation, EngineRun, Held, ListFn,
-    Listened, MAX_FUSED, NodeType, PickFn, Refusal, RunOptions, Scalar, body_references, check,
-    evaluate, name, refusal, run, switch_candidates,
+    BuildError, Call, Chain, ConstructFn, Drive, EngineMode, EngineObservation, EngineRun, Feed,
+    Held, ListFn, Listened, MAX_FUSED, NodeType, PickFn, Refusal, RunOptions, Scalar,
+    body_references, check, evaluate, name, refusal, run, run_fed, switch_candidates,
 };
 pub use compare::{
-    ConstructCount, ConstructWatch, Engine, Expected, Failure, Report, SwitchCount, SwitchWatch,
-    Switching, check_program, compare, expected, watch_constructs, watch_switches,
+    ConstructCount, ConstructWatch, Engine, Expected, Failure, FedEngine, Report, SwitchCount,
+    SwitchWatch, Switching, check_fed, check_program, compare, expected, watch_constructs,
+    watch_switches,
 };
 pub use generate::{
     MAX_DEFINITIONS, guard_element, guard_filter, guard_map, programs, reduce, references,

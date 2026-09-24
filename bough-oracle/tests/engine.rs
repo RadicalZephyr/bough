@@ -32,6 +32,17 @@
 //! `bough_oracle::reduce` to a program that fails the same way, and reported
 //! with its schedule and every observed node, the engine beside the oracle.
 //!
+//! RFD 7's fold law runs in two more tests, on half as many random
+//! programs: one input of integers an observed node reads is fed through an
+//! input slot, whose fold is a sum, a maximum or `keep_latest`, by random
+//! writes that random pumps cut into runs, and the program's own
+//! transactions go through `graph.transaction` between the pumps. Every
+//! run must match the oracle's answer to the same program with one
+//! transaction per run of writes, each write a send to an input that
+//! coalesces with the fold, and each of the program's transactions as its
+//! own. Each shard prints how many runs had more than one write, and how
+//! many of those an observed node showed.
+//!
 //! The fixed programs are the shapes RFD 1 asks for: counters, a loop
 //! capped by its own value, two loops that read each other, the
 //! sodium-rust#52 shape, a state loop, stream loops through a hold and
@@ -72,13 +83,14 @@ use Definition::{
 };
 use Expression::{Argument, ArgumentAt, ConstructEvent, Literal, Sample, SecondArgument};
 use Reference::TopLevel;
-use bough::{Local, Threaded};
+use bough::{InputSlot, Local, Threaded};
 use bough_oracle::{
-    Answer, Body, BodyResult, ConstructCount, Definition, Engine, Expected, Expression, Held,
-    Input, NodeType, Observation, Oracle, Program, Reference, Refusal, RunOptions, Scalar,
-    SwitchCount, Switching, Type, Value, Window, check, check_program, compare, expected,
-    guard_element, guard_filter, guard_map, programs, reduce, refusal, run, watch_constructs,
-    watch_switches, with_same_instant_cycle, with_switch_cycle,
+    Answer, Body, BodyResult, ConstructCount, Definition, Drive, Engine, Expected, Expression,
+    FedEngine, Feed, Held, Input, NodeType, Observation, Oracle, Program, Reference, Refusal,
+    RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window, check, check_fed,
+    check_program, compare, expected, guard_element, guard_filter, guard_map, programs, reduce,
+    references, refusal, run, run_fed, watch_constructs, watch_switches, with_same_instant_cycle,
+    with_switch_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -566,6 +578,317 @@ fn random_programs_agree_with_the_oracle_shard_2() {
 #[test]
 fn random_programs_agree_with_the_oracle_shard_3() {
     random_programs(3);
+}
+
+// ----- the fold law -----
+
+/// A slot's fold, from a menu the oracle also has as expressions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    Sum,
+    Maximum,
+    Latest,
+}
+
+impl Fold {
+    const ALL: [Fold; 3] = [Fold::Sum, Fold::Maximum, Fold::Latest];
+
+    /// A new slot with this fold. A slot is a `static`, so the slot is
+    /// leaked; each run connects it, and dropping the run's graph lets it
+    /// go for the next.
+    fn slot(self) -> &'static InputSlot<i64> {
+        Box::leak(Box::new(match self {
+            Fold::Sum => InputSlot::new(i64::wrapping_add),
+            Fold::Maximum => InputSlot::new(maximum),
+            Fold::Latest => InputSlot::keep_latest(),
+        }))
+    }
+
+    /// The fold as a coalescing function: `Argument`, the earlier send, is
+    /// the slot's pending event, and `SecondArgument` the write.
+    fn expression(self) -> Expression {
+        match self {
+            Fold::Sum => Argument + SecondArgument,
+            Fold::Maximum => Argument.maximum(SecondArgument),
+            Fold::Latest => SecondArgument,
+        }
+    }
+}
+
+/// The larger of two integers, as a `fn` pointer.
+fn maximum(pending: i64, write: i64) -> i64 {
+    pending.max(write)
+}
+
+/// The fed programs in both modes.
+const FED_ENGINES: [FedEngine; 2] = [
+    FedEngine {
+        name: "Local",
+        run: run_fed::<Local>,
+    },
+    FedEngine {
+        name: "Threaded",
+        run: run_fed::<Threaded>,
+    },
+];
+
+/// A driver's step as proptest draws it.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    /// A write to the slot.
+    Write(i64),
+    /// A pump.
+    Pump,
+    /// The program's next transaction, through `graph.transaction`, if it
+    /// has one left.
+    Next,
+}
+
+/// Up to 40 steps, most of them writes, so that most runs of writes that
+/// a pump ends have more than one.
+fn steps() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(
+        prop_oneof![
+            5 => (-9_i64..=9).prop_map(Step::Write),
+            2 => Just(Step::Pump),
+            2 => Just(Step::Next),
+        ],
+        0..40,
+    )
+}
+
+/// Which nodes an observed node reads, directly or through others, a
+/// loop's `Close` included.
+fn read_by_observed(program: &Program) -> Vec<bool> {
+    let mut read = vec![false; program.definitions.len()];
+    let mut stack = program.observe.clone();
+    while let Some(node) = stack.pop() {
+        if std::mem::replace(&mut read[node], true) {
+            continue;
+        }
+        stack.extend(references(&program.definitions[node]));
+        stack.extend(
+            program.definitions.iter().enumerate().filter_map(
+                |(close, definition)| match definition {
+                    Close { forward, .. } if *forward == node => Some(close),
+                    _ => None,
+                },
+            ),
+        );
+    }
+    read
+}
+
+/// The program with one of the input readers an observed node reads, over
+/// an input of integers, moved to a new input that a slot with `fold`
+/// feeds, and the driver's script; `None` when the program has no such
+/// reader. `choice` picks the reader. The new input coalesces with the
+/// fold, and only the slot's writes go to it; the old input keeps its
+/// other readers and its sends. The program's transactions go through
+/// `graph.transaction` where the steps say `Next`, in order, and those
+/// left over after the last step.
+fn fed(program: &Program, fold: Fold, choice: usize, steps: &[Step]) -> Option<(Program, Feed)> {
+    let read = read_by_observed(program);
+    let readers: Vec<usize> = (0..program.definitions.len())
+        .filter(|&node| {
+            read[node]
+                && matches!(&program.definitions[node],
+                    Definition::Input(k) | InputCell { input: k, .. }
+                    if program.inputs[*k].event_type == Type::Integer)
+        })
+        .collect();
+    if readers.is_empty() {
+        return None;
+    }
+    let mut program = program.clone();
+    let input = program.inputs.len();
+    program
+        .inputs
+        .push(Input::coalescing(Type::Integer, fold.expression()));
+    match &mut program.definitions[readers[choice % readers.len()]] {
+        Definition::Input(k) | InputCell { input: k, .. } => *k = input,
+        _ => unreachable!("a reader reads an input"),
+    }
+    let mut transactions = program.schedule.iter();
+    let mut script = Vec::new();
+    for step in steps {
+        match step {
+            Step::Write(value) => script.push(Drive::Write(*value)),
+            Step::Pump => script.push(Drive::Pump),
+            Step::Next => {
+                if let Some(sends) = transactions.next() {
+                    script.push(Drive::Transaction(sends.clone()));
+                }
+            }
+        }
+    }
+    script.extend(transactions.map(|sends| Drive::Transaction(sends.clone())));
+    let slot = fold.slot();
+    Some((
+        program,
+        Feed {
+            input,
+            slot,
+            script,
+        },
+    ))
+}
+
+/// What one shard's fed programs held and showed.
+#[derive(Default)]
+struct Folded {
+    /// Programs drawn, and those with no input of integers an observed
+    /// node reads.
+    cases: u32,
+    unfed: u32,
+    /// Fed programs by fold, in `Fold::ALL`'s order.
+    by_fold: [u32; 3],
+    /// Transactions through `graph.transaction`.
+    transactions: u64,
+    /// Runs of writes that a pump ended, each one transaction; those of
+    /// more than one write, which the fold folded; and of those, the ones
+    /// an observed node showed an event or a step in.
+    runs: u64,
+    folded: u64,
+    shown: u64,
+    /// Fed programs in which an observed node showed a folded run.
+    programs_shown: u32,
+}
+
+impl Folded {
+    fn add(&mut self, fold: Fold, feed: &Feed, expected: &[Expected]) {
+        self.by_fold[Fold::ALL.iter().position(|f| *f == fold).unwrap_or(0)] += 1;
+        let mut any = false;
+        for (k, sends) in feed.schedule().iter().enumerate() {
+            if sends.is_empty() || sends.iter().any(|(input, _)| *input != feed.input) {
+                self.transactions += 1;
+                continue;
+            }
+            self.runs += 1;
+            if sends.len() < 2 {
+                continue;
+            }
+            self.folded += 1;
+            let shown = expected.iter().any(|observed| {
+                let lists = match observed {
+                    Expected::Stream { events } => events,
+                    Expected::Cell { steps, .. } => steps,
+                };
+                !lists[k].is_empty()
+            });
+            self.shown += u64::from(shown);
+            any |= shown;
+        }
+        self.programs_shown += u32::from(any);
+    }
+}
+
+impl std::fmt::Display for Folded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fed = self.cases - self.unfed;
+        write!(
+            f,
+            "{fed} of {} programs fed (sums {}, maxima {}, latest {}), with {} slot runs, {} of \
+             them folded, {:.0}% of those shown by an observed node, and {} other transactions; \
+             {:.0}% of the fed programs showed a folded run",
+            self.cases,
+            self.by_fold[0],
+            self.by_fold[1],
+            self.by_fold[2],
+            self.runs,
+            self.folded,
+            share(self.shown, self.folded),
+            self.transactions,
+            share(u64::from(self.programs_shown), u64::from(fed)),
+        )
+    }
+}
+
+/// The fold-law tests split their programs between them.
+const FOLD_SHARDS: u32 = 2;
+
+/// Holds RFD 7's fold law to the oracle on this shard's share of half as
+/// many random programs as the random tests run: one input of integers an
+/// observed node reads is fed through a slot, with a fold from the menu,
+/// by random writes that random pumps cut into runs, and the program's own
+/// transactions go through `graph.transaction` between them. Each engine
+/// run, in both modes and all seven runs, must equal the oracle's answer
+/// for the same program whose schedule has one transaction per run of
+/// writes, sending the writes to an input that coalesces with the fold, and
+/// each of the program's transactions as its own.
+fn fold_law(shard: u32) {
+    let Some(oracle) = oracle() else { return };
+    let total: u32 = env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(DEFAULT_CASES);
+    let cases = (total / 2).div_ceil(FOLD_SHARDS);
+    let base = match Config::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => fresh_seed(),
+    };
+    let config = Config {
+        cases,
+        failure_persistence: None,
+        rng_seed: RngSeed::Fixed(base.wrapping_add(100 + u64::from(shard))),
+        ..Config::default()
+    };
+    let started = Instant::now();
+    let tally = RefCell::new(Folded::default());
+    let mut runner = TestRunner::new(config);
+    let strategy = (
+        programs(),
+        any::<u64>(),
+        0..Fold::ALL.len(),
+        any::<usize>(),
+        steps(),
+    );
+    let result = runner.run(&strategy, |(program, seed, fold, choice, steps)| {
+        let fold = Fold::ALL[fold];
+        tally.borrow_mut().cases += 1;
+        let Some((program, feed)) = fed(&program, fold, choice, &steps) else {
+            tally.borrow_mut().unfed += 1;
+            return Ok(());
+        };
+        match check_fed(oracle, &program, &feed, &FED_ENGINES, &runs(seed)) {
+            Ok(expected) => {
+                tally.borrow_mut().add(fold, &feed, &expected);
+                Ok(())
+            }
+            Err(report) => Err(TestCaseError::fail(report.to_string())),
+        }
+    });
+    match result {
+        Ok(()) => eprintln!(
+            "fold law, shard {shard}: {cases} random programs agree with the oracle, each in two \
+             modes and seven runs, in {:.1?} (PROPTEST_RNG_SEED={base}); {}",
+            started.elapsed(),
+            tally.borrow()
+        ),
+        Err(TestError::Fail(_, (program, seed, fold, choice, steps))) => {
+            let (program, feed) =
+                fed(&program, Fold::ALL[fold], choice, &steps).expect("a failing case is fed");
+            let report = check_fed(oracle, &program, &feed, &FED_ENGINES, &runs(seed))
+                .expect_err("proptest's smallest case fails");
+            panic!(
+                "{report}\nfold law, shard {shard}, PROPTEST_RNG_SEED={base}: the slot's fold is \
+                 {:?}; proptest shrank the case in {:.1?}",
+                Fold::ALL[fold],
+                started.elapsed()
+            );
+        }
+        Err(TestError::Abort(reason)) => panic!("{reason}"),
+    }
+}
+
+#[test]
+fn a_slot_s_writes_fold_in_the_runs_its_pumps_cut_shard_0() {
+    fold_law(0);
+}
+
+#[test]
+fn a_slot_s_writes_fold_in_the_runs_its_pumps_cut_shard_1() {
+    fold_law(1);
 }
 
 /// The message of the panic `f` raises, or `None` if it returns.
@@ -4658,7 +4981,7 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         // A diamond: a Share read by two nodes that both lead to one node.
         let readers = |node: usize| -> Vec<usize> {
             (0..program.definitions.len())
-                .filter(|&j| bough_oracle::references(&program.definitions[j]).contains(&node))
+                .filter(|&j| references(&program.definitions[j]).contains(&node))
                 .collect()
         };
         for (node, definition) in program.definitions.iter().enumerate() {
@@ -4978,24 +5301,10 @@ fn the_reducer_cuts_a_construct_body_to_what_the_failure_needs() {
     let strategy = programs();
     // Whether an observed node reads a construct whose body snapshots.
     let fails = |program: &Program| {
-        let mut read = vec![false; program.definitions.len()];
-        let mut stack = program.observe.clone();
-        while let Some(node) = stack.pop() {
-            if std::mem::replace(&mut read[node], true) {
-                continue;
-            }
-            stack.extend(bough_oracle::references(&program.definitions[node]));
-            stack.extend(program.definitions.iter().enumerate().filter_map(
-                |(close, definition)| match definition {
-                    Close { forward, .. } if *forward == node => Some(close),
-                    _ => None,
-                },
-            ));
-        }
         program
             .definitions
             .iter()
-            .zip(read)
+            .zip(read_by_observed(program))
             .any(|(definition, read)| {
                 read && matches!(definition, Construct { body, .. }
                 if body.definitions.iter().any(|d| matches!(d, Snapshot { .. })))

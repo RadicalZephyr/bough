@@ -193,8 +193,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
-    Build, Cell, CellLoop, CellRef, Graph, Lift, Listener, Local, Node, Shared, Source, State,
-    StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
+    Build, Cell, CellLoop, CellRef, Graph, InputSlot, Lift, Listener, Local, Node, Shared, Source,
+    State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
 
 use crate::program::{
@@ -322,6 +322,8 @@ pub trait EngineMode: bough::Mode {
         node: S,
         f: ConstructFn<Self, B>,
     ) -> Stream<B>;
+    /// `b.connect(input, slot)`.
+    fn connect(b: &mut Build<Self>, input: bough::Input<i64>, slot: &'static InputSlot<i64>);
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut Build<Self>,
@@ -493,6 +495,13 @@ macro_rules! engine_mode {
                 f: ConstructFn<Self, B>,
             ) -> Stream<B> {
                 node.construct(b, f)
+            }
+            fn connect(
+                b: &mut Build<Self>,
+                input: bough::Input<i64>,
+                slot: &'static InputSlot<i64>,
+            ) {
+                b.connect(input, slot)
             }
             fn map_cell<A: 'static, B: Send + 'static>(
                 b: &mut Build<Self>,
@@ -3614,8 +3623,14 @@ fn declare_captures<M: EngineMode>(
     b.depends(node, &on);
 }
 
-/// The build closure's body.
-fn build_program<M: EngineMode>(b: &mut Build<M>, program: &Program, checked: &Checked) -> Edge {
+/// The build closure's body. A slot, if given, feeds the one engine input
+/// of its program input.
+fn build_program<M: EngineMode>(
+    b: &mut Build<M>,
+    program: &Program,
+    checked: &Checked,
+    slot: Option<(usize, &'static InputSlot<i64>)>,
+) -> Edge {
     let mut builder = Builder::<M> {
         program_inputs: &program.inputs,
         types: &checked.types,
@@ -3628,6 +3643,14 @@ fn build_program<M: EngineMode>(b: &mut Build<M>, program: &Program, checked: &C
     for definition in &program.definitions {
         let built = builder.define(b, definition);
         builder.nodes.push(built);
+    }
+    if let Some((input, slot)) = slot {
+        match builder.inputs[input].as_slice() {
+            [EngineInput::Integer(token)] => M::connect(b, *token, slot),
+            _ => unreachable!(
+                "bough-oracle: run_fed checks that a slot feeds one engine input of integers"
+            ),
+        }
     }
     let observed = program
         .observe
@@ -4074,7 +4097,7 @@ pub fn refusal<M: EngineMode>(
 ) -> Result<Refusal, BuildError> {
     let checked = checked(program)?;
     let built = panic::catch_unwind(AssertUnwindSafe(|| {
-        M::build(|b| build_program(b, program, &checked))
+        M::build(|b| build_program(b, program, &checked, None))
     }));
     let (mut graph, edge) = match built {
         Ok(built) => built,
@@ -4118,8 +4141,122 @@ fn send_all<M: EngineMode>(tx: &mut Transaction<'_, M>, order: Vec<(EngineInput,
 ///
 /// Panics only where the engine panics.
 pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<EngineRun, BuildError> {
+    let script: Vec<Drive> = program
+        .schedule
+        .iter()
+        .map(|sends| Drive::Transaction(sends.clone()))
+        .collect();
+    execute::<M>(program, None, &script, options)
+}
+
+/// One step of a driver that feeds a program input through an input slot
+/// (RFD 7), and sends to the others in transactions of their own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Drive {
+    /// `slot.send(value)`, from outside the graph: it folds into the
+    /// slot's pending event, if there is one.
+    Write(i64),
+    /// `graph.pump()`: the run of writes since the last pump, if it has
+    /// any, becomes one event, in one transaction.
+    Pump,
+    /// `graph.transaction` with these sends, (program input, value), which
+    /// never goes to the slot's input.
+    Transaction(Vec<(usize, Value)>),
+}
+
+/// A program input fed through an input slot, and the driver's steps.
+#[derive(Clone)]
+pub struct Feed {
+    /// The program input the slot feeds. It must be an input of integers
+    /// that one definition reads, so that the slot feeds one engine input.
+    pub input: usize,
+    /// The slot. A slot feeds one graph at a time: a run connects it, and
+    /// dropping the run's graph lets it go.
+    pub slot: &'static InputSlot<i64>,
+    /// The driver's steps, in order. A pump ends them all.
+    pub script: Vec<Drive>,
+}
+
+impl fmt::Debug for Feed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Feed")
+            .field("input", &self.input)
+            .field("script", &self.script)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Feed {
+    /// The schedule of the same run as the oracle answers it: each
+    /// `Transaction` as it is, and each run of writes that a pump ends as
+    /// one transaction whose sends are the run's writes, in order, to the
+    /// slot's input. That input's coalescing function, the slot's fold as
+    /// an expression, folds them left, the first on the left, as the slot
+    /// does: the fold law.
+    pub fn schedule(&self) -> Vec<Vec<(usize, Value)>> {
+        let mut schedule = Vec::new();
+        let mut run = Vec::new();
+        for step in self.script.iter().chain([&Drive::Pump]) {
+            match step {
+                Drive::Write(value) => run.push((self.input, Value::Integer(*value))),
+                Drive::Pump => {
+                    if !run.is_empty() {
+                        schedule.push(mem::take(&mut run));
+                    }
+                }
+                Drive::Transaction(sends) => schedule.push(sends.clone()),
+            }
+        }
+        schedule
+    }
+}
+
+/// Builds the program in mode `M` with the feed's slot connected to its
+/// input, listens to the observed nodes, and runs the feed's script, then a
+/// last pump. Each `Transaction` is a transaction of the run, and so is
+/// each pump that drains a write; the program's own schedule is not read,
+/// and [`Feed::schedule`] is what the oracle answers for the same run.
+///
+/// Panics where the engine panics, and when a write, or a pump that drains
+/// nothing, makes a listener call.
+pub fn run_fed<M: EngineMode>(
+    program: &Program,
+    feed: &Feed,
+    options: RunOptions,
+) -> Result<EngineRun, BuildError> {
+    let readers = program
+        .definitions
+        .iter()
+        .filter(|definition| {
+            matches!(definition, Definition::Input(k) | Definition::InputCell { input: k, .. } if *k == feed.input)
+        })
+        .count();
+    match program.inputs.get(feed.input) {
+        Some(input) if input.event_type == Type::Integer && readers == 1 => {}
+        _ => {
+            return Err(BuildError::program(format!(
+                "the slot feeds input {}, which must be an input of integers that one definition \
+                 reads, and {readers} do",
+                feed.input
+            )));
+        }
+    }
+    let mut script = feed.script.clone();
+    script.push(Drive::Pump);
+    execute::<M>(program, Some((feed.input, feed.slot)), &script, options)
+}
+
+/// Builds the program in mode `M`, with the slot if any connected, listens
+/// to its observed nodes, and runs the script.
+fn execute<M: EngineMode>(
+    program: &Program,
+    slot: Option<(usize, &'static InputSlot<i64>)>,
+    script: &[Drive],
+    options: RunOptions,
+) -> Result<EngineRun, BuildError> {
     let checked = checked(program)?;
-    let (mut graph, edge) = M::build(|b| build_program(b, program, &checked));
+    let (mut graph, edge) = M::build(|b| build_program(b, program, &checked, slot));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
     graph.set_collect_after_every_transaction(options.collect_every_transaction);
@@ -4134,13 +4271,40 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
         })
         .collect();
     let mut calls = Vec::new();
-    for (k, sends) in program.schedule.iter().enumerate() {
-        let order = engine_sends(
-            sends,
-            &edge.inputs,
-            options.permute_sends.map(|seed| (seed, k)),
-        );
-        graph.transaction(|tx| send_all::<M>(tx, order));
+    // Transactions run so far, and whether the slot has a pending write.
+    let mut k = 0;
+    let mut pending = false;
+    for step in script {
+        let ran = match step {
+            Drive::Write(value) => {
+                let (_, slot) = slot.expect("bough-oracle: a script writes only to a slot");
+                slot.send(*value);
+                pending = true;
+                false
+            }
+            Drive::Pump => {
+                graph.pump();
+                mem::take(&mut pending)
+            }
+            Drive::Transaction(sends) => {
+                let order = engine_sends(
+                    sends,
+                    &edge.inputs,
+                    options.permute_sends.map(|seed| (seed, k)),
+                );
+                graph.transaction(|tx| send_all::<M>(tx, order));
+                true
+            }
+        };
+        if !ran {
+            let stray = drain(&log);
+            assert!(
+                stray.is_empty(),
+                "bough-oracle: a write, or a pump that drained nothing, made listener calls: \
+                 {stray:?}"
+            );
+            continue;
+        }
         for recorder in &mut recorders {
             recorder.begin_transaction();
         }
@@ -4156,6 +4320,7 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
         for recorder in &mut recorders {
             recorder.end_transaction(&graph);
         }
+        k += 1;
     }
     drop(listeners);
     Ok(EngineRun {

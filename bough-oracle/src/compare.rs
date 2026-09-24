@@ -44,6 +44,15 @@
 //! Haskell line, its schedule, and every observed node, the engine beside
 //! the oracle, a row per transaction, with the rows that differ marked.
 //!
+//! [`check_fed`] holds RFD 7's fold law to the oracle the same way: one
+//! program input is fed through an input slot, by writes that pumps cut
+//! into runs, and the other inputs through `graph.transaction` between
+//! them. The oracle answers the same program with one transaction per run,
+//! whose sends are the run's writes to an input that coalesces with the
+//! slot's fold, as an expression; so the engine's slot must fold each run
+//! left, the first write on the left, as the semantics fold simultaneous
+//! sends.
+//!
 //! # What the switches did
 //!
 //! A switch whose outer never selects another inner tests little, and the
@@ -61,7 +70,7 @@ use std::ops::AddAssign;
 use std::panic::{self, AssertUnwindSafe};
 
 use crate::answer::{Answer, Datum, Observation};
-use crate::build::{self, BuildError, Call, EngineObservation, EngineRun, RunOptions};
+use crate::build::{self, BuildError, Call, Drive, EngineObservation, EngineRun, Feed, RunOptions};
 use crate::generate;
 use crate::ghc::Oracle;
 use crate::program::{BodyResult, Definition, Expression, Program, Reference, Time, Value, Window};
@@ -541,6 +550,102 @@ pub fn check_program(
             let label = format!("{} mode, {options}", engine.name);
             let outcome =
                 panic::catch_unwind(AssertUnwindSafe(|| (engine.run)(&program, *options)));
+            let run = match outcome {
+                Err(payload) => {
+                    return Err(report(
+                        &program,
+                        Failure::Panic {
+                            run: label,
+                            message: build::panic_message(payload),
+                        },
+                    ));
+                }
+                Ok(Err(error)) => return Err(report(&program, Failure::Build(error))),
+                Ok(Ok(run)) => run,
+            };
+            if let Some(table) = compare(&program, &expected, &run) {
+                return Err(report(
+                    &program,
+                    Failure::Disagreement { run: label, table },
+                ));
+            }
+        }
+    }
+    Ok(expected)
+}
+
+/// One way to run the engine with an input fed through a slot: a mode's
+/// [`run_fed`](build::run_fed), named for reports.
+#[derive(Clone, Copy)]
+pub struct FedEngine {
+    /// The mode, as reports name it.
+    pub name: &'static str,
+    /// `run_fed::<Local>` or `run_fed::<Threaded>`.
+    pub run: fn(&Program, &Feed, RunOptions) -> Result<EngineRun, BuildError>,
+}
+
+impl fmt::Debug for FedEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name)
+    }
+}
+
+/// A driver's steps as a report shows them: `w 3` for a write to the slot,
+/// `pump`, and `tx [..]` for a transaction's sends.
+fn script(feed: &Feed) -> String {
+    let steps: Vec<String> = feed
+        .script
+        .iter()
+        .map(|step| match step {
+            Drive::Write(value) => format!("w {value}"),
+            Drive::Pump => "pump".to_owned(),
+            Drive::Transaction(sends) => format!("tx {sends:?}"),
+        })
+        .collect();
+    format!("{}, pump", steps.join(", "))
+}
+
+/// The fold law against the oracle (RFD 7): asks the oracle about the
+/// program with the feed's schedule, where each run of writes that a pump
+/// ends is one transaction of the run's writes to the slot's input, which
+/// the program declares coalescing with the slot's fold as an expression;
+/// and holds every engine run, fed through the slot as the script says,
+/// with every option, to that answer. The first failure is the report,
+/// whose program carries that schedule and whose run names the script.
+pub fn check_fed(
+    oracle: &Oracle,
+    program: &Program,
+    feed: &Feed,
+    engines: &[FedEngine],
+    runs: &[RunOptions],
+) -> Result<Vec<Expected>, Box<Report>> {
+    let mut program = program.clone();
+    program.window = Window::FromFirstTransaction;
+    program.schedule = feed.schedule();
+    let report = |program: &Program, failure| {
+        Box::new(Report {
+            program: program.clone(),
+            failure,
+        })
+    };
+    if let Err(error) = build::check(&program) {
+        return Err(report(&program, Failure::Build(error)));
+    }
+    let answer = oracle
+        .answer(&program)
+        .map_err(|error| report(&program, Failure::Oracle(error.to_string())))?;
+    let expected = expected(&program, &answer)
+        .map_err(|message| report(&program, Failure::Oracle(message)))?;
+    for engine in engines {
+        for options in runs {
+            let label = format!(
+                "{} mode, {options}, input {} fed through a slot: {}",
+                engine.name,
+                feed.input,
+                script(feed)
+            );
+            let outcome =
+                panic::catch_unwind(AssertUnwindSafe(|| (engine.run)(&program, feed, *options)));
             let run = match outcome {
                 Err(payload) => {
                     return Err(report(
