@@ -84,8 +84,14 @@
 //! ([`EngineMode::FUSED`]): the mode's carrier is what `Threaded` adds, and
 //! at one adapter it compiles 20 chain types instead of 182. The branch that
 //! fuses a second adapter is dead for `Threaded`, and rustc does not compile
-//! it: the release build of the test binary takes 71 s, against 51 s for
-//! `Local` alone and 111 s with both modes at two.
+//! it: when this was measured, the release build of the test binary took
+//! 71 s, against 51 s for `Local` alone and 111 s with both modes at two.
+//!
+//! Every materializer is compiled once per chain type, so each one that
+//! fuses a chain costs build time. Stages 3 and 4 add three, a `Defer`, a
+//! `MapList` and a stream loop's close, to the eight of stages 1 and 2.
+//! Measured again, one build after the other on one machine, they take the
+//! release build of the test binary from 67 s to 80 s.
 //!
 //! # Linearity
 //!
