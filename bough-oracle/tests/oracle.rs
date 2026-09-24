@@ -1399,6 +1399,63 @@ fn counter(ticks: usize, cap: Option<i64>) -> Program {
     driven(1, definitions, vec![hold], &schedule)
 }
 
+/// The wave and the ring (the oracle review's second round): a hold of 1
+/// over `ticks` transactions, transaction k sending k, that never steps.
+/// The snapshot passes 11 when it reads 0 at [1], and k + 10 when it reads
+/// k + 9 at [k]; anything else is -999, which the filter drops. So from the
+/// start, where the loop holds 0, every iterate is one step, and round k's
+/// is at [k]. With one loop the snapshot reads the hold's own loop (the
+/// wave). With more, each further loop is a map_cell of the one before and
+/// the snapshot reads the last (the ring), so the step takes a round per
+/// loop at each instant.
+fn ring(loops: usize, ticks: i64) -> Program {
+    let dropped = || Literal(-999);
+    let passed = Expression::if_then_else(
+        SecondArgument.equal(Literal(0)),
+        Expression::if_then_else(Argument.equal(Literal(1)), Literal(11), dropped()),
+        Expression::if_then_else(
+            SecondArgument.equal(Argument + Literal(9)),
+            Argument + Literal(10),
+            dropped(),
+        ),
+    );
+    let mut definitions = vec![Definition::Input(0)];
+    definitions.extend((0..loops).map(|_| CellLoop(Type::Integer)));
+    definitions.extend([
+        Snapshot {
+            function: passed,
+            source: TopLevel(0),
+            cell: TopLevel(loops),
+        },
+        Filter {
+            predicate: !Argument.equal(dropped()),
+            source: TopLevel(loops + 1),
+        },
+        Hold {
+            initial: Literal(1),
+            source: TopLevel(loops + 2),
+        },
+        Close {
+            forward: 1,
+            definition: TopLevel(loops + 3),
+        },
+    ]);
+    for forward in 2..=loops {
+        let map = definitions.len();
+        definitions.push(MapCell {
+            function: Argument,
+            cell: TopLevel(forward - 1),
+        });
+        definitions.push(Close {
+            forward,
+            definition: TopLevel(map),
+        });
+    }
+    let sends: Vec<[(usize, i64); 1]> = (1..=ticks).map(|tick| [(0, tick)]).collect();
+    let schedule: Vec<&[(usize, i64)]> = sends.iter().map(|send| &send[..]).collect();
+    driven(1, definitions, vec![loops + 3], &schedule)
+}
+
 #[test]
 fn the_capped_counter_a_filter_inside_a_loop_through_a_hold() {
     let Some(oracle) = oracle() else { return };
@@ -1429,6 +1486,22 @@ fn a_loop_whose_answer_chains_through_250_instants_converges() {
         observe(oracle, &counter(250, None)),
         vec![Observation::cell(0, expected)]
     );
+}
+
+#[test]
+fn a_loop_whose_one_step_moves_an_instant_later_every_round_converges() {
+    let Some(oracle) = oracle() else { return };
+    // The wave: 252 rounds over 250 ticks, while each state holds two loop
+    // times. Rounds allowed by the size of the largest state ran out at 204.
+    assert_eq!(observe(oracle, &ring(1, 250)), vec![cell(1, &[])]);
+}
+
+#[test]
+fn ten_loops_that_pass_the_step_along_within_each_instant_converge() {
+    let Some(oracle) = oracle() else { return };
+    // The ring: a round per loop at each instant, 261 rounds over 25 ticks,
+    // where the largest state allowed 240.
+    assert_eq!(observe(oracle, &ring(10, 25)), vec![cell(1, &[])]);
 }
 
 #[test]
@@ -1474,8 +1547,9 @@ fn a_loop_that_does_not_settle_answers_err() {
     let Some(oracle) = oracle() else { return };
     // A same-instant cycle through a hold's steps view, which the text
     // diverges on and the engine must refuse (finding F3): at [1], x = 0 +
-    // (x + 1). The iteration counts up at [1] and stays small, so the rounds
-    // allowed, 200 and two for its loop and its step, run out.
+    // (x + 1). The iteration counts up at [1], where every state holds its
+    // one loop time, so the rounds allowed, 200 and two for that loop time,
+    // run out.
     let program = driven(
         1,
         vec![
@@ -1505,7 +1579,7 @@ fn a_loop_that_does_not_settle_answers_err() {
     );
     assert_eq!(
         error_message(oracle, &program),
-        "the loops did not converge in 204 rounds; still changing: node 1 at [1]"
+        "the loops did not converge in 202 rounds; still changing: node 1 at [1]"
     );
 }
 
@@ -2066,10 +2140,12 @@ fn a_test_that_needs_ghc() {
 
 #[test]
 fn without_ghc_a_test_panics_with_the_install_hint_unless_told_to_skip() {
+    // The child captures its test's output, as `cargo test` does, so the
+    // skip line shows only if it gets past the harness.
     let run = |setting: Option<&str>| {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args(["a_test_that_needs_ghc", "--exact", "--nocapture"])
+            .args(["a_test_that_needs_ghc", "--exact"])
             .env("BOUGH_GHC", "/nonexistent/bough-oracle-test/ghc")
             .env_remove("BOUGH_ORACLE");
         if let Some(setting) = setting {
@@ -2098,7 +2174,10 @@ fn without_ghc_a_test_panics_with_the_install_hint_unless_told_to_skip() {
 
     let (passed, text) = run(Some("skip"));
     assert!(passed, "{text}");
-    assert!(text.contains("skipped: BOUGH_ORACLE=skip"), "{text}");
+    assert!(
+        text.contains("skipped a_test_that_needs_ghc: BOUGH_ORACLE=skip"),
+        "{text}"
+    );
     assert!(text.contains("1 passed"), "{text}");
 
     let (passed, text) = run(Some("yes"));
@@ -2137,7 +2216,7 @@ const HASKELL_GROUPS: &[(&str, usize)] = &[
     ("interpreter: sodium.hs vectors", 20),
     ("interpreter: common-tests vectors", 5),
     ("interpreter: derived operations", 9),
-    ("interpreter: loops", 13),
+    ("interpreter: loops", 16),
     ("interpreter: checks", 15),
     ("interpreter: answers", 7),
 ];

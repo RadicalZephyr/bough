@@ -341,11 +341,11 @@ mod tests {
     fn errors_and_timeouts_parse() {
         assert_eq!(
             Answer::parse(
-                "ERR the loops did not converge in 204 rounds; still changing: node 1 at [1]"
+                "ERR the loops did not converge in 202 rounds; still changing: node 1 at [1]"
             )
             .unwrap(),
             Answer::Error(
-                "the loops did not converge in 204 rounds; still changing: node 1 at [1]"
+                "the loops did not converge in 202 rounds; still changing: node 1 at [1]"
                     .to_owned()
             )
         );

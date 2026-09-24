@@ -29,13 +29,16 @@
 -- cycle, which the text diverges on and the iteration may still settle;
 -- the generator must not produce one.
 --
--- A round settles at least one more instant of a well-founded loop, or one
--- more loop where loops read one another within an instant, so the rounds
--- a loop needs grow with the instants its answer chains through: the
--- counter over n transactions needs n + 1. The rounds allowed grow with the
--- loops too ('roundsAllowed'), with room for every loop that settles; past
--- them the answer is @ERR@. A loop whose iterates keep growing, such as a
--- stream loop through defer with no filter to stop it (finding F22), never
+-- A loop time is one loop's value before its first step, or its step or
+-- event at one time. A round settles at least one more loop time of a
+-- well-founded loop, so the rounds a loop needs grow with the loop times
+-- its answer chains through: the counter over n transactions needs n + 1.
+-- The rounds allowed ('roundsAllowed') grow with every loop time the
+-- rounds' states have held, not with the size of the largest state, since
+-- a loop whose one step moves an instant later every round stays small
+-- however many rounds it needs. Past them the answer is @ERR@. A loop whose
+-- iterates keep growing, such as a stream loop through defer with no filter
+-- to stop it (finding F22), holds new loop times every round and never
 -- reaches them, and the caller's time limit ends it instead.
 module Oracle.Interpret
   ( -- * The protocol
@@ -59,10 +62,12 @@ import Control.Exception
 import Control.Monad (foldM, forM_, unless, when, zipWithM_)
 import Data.IntMap.Lazy (IntMap)
 import qualified Data.IntMap.Lazy as IntMap
-import Data.List (intercalate)
+import Data.List (foldl', intercalate)
 import Data.Map.Lazy (Map)
 import qualified Data.Map.Lazy as Map
 import Data.Maybe (isJust)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Text.Read (readMaybe)
 import Reactive.Sodium.Denotational (Stream (..), Cell (..), Reactive (..), T, S, C)
 import qualified Reactive.Sodium.Denotational as D
@@ -487,16 +492,29 @@ data LoopMode
     Knot
   deriving (Eq, Show)
 
--- | The rounds the loops may take before the answer is @ERR@, given the
--- size of the largest state a round has made ('stateSize'): 200, and two
--- for every loop, step, event and body run in it. A round settles at least
--- one more instant of a well-founded loop, so a loop that settles needs
--- about a round for each step or event its answer chains through, and
--- these rounds leave it room twice over. A loop that never settles and
--- stays small, such as a same-instant cycle that counts up at one instant,
--- is stopped by them.
+-- | The rounds the loops may take before the answer is @ERR@, given how
+-- many loop times the rounds' states have held ('LoopTime'): 200, and two
+-- for each. A well-founded loop needs at most a round for each loop time
+-- held, and one more to show that it settled, so these leave it room
+-- twice over.
+--
+-- The loop times of a well-founded loop's answer depend on one another
+-- without a cycle: each on those of earlier times and, within its instant,
+-- on those of the loops it reads there; a body run's loop times also
+-- depend on the event that starts the run. Order them so that each comes
+-- after every loop time it depends on. A round computes each loop time
+-- from the state's loop times before it, so a state that is right up to
+-- its earliest wrong loop time makes one that is right there too. The
+-- earliest wrong loop time moves later in the order every round, and
+-- where it stops, the state holds something the answer does not there, or
+-- lacks something that the next state then holds: one of the two holds
+-- that loop time.
+--
+-- A loop that never settles and stays small, such as a same-instant cycle
+-- that counts up at one instant, holds the same few loop times round after
+-- round and runs out of rounds.
 roundsAllowed :: Int -> Int
-roundsAllowed size = 200 + 2 * size
+roundsAllowed held = 200 + 2 * held
 
 -- | A node at run time.
 data Node = NStream (Stream Value) | NCell (Cell Value) | NClose
@@ -588,23 +606,24 @@ observe window node = case (node, window) of
 -- in the round's state, and the next state holds the steps or events of
 -- each loop's definition. The answer is the round whose state reproduces
 -- itself. Each new state is forced whole, so that no round holds on to the
--- one before it.
+-- one before it, and the loop times new in it join those that the rounds
+-- allowed count.
 solve :: Context -> [Def] -> IntMap Node
 solve context defs = case contextMode context of
     Knot -> fst (scopeRound context defs Knotted)
     FixedPoint
-        | hasLoops defs -> go 1 0 emptyState
+        | hasLoops defs -> go 1 Set.empty emptyState
         | otherwise -> fst (scopeRound context defs (Iterates emptyState))
   where
-    go :: Int -> Int -> State -> IntMap Node
-    go round' largest state =
+    go :: Int -> Set LoopTime -> State -> IntMap Node
+    go round' held state =
         let (nodes, next) = scopeRound context defs (Iterates state)
-            largest' = max largest (stateSize next)
+            held' = foldl' (flip Set.insert) held (force (newLoopTimes state next))
             changing = changes [] defs state next
-        in next `deepseq` case changing of
+        in next `deepseq` held' `seq` case changing of
             [] -> nodes
-            _ | round' >= roundsAllowed largest' -> throw (OracleError (unsettled round' changing))
-              | otherwise -> go (round' + 1) largest' next
+            _ | round' >= roundsAllowed (Set.size held') -> throw (OracleError (unsettled round' changing))
+              | otherwise -> go (round' + 1) held' next
 
 -- | The message for loops that did not converge, naming the first few that
 -- still change.
@@ -726,15 +745,35 @@ firstDifference ((t, _) : _) [] = Just t
 firstDifference [] ((u, _) : _) = Just u
 firstDifference [] [] = Nothing
 
--- | How much a state holds: one for each loop, step, event and body run,
--- over every body run. The rounds allowed grow with it.
-stateSize :: State -> Int
-stateSize (State loops runs) =
-    sum [ 1 + steps' iterate' | iterate' <- IntMap.elems loops ]
-        + sum [ 1 + stateSize run' | run' <- Map.elems runs ]
+-- | A loop time: the body runs the loop is in, outermost first, each named
+-- by its construct node and instant; the loop's node; and the time of a
+-- step or an event, or 'Nothing' for a cell's value before its first step.
+type LoopTime = ([(Int, T)], Int, Maybe T)
+
+-- | The loop times the second state holds and the first does not, over
+-- every body run. A state holds each cell loop's value before its first
+-- step, and each loop's steps or events; it holds nothing of a loop or a
+-- body run it lacks. The rounds allowed count the loop times of every
+-- state so far, and those of the first state are counted already.
+newLoopTimes :: State -> State -> [LoopTime]
+newLoopTimes = go []
   where
-    steps' (CellIterate (_, sts)) = length sts
-    steps' (StreamIterate events) = length events
+    go path (State loops runs) (State loops' runs') =
+        [ (path, i, time)
+        | (i, iterate') <- IntMap.toList loops'
+        , time <- maybe id (without . times) (IntMap.lookup i loops) (times iterate') ]
+        ++ concat
+            [ go (path ++ [key]) (Map.findWithDefault emptyState key runs) run'
+            | (key, run') <- Map.toList runs' ]
+    times (CellIterate (_, sts)) = Nothing : map (Just . fst) sts
+    times (StreamIterate events) = map (Just . fst) events
+    -- The times of the second list that the first lacks, both ascending.
+    without (x : xs) (y : ys) = case compare x y of
+        LT -> without xs (y : ys)
+        EQ -> without xs ys
+        GT -> y : without (x : xs) ys
+    without [] ys = ys
+    without _ [] = []
 
 -- | The same node as a concrete term: the text observes a term only through
 -- @occs@ and @steps@, so the two cannot be told apart, and the concrete one

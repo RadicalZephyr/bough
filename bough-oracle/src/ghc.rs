@@ -240,7 +240,8 @@ fn probe_ghc() -> Result<String, String> {
 
 /// The oracle every test in a test binary shares, built into `directory`
 /// on first use (later calls share it, whatever directory they name);
-/// `None` when the test should skip, after saying so.
+/// `None` when the test should skip, after saying so on the standard error
+/// with the name of the test.
 ///
 /// Panics with the install hint when GHC is missing and `BOUGH_ORACLE=skip`
 /// is not set, and with GHC's output when the build fails. A test that
@@ -251,7 +252,19 @@ pub fn for_tests(directory: impl AsRef<Path>) -> Option<&'static Oracle> {
     static SHARED: OnceLock<Result<Oracle, Error>> = OnceLock::new();
     match plan(env::var("BOUGH_ORACLE").ok().as_deref(), probe_ghc) {
         Plan::Skip => {
-            eprintln!("skipped: BOUGH_ORACLE=skip, so this test, which needs GHC, did not run");
+            // Written to the standard error itself: the test harness keeps
+            // what `eprintln!` prints and shows it only for a test that
+            // fails, so a skipped test would read as one that ran. The line
+            // goes in one write, so that the harness's own output, on the
+            // same terminal, cannot cut it. The harness names each test's
+            // thread after the test.
+            let test = thread::current()
+                .name()
+                .map_or_else(String::new, |name| format!(" {name}"));
+            let line = format!(
+                "skipped{test}: BOUGH_ORACLE=skip, so this test, which needs GHC, did not run\n"
+            );
+            let _ = io::stderr().write_all(line.as_bytes());
             None
         }
         Plan::Fail(message) => panic!("{message}"),

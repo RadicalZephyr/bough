@@ -57,21 +57,25 @@
 //! through a steps view is a same-instant cycle, which programs for the
 //! oracle must not contain (finding F3).
 //!
-//! A round settles at least one more instant of a loop, or one more loop
-//! where loops read one another within an instant, so a loop needs about a
-//! round for each instant its answer chains through: the counter over n
-//! transactions needs n + 1 rounds, and a running sum over a split's
-//! children needs one per child. The rounds allowed grow with the loops:
-//! 200, and two for every loop, step, event and body run the largest round
-//! held, which leaves a loop that settles room twice over, however far it
-//! chains. One that never settles and stays small answers `ERR`, naming a
-//! loop that still changes. A loop that grows without end, such as a stream
-//! loop through `defer` with no filter to stop it (finding F22), answers
-//! `TIMEOUT`, and so does a long enough chain: each round costs more as the
-//! loops grow, and the counter takes about a second at 500 transactions, and
-//! at 1000 it would need nine. `accumulate` and `scan` tie knots of their
-//! own and take no rounds, so they answer far longer runs than the same
-//! state written as a cell loop, which denotes the same cell.
+//! A loop time is one loop's value before its first step, or its step or
+//! event at one time. A round settles at least one more loop time of a
+//! well-founded loop, so a loop needs about a round for each loop time its
+//! answer chains through: the counter over n transactions needs n + 1
+//! rounds, and a running sum over a split's children needs one per child.
+//! The rounds allowed are 200, and two for every loop time any round's
+//! state has held, which leaves a loop that settles room twice over,
+//! however far it chains. They count the loop times held, not the size of
+//! the largest state, since a loop whose one step moves an instant later
+//! every round stays small however many rounds it needs. One that never
+//! settles and holds the same few loop times answers `ERR`, naming a loop
+//! that still changes. A loop that grows without end, such as a stream loop
+//! through `defer` with no filter to stop it (finding F22), holds new loop
+//! times every round and answers `TIMEOUT`, and so does a long enough
+//! chain: each round costs more as the loops grow, and the counter takes
+//! about a second at 500 transactions, and at 1000 it would need nine.
+//! `accumulate` and `scan` tie knots of their own and take no rounds, so
+//! they answer far longer runs than the same state written as a cell loop,
+//! which denotes the same cell.
 //!
 //! # Two patches to the text
 //!

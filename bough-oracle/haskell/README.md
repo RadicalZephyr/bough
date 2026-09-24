@@ -50,25 +50,32 @@ selection of `switch_stream`) or a child instant (`split`, `defer`). A back
 edge through a steps view is a same-instant cycle; programs for the oracle
 must not contain one.
 
-A round settles at least one more instant of a loop, or one more loop where
-loops read one another within an instant, so a loop needs about a round for
-each instant its answer chains through: the counter over n transactions
-needs n + 1 rounds. The rounds allowed are 200, and two for every loop,
-step, event and body run the largest round held, which leaves a loop that
-settles room twice over, however far it chains. One that never settles and
-stays small, such as a same-instant cycle that counts up at `[1]`, answers
-`ERR` and names a loop that still changes:
+A loop time is one loop's value before its first step, or its step or event
+at one time. A round settles at least one more loop time of a well-founded
+loop: the answer's loop times depend on one another without a cycle, and
+the earliest one a round's state gets wrong is right in the next round's,
+along with every one before it. So a loop needs at most a round for each
+loop time the rounds' states hold on the way, and one more to show that it
+settled: the counter over n transactions needs n + 1 rounds. The rounds
+allowed are 200, and two for every loop time any round's state has held,
+which leaves a loop that settles room twice over, however far it chains.
+They count the loop times held, not the size of the largest state: a loop
+whose one step moves an instant later every round stays small and needs a
+round for every instant (the wave in `OracleTests.hs`). One that never
+settles and holds the same few loop times, such as a same-instant cycle
+that counts up at `[1]`, answers `ERR` and names a loop that still changes:
 
 ```text
-ERR the loops did not converge in 204 rounds; still changing: node 1 at [1]
+ERR the loops did not converge in 202 rounds; still changing: node 1 at [1]
 ```
 
 A loop that grows without end, such as a stream loop through `defer` with no
-filter (finding F22), answers `TIMEOUT`, and so does a long enough chain,
-since each round costs more as the loops grow: the counter takes about a
-second at 500 transactions, and at 1000 it would need nine. `CAccum` and
-`SScan` tie knots of their own and take no rounds, so they answer far longer
-runs than the same state written as a cell loop, which denotes the same cell.
+filter (finding F22), holds a new loop time every round and answers
+`TIMEOUT`, and so does a long enough chain, since each round costs more as
+the loops grow: the counter takes about a second at 500 transactions, and
+at 1000 it would need nine. `CAccum` and `SScan` tie knots of their own and
+take no rounds, so they answer far longer runs than the same state written
+as a cell loop, which denotes the same cell.
 
 ## Two patches to the text
 
@@ -132,5 +139,5 @@ ghc -outputdir /tmp/sodium-vectors -o /tmp/sodium-vectors/run sodium.hs
 /tmp/sodium-vectors/run
 ```
 
-With GHC 9.4.7 the program answers `OK [[0,[[[0],6]]]]`, all 178 cases of
+With GHC 9.4.7 the program answers `OK [[0,[[[0],6]]]]`, all 181 cases of
 `OracleTests.hs` pass, and all twenty cases of `sodium.hs` pass.

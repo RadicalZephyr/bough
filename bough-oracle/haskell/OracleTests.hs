@@ -964,6 +964,26 @@ slice = driven 3
     , CLift (Add (ArgN 0) (ArgN 1)) [N 18, N 10] ]
     [6, 10, 13, 14, 18, 20, 21]
 
+-- | The wave and the ring (the oracle review's second round): a hold of 1
+-- over n ticks, transaction k sending k, that never steps. The snapshot
+-- passes 11 when it reads 0 at [1], and k + 10 when it reads k + 9 at [k];
+-- anything else is -999, which the filter drops. So from the start, where
+-- the loop holds 0, every iterate is one step, and round k's is at [k].
+-- With one loop the snapshot reads the hold's own loop (the wave). With
+-- more, each further loop is a map_cell of the one before and the snapshot
+-- reads the last (the ring), so the step takes a round per loop at each
+-- instant.
+ring :: Int -> Int -> Program
+ring loops n = driven 1 defs [loops + 3] [ [(0, k)] | k <- [1 .. n] ]
+  where
+    passed = If (Eq Arg2 (Lit 0))
+        (If (Eq Arg (Lit 1)) (Lit 11) (Lit (-999)))
+        (If (Eq Arg2 (Add Arg (Lit 9))) (Add Arg (Lit 10)) (Lit (-999)))
+    defs = [SInput 0] ++ replicate loops (CLoop TInt)
+        ++ [ SSnapshot passed (N 0) (N loops), SFilter (Not (Eq Arg (Lit (-999)))) (N (loops + 1))
+           , CHold (Lit 1) (N (loops + 2)), Close 1 (N (loops + 3)) ]
+        ++ concat [ [CMapCell Arg (N (j - 1)), Close j (N (loops + 1 + 2 * j))] | j <- [2 .. loops] ]
+
 interpreterLoops :: Test
 interpreterLoops = test [
     "capped counter: filter inside a cell loop, by fixed point" ~:
@@ -1027,6 +1047,31 @@ interpreterLoops = test [
             counted = cellOf 0 [([1],1),([2],2),([3],3)]
         answers program [counted, counted]
         assertEqual "knot" (interpret FixedPoint program) (interpret Knot program),
+    "a loop whose one step moves an instant later every round converges (the wave)" ~:
+        -- 252 rounds over 250 ticks, while each state holds two loop times.
+        -- Rounds allowed by the size of the largest state ran out at 204;
+        -- every loop time the states have held counts.
+        answers (ring 1 250) [cellOf 1 []],
+    "ten loops that pass the step along within each instant converge (the ring)" ~:
+        -- A round per loop at each instant: 261 rounds over 25 ticks, where
+        -- the largest state allowed 240.
+        answers (ring 10 25) [cellOf 1 []],
+    "a body's loop that chains through child instants before the body's instant converges" ~:
+        -- The body runs at [2], and its stream loop counts up from each event
+        -- of input 0 in child instants, to 29: from 0 at [1], before the body
+        -- existed, which the switch never shows, and from 25 at [3]. The
+        -- count at [1] takes 30 rounds. A test that the earliest change moves
+        -- later, taking a body run's changes at its instant at the earliest,
+        -- would see those rounds stand still at [2] and answer ERR.
+        answers (driven 2
+            [ SInput 0, SInput 1
+            , SConstruct (Body
+                [ SLoop TInt, SDefer (Local 0), SMap (Add Arg (Lit 1)) (Local 1), SFilter (Lt Arg (Lit 30)) (Local 2)
+                , SOrElse (N 0) (Local 3), Close 0 (Local 4) ]
+                (RNode (Local 4))) (N 1)
+            , SNever TInt, CHoldStream (N 3) (N 2), SSwitch (N 4) ]
+            [5] [[(0, 0)], [(1, 0)], [(0, 25)]])
+            [streamOf [([3],25),([3,0],26),([3,0,0],27),([3,0,0,0],28),([3,0,0,0,0],29)]],
     "a running sum over split's children chains through 201 child instants" ~:
         answers (Program FromFirstTransaction [Input TList Nothing]
             [SInput 0, SSplit (N 0), CLoop TInt, SSnapshot (Add Arg2 Arg) (N 1) (N 2), CHold (Lit 0) (N 3), Close 2 (N 4)]
@@ -1060,12 +1105,13 @@ interpreterLoops = test [
     "a same-instant cycle that counts up at one instant answers ERR" ~: do
         -- s = the input merged (+) with (s held, its steps, plus one): at
         -- [1], x = 0 + (x + 1). The text diverges on it, and the engine must
-        -- refuse it (finding F3). It stays small, so the rounds run out.
+        -- refuse it (finding F3). Every state holds the one loop time, its
+        -- event at [1], so the rounds run out.
         line <- answer (show (driven 1
             [SInput 0, SLoop TInt, CHold (Lit 0) (N 1), SSteps (N 2), SMap (Add Arg (Lit 1)) (N 3), SMerge (Add Arg Arg2) (N 0) (N 4), Close 1 (N 5)]
             [5] [[(0, 0)]]))
         assertEqual "answer"
-            ("ERR the loops did not converge in " ++ show (roundsAllowed 2) ++ " rounds; still changing: node 1 at [1]")
+            ("ERR the loops did not converge in " ++ show (roundsAllowed 1) ++ " rounds; still changing: node 1 at [1]")
             line,
     "a same-instant cycle in a body answers ERR, naming the body run" ~: do
         -- The same cycle in a body run at [1], whose result nothing reads:
@@ -1077,12 +1123,12 @@ interpreterLoops = test [
                 (RValue (Lit 0))) (N 0) ]
             [1] [[(0, 0)]]))
         assertEqual "answer"
-            ("ERR the loops did not converge in " ++ show (roundsAllowed 3) ++ " rounds; still changing: node 1, body at [1], node 0 at [1]")
+            ("ERR the loops did not converge in " ++ show (roundsAllowed 1) ++ " rounds; still changing: node 1, body at [1], node 0 at [1]")
             line,
     "a loop through defer with no filter grows without end, until the time limit" ~: do
-        -- Each round adds a child instant, [1,0], [1,0,0], and so on, and the
-        -- rounds allowed grow with it (finding F22): only the process's time
-        -- limit ends it.
+        -- Each round adds a child instant, [1,0], [1,0,0], and so on, a loop
+        -- time no state held before, and the rounds allowed grow with it
+        -- (finding F22): only the process's time limit ends it.
         result <- timeout 1000000 (answer (show (driven 1
             [SInput 0, SLoop TInt, SDefer (N 1), SMap (Add Arg (Lit 1)) (N 2), SOrElse (N 0) (N 3), Close 1 (N 4)]
             [4] [[(0, 0)]])))
