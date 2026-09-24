@@ -37,7 +37,10 @@
 //! quiet inner, two switches that reverse a dependency in one instant
 //! (finding F46), switches at child instants, nested switches, and a switch
 //! over States. Each asserts the oracle's answer, times included, as well
-//! as the engine's agreement with it.
+//! as the engine's agreement with it. One fixed program pins where the
+//! engine and the text differ: a split built at a child instant, which the
+//! text's `Split`, with no creation time, lets split its input's event from
+//! the instant before.
 //!
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
 //! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
@@ -2281,6 +2284,111 @@ fn a_switch_cell_over_states_steps_as_a_state() {
             ),
         ]
     );
+}
+
+// ----- fixed programs: constructs -----
+
+/// A split built at a child instant splits nothing its input carried
+/// before the split existed; the text's `Split`, which has no creation
+/// time, does. A construct fed by a defer of x runs its closure at [1, 0],
+/// and the body splits x, which fired at [1] with 1. In the text, the
+/// children of that event are at [1, 0], [1, 1] and [1, 2], at and after
+/// the split's creation, and an accumulator built with it takes all three:
+/// 9, 20, 32. The engine's split exists from [1, 0] and takes nothing of
+/// [1], as in Java's Sodium, where a stream forgets its firings in the
+/// transaction's `last` actions, which `Transaction.close` runs before the
+/// child transactions of its `post` queue; the accumulator stays at -1. A
+/// defer is a split of one: in the text, a hold built at [1, 0] over a
+/// defer built there takes x's event of [1] at [1, 0]. The text's `Execute`
+/// and `SwitchS` have no creation time either, but they keep an event's
+/// time, so what they carry from before a node's creation is before
+/// anything built with it can observe (finding F44); a split moves it to a
+/// later time, where it is observable. So the answers differ, and each is
+/// pinned here: GHC's, the text's, and the engine's in both modes and every
+/// run. The generator builds no split or defer in a body whose construct
+/// may run at a child instant.
+#[test]
+fn a_split_built_at_a_child_instant_splits_nothing_from_before_it_unlike_the_text() {
+    let Some(oracle) = oracle() else { return };
+    let built = |definitions: Vec<Definition>, emitted: usize| {
+        program(
+            integers(1),
+            vec![
+                Definition::Input(0),
+                Share(TopLevel(0)),
+                Definition::Defer(TopLevel(1)),
+                Construct {
+                    body: body(definitions, BodyResult::Node(Reference::Local(emitted))),
+                    source: TopLevel(2),
+                },
+                InputCell {
+                    input: 0,
+                    initial: Literal(0),
+                },
+                HoldCell {
+                    initial: TopLevel(4),
+                    source: TopLevel(3),
+                },
+                SwitchCell(TopLevel(5)),
+            ],
+            vec![6],
+            &[&[(0, 1)]],
+        )
+    };
+    let split = built(
+        vec![
+            MapList {
+                length: Literal(3),
+                element: Argument * Literal(10) + SecondArgument,
+                source: TopLevel(1),
+            },
+            Definition::Split(Reference::Local(0)),
+            Accumulate {
+                initial: Literal(-1),
+                function: SecondArgument + Argument,
+                source: Reference::Local(1),
+            },
+        ],
+        2,
+    );
+    let defer = built(
+        vec![
+            Definition::Defer(TopLevel(1)),
+            Hold {
+                initial: Literal(5),
+                source: Reference::Local(0),
+            },
+        ],
+        1,
+    );
+    // The switch follows the input cell at [1], and moves at [1, 0] to what
+    // the body built.
+    let text = |program: &Program| {
+        expected(program, &oracle.answer(program).unwrap()).unwrap_or_else(|e| panic!("{e}"))
+    };
+    assert_eq!(
+        text(&split),
+        [timed_cell(
+            0,
+            1,
+            &[(&[1], 1), (&[1, 0], 9), (&[1, 1], 20), (&[1, 2], 32)]
+        )]
+    );
+    assert_eq!(text(&defer), [timed_cell(0, 1, &[(&[1], 1), (&[1, 0], 1)])]);
+    let engine = [
+        (&split, timed_cell(0, 1, &[(&[1], 1), (&[1, 0], -1)])),
+        (&defer, timed_cell(0, 1, &[(&[1], 1), (&[1, 0], 5)])),
+    ];
+    for (program, created) in engine {
+        for mode in ENGINES {
+            for options in runs(0) {
+                let run = (mode.run)(program, options).unwrap();
+                if let Some(table) = compare(program, std::slice::from_ref(&created), &run) {
+                    panic!("{} mode, {options}:\n{table}", mode.name);
+                }
+            }
+        }
+    }
 }
 
 // ----- the builder and the generator alone -----
