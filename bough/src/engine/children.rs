@@ -98,8 +98,10 @@ impl<M: Mode> Build<M> {
         loop {
             // A fresh serial before the emits: an element is an event of
             // the child instant. When no capture has one left, the serial
-            // goes unused.
+            // goes unused. A split's iterator is graph code, so the guard
+            // is armed around it; `finish` disarms it after the last level.
             self.begin_instant();
+            self.edge.arm();
             let depth = parent + 1;
             self.s.depth = depth;
             if self.s.levels.len() <= depth {

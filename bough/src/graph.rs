@@ -1083,9 +1083,20 @@ impl<M: Mode> Drop for Anchor<M> {
 /// graph.remote().send(shared_in, Rc::new(1)); // error: Rc is not Send
 /// ```
 ///
-/// A remote send from the driver thread while a transaction runs is an
-/// error, `InsideTransaction`: I/O from inside graph code. The check needs
-/// a thread id and exists under `std`.
+/// A remote send from graph code is an error in both builds,
+/// `InsideTransaction`: I/O from inside FRP logic, which a closure can do
+/// because a remote is `Send + Clone + 'static`. The guard is a thread
+/// token the driver stores in the inbox while its graph code runs:
+/// evaluation and commit, `accumulate_mut`'s function, a `construct`
+/// closure, a split's iterator, in every child instant too. It is cleared
+/// before the listeners run, so a listener's remote send queues a later
+/// transaction, the sanctioned way for I/O to feed back; so does the
+/// closure of a transaction, which is I/O code, and a send from any other
+/// thread. It needs a thread id and exists under `std`; on bare metal it
+/// is documented and unchecked (RFD 7). It knows its own graph only: graph
+/// code sending through another graph's remote queues there. A panic that
+/// escapes graph code leaves the token behind, so until an entry finds the
+/// poison, a remote send from that thread reports `InsideTransaction`.
 ///
 /// `Remote` holds an `Arc` and its inbox a lock, so it exists where the
 /// target has pointer atomics and there is a lock: under `std`, or with the
@@ -1136,6 +1147,9 @@ impl Remote {
         if input.token.graph != self.inbox.graph {
             return Err(RemoteSendError::ForeignGraph);
         }
+        if self.inbox.inside() {
+            return Err(RemoteSendError::InsideTransaction);
+        }
         self.inbox
             .push(Box::new(move |tx: &mut RemoteTransaction<'_>| {
                 tx.send(input, value)
@@ -1171,6 +1185,9 @@ impl Remote {
     {
         if self.inbox.is_poisoned() {
             return Err(RemoteTransactionError::Poisoned);
+        }
+        if self.inbox.inside() {
+            return Err(RemoteTransactionError::InsideTransaction);
         }
         self.inbox
             .push(Box::new(f))

@@ -30,6 +30,8 @@ use alloc::sync::Arc;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use alloc::vec::Vec;
 use core::any::Any;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use core::sync::atomic::AtomicUsize;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -142,6 +144,23 @@ pub(crate) struct Edge {
 }
 
 impl Edge {
+    /// Graph code starts running on this thread: evaluation, commit, a
+    /// construct closure, a split's iterator. A remote send from this
+    /// thread is refused until [`disarm`](Edge::disarm) (RFD 6).
+    #[inline]
+    pub(crate) fn arm(&self) {
+        #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+        self.inbox.running.store(thread_token(), Ordering::Relaxed);
+    }
+
+    /// Graph code has stopped: before listeners run, and when a
+    /// transaction ends.
+    #[inline]
+    pub(crate) fn disarm(&self) {
+        #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+        self.inbox.running.store(0, Ordering::Relaxed);
+    }
+
     pub(crate) fn new(graph: u32) -> Self {
         let _ = graph;
         Edge {
@@ -196,7 +215,24 @@ pub(crate) struct Inbox {
     /// The graph's poison, mirrored by the first entry that finds it, so
     /// that remote sends fail from then on.
     poisoned: AtomicBool,
+    /// The guard: the token of the thread running this graph's code, or 0.
+    /// Only that thread can find its own token here, so a relaxed load
+    /// suffices: it reads its own store.
+    #[cfg(feature = "std")]
+    running: AtomicUsize,
     state: Lock<Queue>,
+}
+
+/// A number no other live thread has: the address of a thread-local byte.
+/// Never 0. A thread being torn down has none, and runs no graph code.
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+fn thread_token() -> usize {
+    std::thread_local! {
+        static TOKEN: u8 = const { 0 };
+    }
+    TOKEN
+        .try_with(|token| core::ptr::from_ref(token).addr())
+        .unwrap_or(0)
 }
 
 #[cfg(all(
@@ -221,6 +257,8 @@ impl Inbox {
         Inbox {
             graph,
             poisoned: AtomicBool::new(false),
+            #[cfg(feature = "std")]
+            running: AtomicUsize::new(0),
             state: Lock::new(Queue {
                 units: VecDeque::new(),
                 waker: None,
@@ -266,11 +304,26 @@ impl Inbox {
     /// The graph is gone: refuses every later push, and drops what is
     /// queued and the waker outside the lock.
     fn close(&self) {
+        #[cfg(feature = "std")]
+        self.running.store(0, Ordering::Relaxed);
         let (units, waker) = self.state.with(|q| {
             q.closed = true;
             (core::mem::take(&mut q.units), q.waker.take())
         });
         drop((units, waker));
+    }
+
+    /// Whether the calling thread is running this graph's code: a remote
+    /// send from there is I/O inside a transaction. Unchecked without
+    /// `std`, which has no thread id (RFD 7).
+    pub(crate) fn inside(&self) -> bool {
+        #[cfg(feature = "std")]
+        {
+            let token = thread_token();
+            token != 0 && self.running.load(Ordering::Relaxed) == token
+        }
+        #[cfg(not(feature = "std"))]
+        false
     }
 
     /// Mirrors the graph's poison.

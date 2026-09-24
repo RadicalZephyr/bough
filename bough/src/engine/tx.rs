@@ -161,17 +161,22 @@ impl<M: Mode> Build<M> {
         if self.s.levels.first().is_some_and(|l| !l.is_empty()) {
             self.children();
         }
+        self.edge.disarm();
         self.in_tx = false;
     }
 
     /// The phases of one instant, a transaction or a child transaction,
-    /// after its started nodes fired.
+    /// after its started nodes fired. The edge's guard is armed while graph
+    /// code runs, evaluation and commit, and disarmed before the listeners
+    /// (RFD 6); the sends before the instant are I/O code.
     pub(super) fn instant(&mut self) {
         count!(self.s, transactions);
+        self.edge.arm();
         self.mark();
         self.evaluate();
         self.new_nodes();
         self.commit();
+        self.edge.disarm();
         self.dispatch();
     }
 
