@@ -128,6 +128,12 @@
 //! Measured again, one build after the other on one machine, they take the
 //! release build of the test binary from 67 s to 80 s.
 //!
+//! Stage 5 adds no materializer that fuses a chain: a pick gives the chain
+//! before it a `node`, and the pick, the holds and constants of tokens and
+//! the switches are compiled once per node type and token type. One build
+//! after the other on one machine, the release build of the test binary
+//! took 56.6 s twice before stage 5, and 57.1 s and 57.5 s after.
+//!
 //! # Linearity
 //!
 //! A `Stream` has one consumer. [`check`] counts the consumers of every
