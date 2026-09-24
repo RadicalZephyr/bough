@@ -3,7 +3,11 @@
 //!
 //! Every program runs in both modes, `Local` and `Threaded`: plainly, under
 //! three shuffle seeds, and with the sends of each transaction permuted
-//! under two seeds, a coalescing input's own sends keeping their order.
+//! under two seeds, a coalescing input's own sends keeping their order; and
+//! once more collecting as every transaction opens, the collector's stress
+//! setting, so that the memory model is held to the oracle too: a node the
+//! program still needs that no root reaches would be collected, and its
+//! next use would panic on a stale token.
 //! Every run must match the oracle: per observed node and per external
 //! transaction, the ordered list of events or steps, child transactions
 //! included, whose child indices the engine does not show and the
@@ -86,31 +90,31 @@ const ENGINES: [Engine; 2] = [
     },
 ];
 
-/// The runs of every program: plain, three shuffle seeds, and two
-/// permutations of the sends, one of them under a shuffle too.
+/// The runs of every program: plain, three shuffle seeds, two permutations
+/// of the sends, one of them under a shuffle too, and one that collects as
+/// every transaction opens.
 fn runs(seed: u64) -> Vec<RunOptions> {
     let mix = |k: u64| seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(k);
+    let shuffled = |k: u64| RunOptions {
+        shuffle_seed: Some(mix(k)),
+        ..RunOptions::default()
+    };
     vec![
         RunOptions::default(),
+        shuffled(1),
+        shuffled(2),
+        shuffled(3),
         RunOptions {
-            shuffle_seed: Some(mix(1)),
-            permute_sends: None,
-        },
-        RunOptions {
-            shuffle_seed: Some(mix(2)),
-            permute_sends: None,
-        },
-        RunOptions {
-            shuffle_seed: Some(mix(3)),
-            permute_sends: None,
-        },
-        RunOptions {
-            shuffle_seed: None,
             permute_sends: Some(mix(4)),
+            ..RunOptions::default()
         },
         RunOptions {
-            shuffle_seed: Some(mix(5)),
             permute_sends: Some(mix(6)),
+            ..shuffled(5)
+        },
+        RunOptions {
+            collect_every_transaction: true,
+            ..RunOptions::default()
         },
     ]
 }
@@ -436,7 +440,7 @@ fn random_programs(shard: u32) {
     match result {
         Ok(()) => eprintln!(
             "shard {shard}: {cases} random programs agree with the oracle, each in two modes \
-             and six runs, in {:.1?} (PROPTEST_RNG_SEED={base}); {}",
+             and seven runs, in {:.1?} (PROPTEST_RNG_SEED={base}); {}",
             started.elapsed(),
             tally.borrow()
         ),
@@ -607,7 +611,7 @@ fn same_instant_cycles_through_a_switch_are_refused_or_poison_the_graph() {
         let mut seen = [false; 3];
         let shuffled = RunOptions {
             shuffle_seed: Some(base ^ which as u64),
-            permute_sends: None,
+            ..RunOptions::default()
         };
         for options in [RunOptions::default(), shuffled] {
             for (name, outcome) in [
@@ -2908,6 +2912,18 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
     );
     let threaded = bough_oracle::run::<Threaded>(&switches, RunOptions::default()).unwrap();
     assert_eq!(threaded.observations, run.observations);
+    // A candidate no selection has reached yet lives only by the builder's
+    // depends declarations; collecting at every transaction shows it.
+    let collecting = RunOptions {
+        collect_every_transaction: true,
+        ..RunOptions::default()
+    };
+    for collected in [
+        bough_oracle::run::<Local>(&switches, collecting).unwrap(),
+        bough_oracle::run::<Threaded>(&switches, collecting).unwrap(),
+    ] {
+        assert_eq!(collected.observations, run.observations);
+    }
 }
 
 /// What the engine cannot switch among without `construct`, or the oracle

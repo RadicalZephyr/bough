@@ -2781,6 +2781,12 @@ pub struct RunOptions {
     /// sends keep their order, so a coalescing input folds the same values
     /// in the same order. `None` sends in the schedule's order.
     pub permute_sends: Option<u64>,
+    /// `Graph::set_collect_after_every_transaction`, set before the first
+    /// transaction: collection runs as every transaction opens, not when
+    /// the automatic policy chooses, so that a node the program still
+    /// needs that no root reaches is collected at once, and its next use
+    /// panics on a stale token.
+    pub collect_every_transaction: bool,
 }
 
 impl fmt::Display for RunOptions {
@@ -2790,9 +2796,13 @@ impl fmt::Display for RunOptions {
             Some(seed) => write!(formatter, "shuffle seed {seed}")?,
         }
         match self.permute_sends {
-            None => formatter.write_str(", sends as scheduled"),
-            Some(seed) => write!(formatter, ", sends permuted with seed {seed}"),
+            None => formatter.write_str(", sends as scheduled")?,
+            Some(seed) => write!(formatter, ", sends permuted with seed {seed}")?,
         }
+        if self.collect_every_transaction {
+            formatter.write_str(", collecting as every transaction opens")?;
+        }
+        Ok(())
     }
 }
 
@@ -3199,6 +3209,7 @@ pub fn refusal<M: EngineMode>(
         Err(payload) => return Ok(Refusal::Build(panic_message(payload))),
     };
     graph.set_shuffle_seed(options.shuffle_seed);
+    graph.set_collect_after_every_transaction(options.collect_every_transaction);
     for (k, sends) in program.schedule.iter().enumerate() {
         let order = engine_sends(
             sends,
@@ -3236,6 +3247,7 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
     let (mut graph, edge) = M::build(|b| build_program(b, program, &types));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
+    graph.set_collect_after_every_transaction(options.collect_every_transaction);
     let log = Log::default();
     let mut listeners = Vec::new();
     let mut recorders: Vec<Recorder> = edge
