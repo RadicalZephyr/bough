@@ -1,8 +1,8 @@
 //! `lift` over a tuple of cells (RFD 4).
 
 use crate::Build;
+use crate::cell::{CellKind, CellRef, read_through};
 use crate::mode::{Accepts, Mode};
-use crate::token::Cell;
 
 mod sealed {
     pub trait Sealed {}
@@ -16,35 +16,88 @@ mod sealed {
 /// functions rather than lifting three cells, and an intermediate cell would
 /// clone two inputs on every read. Sodium's `apply` is
 /// `(cf, ca).lift(b, |f, a| f(a))` with the cell holding `Fn(&A) -> B`.
+///
+/// ```
+/// use bough::{Cell, Graph, Lift, Source};
+///
+/// let (mut graph, (price_in, quantity_in, total)) = Graph::build(|b| {
+///     let (price, price_in) = b.input_cell(3u32);
+///     let (quantity, quantity_in) = b.input_cell(2u32);
+///     let total: Cell<u32> = (price, quantity).lift(b, |p, q| p * q);
+///     (price_in, quantity_in, total)
+/// });
+/// assert_eq!(*graph.sample(total), 6);
+/// graph.transaction(|tx| {
+///     tx.send(price_in, 4); // two inputs step in one instant:
+///     tx.send(quantity_in, 5); // one step of the lifted cell
+/// });
+/// assert_eq!(*graph.sample(total), 20);
+/// ```
+///
+/// Each element is a [`Cell`](crate::Cell) or a [`State`](crate::State).
+/// The lifted cell is a `Cell` when every input is one, and a `State` when
+/// any input is a `State`: its value after an instant in which that state
+/// stepped does not exist until commit, so it has no stream view.
+///
+/// ```compile_fail,E0599
+/// use bough::{Graph, Lift, Source};
+///
+/// let (_graph, _) = Graph::build(|b| {
+///     let (names, _names_in) = b.input::<String>();
+///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+///     let (extra, _extra_in) = b.input_cell(1usize);
+///     let total = (members, extra).lift(b, |m, e| m.len() + e);
+///     let _totals = total.steps(b); // error: no method named `steps` found for struct `State`
+/// });
+/// ```
 pub trait Lift<F, R>: sealed::Sealed + Sized {
+    /// The lifted cell: `Cell<R>` when every input is a `Cell`, `State<R>`
+    /// when any input is a `State`.
+    type Output: CellRef<Value = R>;
+
     /// A read-through cell of these cells: `f` over their values, computed on
     /// read and memoized until one of them steps. Two inputs stepping in one
     /// instant are one step of the result.
-    fn lift<M>(self, build: &mut Build<M>, f: F) -> Cell<R>
+    fn lift<M>(self, build: &mut Build<M>, f: F) -> Self::Output
     where
         M: Mode + Accepts<F> + Accepts<R>;
 }
 
-macro_rules! lift_tuple {
-    ($($cell:ident),+) => {
-        impl<$($cell: 'static,)+> sealed::Sealed for ($(Cell<$cell>,)+) {}
+/// The kind of a lifted cell: the join of its inputs' kinds, a `State` if
+/// any input is one.
+macro_rules! join {
+    ($cell:ident) => {
+        <$cell as CellRef>::Kind
+    };
+    ($cell:ident, $($rest:ident),+) => {
+        <<$cell as CellRef>::Kind as CellKind>::Join<join!($($rest),+)>
+    };
+}
 
-        impl<$($cell: 'static,)+ R: 'static, F> Lift<F, R> for ($(Cell<$cell>,)+)
+macro_rules! lift_tuple {
+    ($($cell:ident $i:tt),+) => {
+        impl<$($cell: CellRef,)+> sealed::Sealed for ($($cell,)+) {}
+
+        impl<$($cell: CellRef,)+ R: 'static, F> Lift<F, R> for ($($cell,)+)
         where
-            F: Fn($(&$cell,)+) -> R + 'static,
+            F: Fn($(&$cell::Value,)+) -> R + 'static,
         {
-            fn lift<M>(self, build: &mut Build<M>, f: F) -> Cell<R>
+            type Output = <join!($($cell),+) as CellKind>::Ref<R>;
+
+            fn lift<M>(self, build: &mut Build<M>, f: F) -> Self::Output
             where
                 M: Mode + Accepts<F> + Accepts<R>,
             {
-                todo!()
+                let inputs = [$(build.check(self.$i.token()),)+];
+                let token = read_through::<M, ($($cell::Value,)+), R, F>(build, &inputs, f);
+                <join!($($cell),+) as CellKind>::wrap::<R>(token)
             }
         }
     };
 }
 
-lift_tuple!(A, B);
-lift_tuple!(A, B, C);
-lift_tuple!(A, B, C, D);
-lift_tuple!(A, B, C, D, E);
-lift_tuple!(A, B, C, D, E, G);
+lift_tuple!(A 0, B 1);
+lift_tuple!(A 0, B 1, C 2);
+lift_tuple!(A 0, B 1, C 2, D 3);
+lift_tuple!(A 0, B 1, C 2, D 3, E 4);
+lift_tuple!(A 0, B 1, C 2, D 3, E 4, G 5);

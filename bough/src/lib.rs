@@ -17,8 +17,8 @@
 //! that materializes them; the materializers `hold`, `node`, `share`,
 //! `merge` and `or_else`; and on [`Graph`] transactions, listeners and
 //! `sample`. Stage 2 adds the accumulators `accumulate`, `accumulate_mut`
-//! and `scan`, and read-through cells with `map_cell`. Every other
-//! operation still has a `todo!()` body. The
+//! and `scan`, and read-through cells with `map_cell` and `lift`. Every
+//! other operation still has a `todo!()` body. The
 //! examples in the documentation that call only working operations run,
 //! the rest compile, and the guarantees the RFDs make are fixed by
 //! `compile_fail` doc tests.

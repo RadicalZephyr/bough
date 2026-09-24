@@ -46,14 +46,63 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 pub trait CellRef: TokenRef + Copy + 'static {
     /// The value the cell holds.
     type Value: 'static;
+
+    /// `Cell` or `State` as a type, which says whether a stream view of
+    /// the cell can exist. `lift` joins its inputs' kinds.
+    #[doc(hidden)]
+    type Kind: CellKind;
 }
 
 impl<A: 'static> CellRef for Cell<A> {
     type Value = A;
+    type Kind = Steps;
 }
 
 impl<A: 'static> CellRef for State<A> {
     type Value = A;
+    type Kind = NoSteps;
+}
+
+/// The two kinds of cell token as types, and how a read-through cell over
+/// several cells combines them. Hidden: [`CellRef`] names it, and
+/// `Lift::Output` is computed from it.
+#[doc(hidden)]
+pub trait CellKind: 'static {
+    /// The token of a cell of this kind holding `A`.
+    type Ref<A: 'static>: CellRef<Value = A>;
+
+    /// The kind of a read-through cell over a cell of this kind and cells
+    /// of kind `K`: a `State` if any input is one.
+    type Join<K: CellKind>: CellKind;
+
+    /// The token of this kind naming a node.
+    fn wrap<A: 'static>(token: Token) -> Self::Ref<A>;
+}
+
+/// The kind of a [`Cell`]: its value after the instant exists during the
+/// instant, so it has stream views.
+#[doc(hidden)]
+pub struct Steps;
+
+/// The kind of a [`State`]: its new value exists from commit, so it has no
+/// stream view.
+#[doc(hidden)]
+pub struct NoSteps;
+
+impl CellKind for Steps {
+    type Ref<A: 'static> = Cell<A>;
+    type Join<K: CellKind> = K;
+    fn wrap<A: 'static>(token: Token) -> Cell<A> {
+        Cell::from_token(token)
+    }
+}
+
+impl CellKind for NoSteps {
+    type Ref<A: 'static> = State<A>;
+    type Join<K: CellKind> = NoSteps;
+    fn wrap<A: 'static>(token: Token) -> State<A> {
+        State::from_token(token)
+    }
 }
 
 /// A read-through cell over the cells at `inputs`: `f` of their values,
