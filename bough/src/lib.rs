@@ -109,6 +109,10 @@ mod source;
 mod token;
 mod trace;
 
+/// Derives [`Trace`](trait@Trace) for a struct or an enum, with
+/// `#[trace(skip)]` for a field that cannot hold tokens.
+#[cfg(feature = "derive")]
+pub use bough_derive::Trace;
 pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
