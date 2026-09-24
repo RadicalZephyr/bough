@@ -1,12 +1,23 @@
 //! RFD 3's rule, a claim under test from stage 1: a graph that is not
 //! growing never allocates per transaction. A counting global allocator,
-//! alone in its test binary so no other test allocates concurrently. The
-//! graph covers a share, a fused chain, a coalescing input, a merge, an
-//! or_else, snapshots, a gate, a hold, a stream listener and cell
+//! alone in its test binary so no other test allocates concurrently. It
+//! counts the allocations of the thread that drives the graph, where every
+//! transaction runs: the test harness's own thread allocates now and then
+//! while a test runs (four blocks of 96 bytes in about one release run in
+//! 150 to 400, before stage 3 as after), which a process-wide count would
+//! blame on the engine.
+//!
+//! The graph covers a share, a fused chain, a coalescing input, a merge,
+//! an or_else, snapshots, a gate, a hold, a stream listener and cell
 //! listeners; and from stage 2 a map_cell, lifts, a steps view of a lift
 //! over the map_cell, a steps_with_current, an accumulator, an in-place
 //! accumulator with a fixed-size state read by a gate, a snapshot and a
-//! lift, and a scan. Later stages widen it.
+//! lift, and a scan; and from stage 3 loops: a counter through a snapshot
+//! of its forward with a steps view and a cell listener on the forward,
+//! an accumulator reading itself through a read-through cell over its
+//! forward, two loops reading each other lifted over their forwards with a
+//! steps view, a stream loop through a hold, and a state loop with a
+//! fixed-size state. Later stages widen it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
@@ -19,11 +30,20 @@ struct Counting;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    /// Set on the thread that drives the graph. A const-initialized flag
+    /// with no destructor: reading it allocates nothing.
+    static DRIVER: StdCell<bool> = const { StdCell::new(false) };
+}
+
 // Test scaffolding: `GlobalAlloc` is an unsafe trait. The crate under test
-// forbids `unsafe`.
+// forbids `unsafe`. The default `realloc` allocates through `alloc`, so a
+// buffer that grows is counted.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        if DRIVER.try_with(StdCell::get).unwrap_or(false) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -42,7 +62,8 @@ fn tally() -> (Rc<StdCell<u64>>, Rc<StdCell<u64>>) {
 
 #[test]
 fn steady_state_transactions_do_not_allocate() {
-    let (mut graph, ((numbers_in, bumps_in, open_in), (total, both, merged), stage2)) =
+    DRIVER.with(|driver| driver.set(true));
+    let (mut graph, ((numbers_in, bumps_in, open_in), (total, both, merged), later)) =
         Graph::build(|b| {
             let (numbers, numbers_in) = b.input::<u64>();
             let numbers = numbers.share(b);
@@ -90,13 +111,55 @@ fn steady_state_transactions_do_not_allocate() {
                 (recent, recent_sum),
                 (seen, running, product),
             );
+
+            // Stage 3: loops.
+            let (counted, counted_loop) = b.cell_loop::<u64>();
+            let counted_view = counted.steps(b);
+            let next = numbers.snapshot(counted, |_, n| n + 1).hold(b, 0u64);
+            counted_loop.close(b, next);
+            let (acc_fwd, acc_loop) = b.cell_loop::<u64>();
+            let halved = acc_fwd.map_cell(b, |s| s / 2);
+            let acc = numbers
+                .snapshot(halved, |x, h| x + h)
+                .accumulate(b, 1u64, |x, s| (s + x) % 1_000_003);
+            acc_loop.close(b, acc);
+            let (x_fwd, x_loop) = b.cell_loop::<u64>();
+            let (y_fwd, y_loop) = b.cell_loop::<u64>();
+            let x = numbers.snapshot(y_fwd, |t, y| (t + y) % 1000).hold(b, 1u64);
+            let y = merged
+                .snapshot(x_fwd, |m, x| (m + x * 2) % 1000)
+                .hold(b, 2u64);
+            x_loop.close(b, x);
+            y_loop.close(b, y);
+            let joined = (x_fwd, y_fwd, total).lift(b, |x, y, t| x * 1000 + y + t);
+            let joined_view = joined.steps(b);
+            let (sums, sums_loop) = b.stream_loop::<u64>();
+            let last = sums.hold(b, 0u64);
+            sums_loop.close(b, numbers.snapshot(last, |x, l| x.wrapping_add(*l)));
+            let (window, window_loop) = b.state_loop::<[u64; 4]>();
+            let windowed = numbers.snapshot(window, |x, w| x + w[3]).accumulate_mut(
+                b,
+                [0u64; 4],
+                |x, w: &mut [u64; 4]| {
+                    w.rotate_left(1);
+                    w[3] = x % 1000;
+                },
+            );
+            window_loop.close(b, windowed);
+            let stage3 = (
+                (counted, counted_view, acc_fwd),
+                (joined, joined_view),
+                (last, window),
+            );
             (
                 (numbers_in, bumps_in, open_in),
                 (total, both, merged),
-                stage2,
+                (stage2, stage3),
             )
         });
+    let (stage2, stage3) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
+    let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
     let (heard, recorder) = tally();
     graph.listen_cell(both, move |v| recorder.set(*v)).keep();
     let (steps, count) = tally();
@@ -120,6 +183,19 @@ fn steady_state_transactions_do_not_allocate() {
     let (sums, on_sum) = tally();
     graph
         .listen_cell(recent_sum, move |s| on_sum.set(*s))
+        .keep();
+
+    let (counts, on_count) = tally();
+    graph.listen(counted_view, move |n| on_count.set(n)).keep();
+    let (counted_cell, on_counted) = tally();
+    graph
+        .listen_cell(counted, move |n| on_counted.set(*n))
+        .keep();
+    let (joins, on_join) = tally();
+    graph.listen(joined_view, move |j| on_join.set(j)).keep();
+    let (windows, on_window) = tally();
+    graph
+        .listen_steps(window, move |w| on_window.set(w[3]))
         .keep();
 
     let drive = |graph: &mut Graph, i: u64| {
@@ -171,4 +247,10 @@ fn steady_state_transactions_do_not_allocate() {
     assert_eq!(recents.get(), graph.sample(recent)[3]);
     assert_eq!(sums.get(), *graph.sample(recent_sum));
     assert!(*graph.sample(seen) > 0 && *graph.sample(running) > 0);
+    // The stage 3 listeners kept up with the loops.
+    assert_eq!(counts.get(), *graph.sample(counted));
+    assert_eq!(counted_cell.get(), *graph.sample(counted));
+    assert_eq!(joins.get(), *graph.sample(joined));
+    assert_eq!(windows.get(), graph.sample(window)[3]);
+    assert!(*graph.sample(acc_fwd) > 0 && *graph.sample(last) > 0);
 }

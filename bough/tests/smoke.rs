@@ -23,6 +23,11 @@ fn the_smoke_graph_runs_in_every_mode() {
     // Cells: 20 + 32 + 70 + 2 + 3 + 32 + 70 + 4 + 2 = 235; states: 2 + 4.
     // So 241.
     //
-    // Each mode gives 26 + 241, and the host has both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241));
+    // Stage 3. n = 1: ticks = 1, which its steps view carries into
+    // tick_steps; running = 1 + 0; entries = [10], one entry. n = 2:
+    // ticks = 2, tick_steps = 2; running = 2 + 1 = 3; entries = [10, 21],
+    // two entries. So 2 + 2 + 3 + 2 = 9.
+    //
+    // Each mode gives 26 + 241 + 9, and the host has both modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9));
 }

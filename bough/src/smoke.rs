@@ -15,7 +15,7 @@ macro_rules! smoke_graph {
     ($build:path) => {{
         let (
             mut graph,
-            ((n_in, words_in, level_in, digits_in), (total, words, out, merged), stage2),
+            ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later),
         ) = $build(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
@@ -67,12 +67,32 @@ macro_rules! smoke_graph {
                 (pair_steps, current, seen, gated),
                 (log, length, mixed),
             );
+
+            // Stage 3: a cell loop with a steps view of its forward, taken
+            // before close; a stream loop through a hold read by snapshot;
+            // and a state loop whose in-place accumulator reads its own
+            // forward, with a State over it.
+            let (ticks, ticks_loop) = b.cell_loop::<u32>();
+            let tick_steps = ticks.steps(b).hold(b, 0u32);
+            let next = n.snapshot(ticks, |_, t| t + 1).hold(b, 0u32);
+            ticks_loop.close(b, next);
+            let (sums, sums_loop) = b.stream_loop::<u32>();
+            let running = sums.hold(b, 0u32);
+            sums_loop.close(b, n.snapshot(running, |v, s| v + s));
+            let (entries, entries_loop) = b.state_loop::<Vec<u32>>();
+            let appended = n
+                .snapshot(entries, |v, e| v * 10 + e.len() as u32)
+                .accumulate_mut(b, Vec::new(), |e, l: &mut Vec<u32>| l.push(e));
+            entries_loop.close(b, appended);
+            let entry_count = entries.map_cell(b, |e| e.len() as u32);
+            let stage3 = (ticks, tick_steps, running, entry_count);
             (
                 (n_in, words_in, level_in, digits_in),
                 (total, words, out, merged),
-                stage2,
+                (stage2, stage3),
             )
         });
+        let (stage2, (ticks, tick_steps, running, entry_count)) = later;
         let (
             (scaled, pair, six, count, labels),
             (pair_steps, current, seen, gated),
@@ -115,7 +135,12 @@ macro_rules! smoke_graph {
         .map(|c| *graph.sample(*c))
         .sum::<u32>();
         let states = *graph.sample(length) + *graph.try_sample(mixed).unwrap_or(&0);
-        stage1 + cells + states
+        let loops = [ticks, tick_steps, running]
+            .iter()
+            .map(|c| *graph.sample(*c))
+            .sum::<u32>()
+            + *graph.sample(entry_count);
+        stage1 + cells + states + loops
     }};
 }
 

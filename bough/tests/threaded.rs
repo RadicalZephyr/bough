@@ -116,3 +116,48 @@ fn a_threaded_graph_runs_every_cell_operation_on_another_thread() {
     assert_eq!(*heard.lock().unwrap(), ["level 2", "level 5"]);
     assert_eq!(*sizes.lock().unwrap(), [1, 2]);
 }
+
+/// Every loop kind in a Threaded graph: a cell loop with a steps view of
+/// its forward, a stream loop through a hold, and a state loop. The stream
+/// loop's closer requires the mode to accept the event type, which u64
+/// satisfies. Built on one thread, driven and sampled on another.
+#[test]
+fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
+    let (mut graph, (ticks_in, (count, views, total, log))) = Graph::build_threaded(|b| {
+        let (ticks, ticks_in) = b.input::<u64>();
+        let ticks = ticks.share(b);
+        let (count, count_loop) = b.cell_loop::<u64>();
+        let views = count.steps(b).hold(b, 0u64);
+        let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u64);
+        count_loop.close(b, next);
+        let (sums, sums_loop) = b.stream_loop::<u64>();
+        let total = sums.hold(b, 0u64);
+        sums_loop.close(b, ticks.snapshot(total, |t, s| t + s));
+        let (log, log_loop) = b.state_loop::<Vec<u64>>();
+        let entries = ticks
+            .snapshot(log, |t, l| t * 10 + l.len() as u64)
+            .accumulate_mut(b, Vec::new(), |e, l: &mut Vec<u64>| l.push(e));
+        log_loop.close(b, entries);
+        (ticks_in, (count, views, total, log))
+    });
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let writer = heard.clone();
+    graph
+        .listen_cell(count, move |n| writer.lock().unwrap().push(*n))
+        .keep();
+    let driver = thread::spawn(move || {
+        for t in 1..=3 {
+            graph.send(ticks_in, t);
+        }
+        (
+            *graph.sample(count),
+            *graph.sample(views),
+            *graph.sample(total),
+            graph.sample(log).clone(),
+        )
+    });
+    let (count, views, total, log) = driver.join().unwrap();
+    assert_eq!((count, views, total), (3, 3, 6));
+    assert_eq!(log, [10, 21, 32]);
+    assert_eq!(*heard.lock().unwrap(), [0, 1, 2, 3]);
+}
