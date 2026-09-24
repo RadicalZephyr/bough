@@ -26,6 +26,10 @@ jobs:
   test:
     name: Test (${{ matrix.profile }})
     runs-on: ubuntu-latest
+    env:
+      # GHC does not run in CI (RFD 1), so the oracle's tests say they
+      # skipped instead of panicking with the install hint.
+      BOUGH_ORACLE: skip
     strategy:
       matrix:
         profile: [debug, release]
