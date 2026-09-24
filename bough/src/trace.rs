@@ -16,7 +16,7 @@ use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
 
-use crate::token::{Cell, Input, Shared, Stream, TokenRef};
+use crate::token::{Cell, Input, Shared, State, Stream, TokenRef};
 
 /// Visits the tokens a value holds.
 pub struct Tracer {
@@ -85,6 +85,11 @@ impl<A> Trace for Shared<A> {
     }
 }
 impl<A> Trace for Cell<A> {
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(self);
+    }
+}
+impl<A> Trace for State<A> {
     fn trace(&self, tracer: &mut Tracer) {
         tracer.visit(self);
     }

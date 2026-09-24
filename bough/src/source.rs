@@ -50,11 +50,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::Build;
+use crate::cell::CellRef;
 use crate::engine::nodes::cell::HoldNode;
 use crate::engine::nodes::stream::{ChainNode, MergeNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
-use crate::token::{Cell, Shared, Stream, Token};
+use crate::token::{Cell, Shared, State, Stream, Token};
 use crate::trace::Trace;
 
 pub(crate) mod sealed {
@@ -134,11 +135,11 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     }
 
     /// Combines each event with the value the cell had at the start of the
-    /// transaction.
-    fn snapshot<B, C, F>(self, cell: Cell<B>, f: F) -> Snapshot<Self, B, F>
+    /// transaction. The cell is a [`Cell`] or a [`State`].
+    fn snapshot<C, B, F>(self, cell: C, f: F) -> Snapshot<Self, C, F>
     where
-        B: 'static,
-        F: Fn(Self::Event, &B) -> C + 'static,
+        C: CellRef,
+        F: Fn(Self::Event, &C::Value) -> B + 'static,
     {
         Snapshot {
             source: self,
@@ -147,8 +148,12 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         }
     }
 
-    /// Keeps the events during which the cell is `true`.
-    fn gate(self, cell: Cell<bool>) -> Gate<Self> {
+    /// Keeps the events during which the cell is `true`. The cell is a
+    /// [`Cell`] or a [`State`].
+    fn gate<C>(self, cell: C) -> Gate<Self, C>
+    where
+        C: CellRef<Value = bool>,
+    {
         Gate { source: self, cell }
     }
 
@@ -199,21 +204,26 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     /// reader in the transaction has seen the previous state.
     ///
     /// Observationally the same as [`accumulate`](Source::accumulate), and a
-    /// `Vec` accumulator becomes a push.
-    fn accumulate_mut<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> Cell<S>
+    /// `Vec` accumulator becomes a push. The result is a [`State`], which
+    /// every cell reader accepts and which has no stream view, since the new
+    /// state does not exist until commit. The event waits for commit in the
+    /// node, so the mode must accept its type.
+    fn accumulate_mut<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> State<S>
     where
-        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F>,
+        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<Self::Event>,
         S: Trace + 'static,
         F: FnMut(Self::Event, &mut S) + 'static,
+        Self::Event: 'static,
     {
         todo!()
     }
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output
-    /// per event.
+    /// per event. The output goes in the node's slot, so the mode must
+    /// accept its type.
     fn scan<M, S, B, F>(self, build: &mut Build<M>, initial: S, f: F) -> Stream<B>
     where
-        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F>,
+        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<B>,
         S: Trace + 'static,
         B: 'static,
         F: Fn(Self::Event, &S) -> (B, S) + 'static,
@@ -522,49 +532,56 @@ impl<S: Source, B: Clone + 'static> Source for MapTo<S, B> {
     }
 }
 
-/// The adapter returned by [`Source::snapshot`].
-pub struct Snapshot<S, B, F> {
+/// The adapter returned by [`Source::snapshot`]. `C` is the type of the
+/// cell token it reads, a [`Cell`] or a [`State`].
+pub struct Snapshot<S, C, F> {
     source: S,
-    cell: Cell<B>,
+    cell: C,
     f: F,
 }
-impl<S, B, F> sealed::Sealed for Snapshot<S, B, F> {}
-impl<S: Source, B: 'static, C, F: Fn(S::Event, &B) -> C + 'static> Source for Snapshot<S, B, F> {
-    type Event = C;
+impl<S, C, F> sealed::Sealed for Snapshot<S, C, F> {}
+impl<S, C, B, F> Source for Snapshot<S, C, F>
+where
+    S: Source,
+    C: CellRef,
+    F: Fn(S::Event, &C::Value) -> B + 'static,
+{
+    type Event = B;
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
     fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        visit(self.cell.token);
+        visit(self.cell.token());
         self.source.read_cells(visit)
     }
-    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<C> {
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
         let a = self.source.pull(cx)?;
         // The value before the instant: a read, not a dependency.
-        Some((self.f)(a, cx.sample::<B>(self.cell.token.index)))
+        Some((self.f)(a, cx.sample::<C::Value>(self.cell.token().index)))
     }
 }
 
-/// The adapter returned by [`Source::gate`].
-pub struct Gate<S> {
+/// The adapter returned by [`Source::gate`]. `C` is the type of the cell
+/// token it reads, a [`Cell`] or a [`State`] of `bool`.
+pub struct Gate<S, C> {
     source: S,
-    cell: Cell<bool>,
+    cell: C,
 }
-impl<S> sealed::Sealed for Gate<S> {}
-impl<S: Source> Source for Gate<S> {
+impl<S, C> sealed::Sealed for Gate<S, C> {}
+impl<S: Source, C: CellRef<Value = bool>> Source for Gate<S, C> {
     type Event = S::Event;
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
     fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        visit(self.cell.token);
+        visit(self.cell.token());
         self.source.read_cells(visit)
     }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
         // The source is pulled whether or not the gate is open, so a `once`
         // inside it takes its first event even when the gate drops it.
         let a = self.source.pull(cx)?;
-        (*cx.sample::<bool>(self.cell.token.index)).then_some(a)
+        (*cx.sample::<bool>(self.cell.token().index)).then_some(a)
     }
 }
 

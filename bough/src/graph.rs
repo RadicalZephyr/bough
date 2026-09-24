@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::task::Waker;
 
 use crate::Build;
+use crate::cell::CellRef;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
 use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
@@ -18,7 +19,7 @@ use crate::error::{RemoteSendError, RemoteTransactionError};
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
 use crate::source::Node;
-use crate::token::{Cell, Input, Token, TokenRef};
+use crate::token::{Input, Token, TokenRef};
 use crate::trace::{Trace, Tracer};
 
 /// A built graph: the only place transactions run, and the only holder of
@@ -261,63 +262,65 @@ impl<M: Mode> Graph<M> {
 
     /// Listens to a cell: fires once now with the current value, then on
     /// every step, with the value by reference. The I/O form of
-    /// [`steps_with_current`](Cell::steps_with_current), Sodium's `value`.
+    /// [`steps_with_current`](crate::Cell::steps_with_current), Sodium's
+    /// `value`.
     ///
-    /// The call at registration runs outside any transaction, so a panic in
-    /// it leaves the graph usable. A step to an equal value is a step.
-    pub fn listen_cell<A, F>(&mut self, cell: Cell<A>, mut f: F) -> Listener<M>
+    /// The cell is a [`Cell`](crate::Cell) or a [`State`](crate::State):
+    /// the listener reads the committed value after commit, which an
+    /// in-place accumulator has then. The call at registration runs outside
+    /// any transaction, so a panic in it leaves the graph usable. A step to
+    /// an equal value is a step.
+    pub fn listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Listener<M>
     where
-        A: 'static,
-        F: FnMut(&A) + 'static,
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
         M: Accepts<F>,
     {
         self.enter();
-        let i = self.build.check(cell.token);
-        f(self.build.value::<A>(i));
-        self.attach(i, f, call_cell::<M, A, F>)
+        let i = self.build.check(cell.token());
+        f(self.build.value::<C::Value>(i));
+        self.attach(i, f, call_cell::<M, C::Value, F>)
     }
 
     /// [`listen_cell`](Graph::listen_cell), returning the error instead of
     /// panicking.
-    pub fn try_listen_cell<A, F>(
-        &mut self,
-        cell: Cell<A>,
-        mut f: F,
-    ) -> Result<Listener<M>, TokenError>
+    pub fn try_listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Result<Listener<M>, TokenError>
     where
-        A: 'static,
-        F: FnMut(&A) + 'static,
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
         M: Accepts<F>,
     {
-        let i = self.lookup(cell.token)?;
-        f(self.build.value::<A>(i));
-        Ok(self.attach(i, f, call_cell::<M, A, F>))
+        let i = self.lookup(cell.token())?;
+        f(self.build.value::<C::Value>(i));
+        Ok(self.attach(i, f, call_cell::<M, C::Value, F>))
     }
 
     /// Listens to a cell's steps only, with the new value by reference, and
-    /// nothing at registration. The I/O form of [`steps`](Cell::steps),
-    /// Sodium's `updates`.
-    pub fn listen_steps<A, F>(&mut self, cell: Cell<A>, f: F) -> Listener<M>
+    /// nothing at registration. The I/O form of
+    /// [`steps`](crate::Cell::steps), Sodium's `updates`. The cell is a
+    /// [`Cell`](crate::Cell) or a [`State`](crate::State), as for
+    /// [`listen_cell`](Graph::listen_cell).
+    pub fn listen_steps<C, F>(&mut self, cell: C, f: F) -> Listener<M>
     where
-        A: 'static,
-        F: FnMut(&A) + 'static,
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
         M: Accepts<F>,
     {
         self.enter();
-        let i = self.build.check(cell.token);
-        self.attach(i, f, call_cell::<M, A, F>)
+        let i = self.build.check(cell.token());
+        self.attach(i, f, call_cell::<M, C::Value, F>)
     }
 
     /// [`listen_steps`](Graph::listen_steps), returning the error instead of
     /// panicking.
-    pub fn try_listen_steps<A, F>(&mut self, cell: Cell<A>, f: F) -> Result<Listener<M>, TokenError>
+    pub fn try_listen_steps<C, F>(&mut self, cell: C, f: F) -> Result<Listener<M>, TokenError>
     where
-        A: 'static,
-        F: FnMut(&A) + 'static,
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
         M: Accepts<F>,
     {
-        let i = self.lookup(cell.token)?;
-        Ok(self.attach(i, f, call_cell::<M, A, F>))
+        let i = self.lookup(cell.token())?;
+        Ok(self.attach(i, f, call_cell::<M, C::Value, F>))
     }
 
     /// Registers a listener on node `i`. Its entry and its handle share a
@@ -353,7 +356,8 @@ impl<M: Mode> Graph<M> {
         todo!()
     }
 
-    /// The cell's current value, by reference.
+    /// The cell's current value, by reference. The cell is a
+    /// [`Cell`](crate::Cell) or a [`State`](crate::State).
     ///
     /// The graph is borrowed shared, so two samples compose in one
     /// expression; nothing runs, and the value changes only at a commit,
@@ -371,16 +375,16 @@ impl<M: Mode> Graph<M> {
     /// graph.send(numbers_in, 1); // error: graph is also borrowed as immutable
     /// assert_eq!(*before, 0);
     /// ```
-    pub fn sample<A: 'static>(&self, cell: Cell<A>) -> &A {
+    pub fn sample<C: CellRef>(&self, cell: C) -> &C::Value {
         self.enter();
-        let i = self.build.check(cell.token);
-        self.build.value::<A>(i)
+        let i = self.build.check(cell.token());
+        self.build.value::<C::Value>(i)
     }
 
     /// [`sample`](Graph::sample), returning the error instead of panicking.
-    pub fn try_sample<A: 'static>(&self, cell: Cell<A>) -> Result<&A, TokenError> {
-        let i = self.lookup(cell.token)?;
-        Ok(self.build.value::<A>(i))
+    pub fn try_sample<C: CellRef>(&self, cell: C) -> Result<&C::Value, TokenError> {
+        let i = self.lookup(cell.token())?;
+        Ok(self.build.value::<C::Value>(i))
     }
 
     /// Runs a garbage collection now (RFD 3).

@@ -77,6 +77,7 @@ mod token;
 mod trace;
 
 pub use build::{Build, CellLoop, StreamLoop};
+pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
 pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
@@ -94,5 +95,5 @@ pub use slot::InputSlot;
 #[doc(hidden)]
 pub use smoke::smoke;
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
-pub use token::{Cell, Input, Shared, Stream, TokenRef};
+pub use token::{Cell, Input, Shared, State, Stream, TokenRef};
 pub use trace::{Leaf, Trace, Tracer};
