@@ -106,7 +106,10 @@ macro_rules! smoke_graph {
             let stage4 = ([children, counted, zero], countdown);
 
             // Stage 5: a switch_cell between an input cell and a constant,
-            // with a steps view, and a switch_cell over states.
+            // with a steps view, and a switch_cell over states; a
+            // switch_stream between shared streams held directly, and one
+            // between linear streams in constant cells, selected through a
+            // switch_cell.
             let picked = n
                 .map(move |v| if v % 2 == 0 { level } else { three })
                 .hold(b, level);
@@ -117,7 +120,27 @@ macro_rules! smoke_graph {
                 .hold(b, log);
             let chosen_log = logs.switch_cell(b);
             let chosen_length = chosen_log.map_cell(b, |l| l.len() as u32);
-            let stage5 = ([switched, switched_steps], chosen_log, chosen_length);
+            let evens = n.filter(|v| v % 2 == 0).share(b);
+            let odds = n.filter(|v| v % 2 == 1).share(b);
+            let followed = n
+                .map(move |v| if v % 2 == 0 { odds } else { evens })
+                .hold(b, evens)
+                .switch_stream(b)
+                .hold(b, 0u32);
+            let plus = n.map(|v| v + 100).node(b);
+            let plus = b.constant(plus);
+            let times = n.map(|v| v * 100).node(b);
+            let times = b.constant(times);
+            let lines = n
+                .map(move |v| if v % 2 == 0 { plus } else { times })
+                .hold(b, plus)
+                .switch_cell(b);
+            let taken = lines.switch_stream(b).hold(b, 0u32);
+            let stage5 = (
+                [switched, switched_steps, followed, taken],
+                chosen_log,
+                chosen_length,
+            );
             (
                 (n_in, words_in, level_in, digits_in),
                 (total, words, out, merged),

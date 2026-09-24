@@ -1,5 +1,6 @@
-//! Switches: nodes whose dependency on an inner cell changes at run time,
-//! the semantics' `SwitchC` (with the oracle's patch F6).
+//! Switches: nodes whose dependency on an inner cell or stream changes at
+//! run time, the semantics' `SwitchC` (with the oracle's patch F6) and
+//! `SwitchS`.
 //!
 //! A switch reads the token its outer cell holds, before or after the
 //! instant, through its node type's `inner` function. `value::<A>` of a
@@ -20,14 +21,24 @@
 //! after the instant is the new inner's, and on its current inner, so that
 //! it steps when that inner steps. It has no data and no program: the
 //! evaluation loop settles it, and every read chases its outer.
+//!
+//! A switch_stream depends on its current inner alone: at instant t it
+//! forwards the events of the inner its outer selected before t, so a
+//! selection at t takes effect after t, and its outer is not a dependency
+//! (F14). A loop through its selection is therefore legal. Its outer keeps
+//! it in reach and in a watcher list instead: marking that reaches the
+//! outer queues the switch for relink and does not descend into it, so a
+//! selection moves the switch even at an instant its old inner is quiet,
+//! when nothing else would reach it.
 
 use alloc::boxed::Box;
 
 use super::Marker;
 use crate::build::Build;
 use crate::cell::CellRef;
-use crate::engine::{Data, Kind, LINKED, NodeOps, Ops};
+use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, WATCHED};
 use crate::mode::Mode;
+use crate::source::Node;
 use crate::token::Token;
 
 /// `switch_cell` over an outer holding `C` tokens: a `Cell` or a `State`.
@@ -51,11 +62,61 @@ impl<M: Mode, C: CellRef> NodeOps<M> for SwitchCellNode<C> {
     };
 }
 
+/// `switch_stream` over an outer holding `S` tokens: a linear `Stream`,
+/// whose event it takes, or a `Shared` one, whose event it clones.
+pub(crate) struct SwitchStreamNode<S>(Marker<S>);
+
+/// The program of a switch_stream. Its first evaluation, at its creation
+/// instant, links the inner its outer selected before the instant, runs it
+/// at this instant, since it was no dependency when this node's
+/// dependencies were made sure of, and queues a relink, since the outer
+/// may step at this instant too, which nothing else would notice. Then, at
+/// every instant, it forwards its current inner's event.
+fn eval_switch_stream<M: Mode, S: Node>(_: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+where
+    S::Event: 'static,
+{
+    if b.store.hot[me as usize].flags & LINKED == 0 {
+        b.link_inner(me);
+        let inner = b.store.relations[me as usize].deps[0];
+        b.ensure(inner);
+        b.queue_relink(me);
+    }
+    let inner = b.store.relations[me as usize].deps[0];
+    if let Some(v) = S::pull_inner(&mut Cx { b: &mut *b }, inner) {
+        b.put_event(me, v);
+    }
+}
+
+/// The token of the stream the outer holds before the instant, or after
+/// it.
+fn inner_stream<M: Mode, S: Node>(b: &Build<M>, outer: u32, post: bool) -> Token {
+    let inner = if post {
+        b.post::<S>(outer)
+    } else {
+        b.value::<S>(outer)
+    };
+    inner.node_token()
+}
+
+impl<M: Mode, S: Node> NodeOps<M> for SwitchStreamNode<S>
+where
+    S::Event: 'static,
+{
+    const OPS: Ops<M> = Ops {
+        eval: eval_switch_stream::<M, S>,
+        inner: inner_stream::<M, S>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
 /// Where a switch keeps its current inner among its dependencies: a
-/// switch_cell's first dependency is its outer.
+/// switch_cell's first dependency is its outer, and a switch_stream's
+/// inner is its only one.
 fn inner_at(kind: Kind) -> usize {
     match kind {
         Kind::SwitchCell => 1,
+        Kind::SwitchStream => 0,
         k => unreachable!("bough engine: a {k:?} node is not a switch"),
     }
 }
@@ -77,10 +138,37 @@ impl<M: Mode> Build<M> {
         self.token(n)
     }
 
-    /// The cell a switch reads its inner from.
+    /// A switch_stream over `outer`, a cell holding `S` tokens, with the
+    /// slot its `Accepts` bound made. It has no dependency until its first
+    /// evaluation. The outer keeps it in reach and watches for it.
+    pub(crate) fn switch_stream_node<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
+    where
+        S::Event: 'static,
+    {
+        let outer = self.check(outer);
+        let ops = &<SwitchStreamNode<S> as NodeOps<M>>::OPS;
+        let n = self.materialize(
+            Kind::SwitchStream,
+            Data::Slot(slot),
+            Box::new([]),
+            ops,
+            &[],
+            0,
+        );
+        let cold = &mut self.store.cold[n as usize];
+        cold.partner = outer;
+        cold.reach.push(outer);
+        self.store.cold[outer as usize].watchers.push(n);
+        self.store.hot[outer as usize].flags |= WATCHED;
+        self.token(n)
+    }
+
+    /// The cell a switch reads its inner from: a switch_cell's first
+    /// dependency, a switch_stream's partner.
     fn outer_of(&self, n: u32) -> u32 {
         match self.store.hot[n as usize].kind {
             Kind::SwitchCell => self.store.relations[n as usize].deps[0],
+            Kind::SwitchStream => self.store.cold[n as usize].partner,
             k => unreachable!("bough engine: node {n} ({k:?}) is not a switch"),
         }
     }

@@ -357,7 +357,73 @@ where
     /// Sodium's `switchS`: the events of the stream the cell selected
     /// before the instant. A cell holding linear streams may have exactly
     /// one switch; a second is a build-time error.
-    pub fn switch_stream<M: Mode>(self, build: &mut Build<M>) -> Stream<S::Event> {
-        todo!()
+    ///
+    /// A selection takes effect after its instant: at the instant the cell
+    /// steps, the old stream's event comes through and the new one's does
+    /// not. The switch takes the event of a linear [`Stream`] and clones
+    /// that of a [`Shared`](crate::Shared) one.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (keys_in, mouse_in, focus_in, events)) = Graph::build(|b| {
+    ///     let (keys, keys_in) = b.input::<char>();
+    ///     let (mouse, mouse_in) = b.input::<char>();
+    ///     let keys = keys.share(b);
+    ///     let mouse = mouse.share(b);
+    ///     let (focus, focus_in) = b.input::<bool>();
+    ///     let source = focus
+    ///         .map(move |m| if m { mouse } else { keys })
+    ///         .hold(b, keys);
+    ///     (keys_in, mouse_in, focus_in, source.switch_stream(b))
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen(events, move |e| log.borrow_mut().push(e)).keep();
+    /// graph.send(keys_in, 'k');
+    /// graph.transaction(|tx| {
+    ///     tx.send(focus_in, true); // takes effect after this instant:
+    ///     tx.send(keys_in, 'j'); // the keys still come through,
+    ///     tx.send(mouse_in, 'm'); // the mouse not yet
+    /// });
+    /// graph.send(mouse_in, 'n');
+    /// graph.send(keys_in, 'x'); // deselected
+    /// assert_eq!(*seen.borrow(), ['k', 'j', 'n']);
+    /// ```
+    ///
+    /// The selection is not a dependency, since the switch reads the cell's
+    /// value from before the instant, so a loop through it is legal (the
+    /// rule is [`Build::cell_loop`]'s): the switch may select, through a
+    /// hold, a stream built from its own events. Its only dependency is the
+    /// stream it currently follows, which may not depend on the switch. The
+    /// switch links that stream at its first evaluation, at the end of the
+    /// transaction that creates it, and moves at the commit of every
+    /// instant the cell steps, even one the old stream is quiet at; its
+    /// first link and every move check that no cycle forms, and one that
+    /// does is a panic that poisons the graph, naming the cycle's nodes.
+    ///
+    /// The switch's slot keeps an event nobody consumed between
+    /// transactions, so the mode must accept the event type; a `Threaded`
+    /// graph refuses a switch between streams of `Rc`s:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::Graph;
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let quiet = b.never::<Rc<u32>>();
+    ///     let selected = b.constant(quiet);
+    ///     let _events = selected.switch_stream(b); // error: Rc is not Send
+    /// });
+    /// ```
+    pub fn switch_stream<M>(self, build: &mut Build<M>) -> Stream<S::Event>
+    where
+        M: Mode + Accepts<S::Event>,
+    {
+        let slot = <M as Accepts<S::Event>>::erase(Erase::Slot);
+        Stream::from_token(build.switch_stream_node::<S>(self.token, slot))
     }
 }

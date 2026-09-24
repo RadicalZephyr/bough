@@ -224,7 +224,9 @@ impl<M: Mode> Build<M> {
                         h.mark = tx;
                         h.flags |= ON_STACK;
                         if h.flags & WATCHED != 0 {
-                            // The watcher hook: switch_streams (stage 5).
+                            // The outer of switch_streams: its selection
+                            // may change at this instant, so they relink at
+                            // commit. They are not its dependents.
                             for w in 0..store.cold[d as usize].watchers.len() {
                                 let w = store.cold[d as usize].watchers[w];
                                 let c = &mut store.cold[w as usize];

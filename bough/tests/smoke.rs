@@ -39,11 +39,14 @@ fn the_smoke_graph_runs_in_every_mode() {
     // Stage 5. Build: the switch links `level` and steps at its creation,
     // so its steps view carries 1 into `switched_steps`; the state switch
     // links the log. n = 1, odd: the switch moves to the constant, a quiet
-    // inner, and steps to 3; the state switch moves to the entries, [10].
-    // The transaction steps `level`, which is deselected. n = 2, even: the
-    // switch moves back to `level`, 2, and the state switch to the log,
-    // [1, 2]. So 2 + 2 + 2 = 6.
+    // inner, and steps to 3; the state switch moves to the entries, [10];
+    // the shared switch_stream follows the evens, which drop 1; the linear
+    // one takes 101 from `plus` and moves to `times`. The transaction
+    // steps `level`, which is deselected. n = 2, even: the switch moves
+    // back to `level`, 2, and the state switch to the log, [1, 2]; the
+    // evens give 2 and the switch_stream moves to the odds; `times` gives
+    // 200. So 2 + 2 + 2 + 200 + 2 = 208.
     //
-    // Each mode gives 26 + 241 + 9 + 13 + 6, and the host has both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 6));
+    // Each mode gives 26 + 241 + 9 + 13 + 208, and the host has both modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208));
 }
