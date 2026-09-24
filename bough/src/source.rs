@@ -54,7 +54,7 @@ use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
 use crate::engine::nodes::construct::ConstructNode;
 use crate::engine::nodes::split::{DeferNode, SplitNode};
-use crate::engine::nodes::stream::{ChainNode, MergeNode};
+use crate::engine::nodes::stream::{ChainNode, MergeNode, SlotNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
 use crate::token::{Cell, Shared, State, Stream, Token};
@@ -440,7 +440,8 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         ]);
         let slot = <M as Accepts<<Self::Event as IntoIterator>::Item>>::erase(Erase::Slot);
         let ops = &<SplitNode<Self> as NodeOps<M>>::OPS;
-        let output = build.capture_pair(dependency, cells, parts, ops, slot);
+        let output_ops = &<SlotNode<<Self::Event as IntoIterator>::Item> as NodeOps<M>>::OPS;
+        let output = build.capture_pair(dependency, cells, parts, ops, slot, output_ops);
         Stream::from_token(build.token(output))
     }
 
@@ -515,7 +516,8 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         ]);
         let slot = <M as Accepts<Self::Event>>::erase(Erase::Slot);
         let ops = &<DeferNode<Self> as NodeOps<M>>::OPS;
-        let output = build.capture_pair(dependency, cells, parts, ops, slot);
+        let output_ops = &<SlotNode<Self::Event> as NodeOps<M>>::OPS;
+        let output = build.capture_pair(dependency, cells, parts, ops, slot, output_ops);
         Stream::from_token(build.token(output))
     }
 
@@ -573,9 +575,15 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     /// panics poisons the graph, as does a panic in `f` itself, and so
     /// does a run that swaps its build context for another graph's.
     ///
-    /// A run allocates the nodes it builds; with no collection yet, they
-    /// live as long as the graph. A construct whose chain does not fire
-    /// costs what a chain node costs.
+    /// A run allocates the nodes it builds, into slots collection freed
+    /// if there are any. They live while a root reaches them: a hold that
+    /// a switch reads keeps the screen it holds, and a screen the switch
+    /// has left, which nothing names any more, is collected (RFD 3). A
+    /// token the closure captures that this construct's stream does not
+    /// depend on is declared with [`Build::depends`], or it may be
+    /// collected before the closure's next run uses it; a token the
+    /// closure hands I/O code as data is anchored there. A construct whose
+    /// chain does not fire costs what a chain node costs.
     ///
     /// The event waits in the node's slot for its consumer, and keeps
     /// there until the next event if nothing consumes it, so the mode must

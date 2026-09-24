@@ -6,7 +6,7 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::{Graph, Input, Lift, Source, State};
+use bough::{CollectionPolicy, Graph, Input, Lift, Source, State};
 
 /// Everything one run observed: each listener's events in order, the
 /// cells' final values, and the global interleaving of listener calls.
@@ -646,37 +646,35 @@ fn run_switches(seed: Option<u64>) -> (Run, [u32; 2], Option<[u64; 2]>) {
         });
 
         let picked = c.map(move |x| [ha, m, sum][(x % 3) as usize]).hold(b, ha);
+        b.depends(&picked, &[&ha, &m, &sum]);
         let sw = picked.switch_cell(b);
         let sw_steps = sw.steps(b).share(b);
         let nested = a.map(move |x| if x % 2 == 0 { sw } else { hd }).hold(b, hd);
+        b.depends(&nested, &[&sw, &hd]);
         let top = nested.switch_cell(b);
         let top_steps = top.steps(b).share(b);
 
         let shared = [a, c, d];
-        let followed = d
-            .map(move |x| shared[(x % 3) as usize])
-            .hold(b, a)
-            .switch_stream(b)
-            .share(b);
+        let following = d.map(move |x| shared[(x % 3) as usize]).hold(b, a);
+        b.depends(&following, &[&a, &c, &d]);
+        let followed = following.switch_stream(b).share(b);
 
         let la = a.map(|x| x + 1000).node(b);
         let la = b.constant(la);
         let lc = c.map(|x| x + 2000).node(b);
         let lc = b.constant(lc);
-        let lines = a
-            .map(move |x| if x % 2 == 0 { lc } else { la })
-            .hold(b, la)
-            .switch_cell(b);
-        let taken = lines.switch_stream(b).share(b);
+        let lines = a.map(move |x| if x % 2 == 0 { lc } else { la }).hold(b, la);
+        b.depends(&lines, &[&lc, &la]);
+        let taken = lines.switch_cell(b).switch_stream(b).share(b);
 
         let (fwd, fwd_loop) = b.stream_loop::<u64>();
         let out = fwd.share(b);
         let inners = [a.map(|x| x + 1).share(b), c, d.map(|x| x * 2).share(b)];
         let first = inners[0];
-        let selected = out
-            .map(move |v| inners[(v % 3) as usize])
-            .hold(b, first)
-            .switch_stream(b);
+        let [i0, i1, i2] = inners;
+        let selecting = out.map(move |v| inners[(v % 3) as usize]).hold(b, first);
+        b.depends(&selecting, &[&i0, &i1, &i2]);
+        let selected = selecting.switch_stream(b);
         fwd_loop.close(b, selected);
 
         let inputs: [Input<u64>; 3] = [a_in, c_in, d_in];
@@ -780,11 +778,11 @@ fn every_shuffle_seed_gives_the_same_switches_values_and_events() {
 /// view follows: at the instant the hold is built, the view reads it after
 /// the instant, which pulls what it depends on when the view runs first.
 /// Listeners on every stream and cell.
-/// Besides the events and values, the run counts the nodes the closures
-/// built and, with the `statistics` feature, the nodes run, in order,
-/// pulled out of it or new: each node runs once per instant whatever the
-/// order.
-fn run_constructs(seed: Option<u64>) -> (Run, usize, Option<u64>) {
+/// Besides the events and values, the run counts the growth of the live
+/// nodes, which under the manual policy is what the closures built, and
+/// with the `statistics` feature the nodes run, in order, pulled out of it
+/// or new: each node runs once per instant whatever the order.
+fn run_constructs(seed: Option<u64>, policy: CollectionPolicy) -> (Run, usize, Option<u64>) {
     let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
@@ -799,11 +797,13 @@ fn run_constructs(seed: Option<u64>) -> (Run, usize, Option<u64>) {
             let h = c.map(move |v| v + x).hold(b, x);
             (h, hc).lift(b, |h, c| h * 2 + c)
         });
+        b.depends(&made, &[&c, &hc]);
         let shown = made.hold(b, c0).switch_cell(b);
         let shown_steps = shown.steps(b).share(b);
 
         let first = a.map(|x| x + 1).node(b);
         let lines = d.construct(b, move |b, k| a.merge(b, c, move |l, r| l * k + r));
+        b.depends(&lines, &[&a, &c]);
         let followed = lines.hold(b, first).switch_stream(b).share(b);
 
         let counters = c.filter(|v| v % 4 == 0).construct(b, move |b, _| {
@@ -812,23 +812,25 @@ fn run_constructs(seed: Option<u64>) -> (Run, usize, Option<u64>) {
             count_loop.close(b, next);
             count
         });
+        b.depends(&counters, &[&a]);
         let counted = counters.hold(b, c0).switch_cell(b);
 
-        let nested = d
-            .construct(b, move |b, k| {
-                let inner = d.construct(b, move |b, j| a.map(move |x| x + j * k).hold(b, j));
-                inner.hold(b, c0).switch_cell(b)
-            })
-            .hold(b, c0)
-            .switch_cell(b);
+        let bodies = d.construct(b, move |b, k| {
+            let inner = d.construct(b, move |b, j| a.map(move |x| x + j * k).hold(b, j));
+            b.depends(&inner, &[&a]);
+            inner.hold(b, c0).switch_cell(b)
+        });
+        b.depends(&bodies, &[&a, &c0]);
+        let nested = bodies.hold(b, c0).switch_cell(b);
 
         let (outs, outs_loop) = b.stream_loop::<u64>();
         let outs = outs.share(b);
-        let own = c
-            .construct(b, move |b, v| {
-                (v + 1, outs.map(move |o| o * 2 + v).hold(b, v))
-            })
-            .share(b);
+        let own = c.construct(b, move |b, v| {
+            (v + 1, outs.map(move |o| o * 2 + v).hold(b, v))
+        });
+        // `outs` is downstream of the construct, through the loop.
+        b.depends(&own, &[&outs]);
+        let own = own.share(b);
         outs_loop.close(b, own.map(|(n, _)| n));
         let own = own.map(|(_, h)| h).hold(b, c0).switch_cell(b);
         let own_steps = own.steps(b).share(b);
@@ -841,6 +843,7 @@ fn run_constructs(seed: Option<u64>) -> (Run, usize, Option<u64>) {
         )
     });
     graph.set_shuffle_seed(seed);
+    graph.set_collection_policy(policy);
 
     let log: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
     let order: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
@@ -897,15 +900,28 @@ fn node_runs(_: &Graph) -> Option<u64> {
     None
 }
 
+/// Under the manual policy nothing is collected, so the growth of the
+/// live nodes counts what the closures built. Under the automatic policy,
+/// collections run between the transactions, free the bodies the switches
+/// have left, and change no value and no event, under any seed.
 #[test]
 fn every_shuffle_seed_gives_the_same_constructs_values_and_events() {
-    let (plain, plain_built, plain_runs) = run_constructs(None);
+    let manual = CollectionPolicy::Manual;
+    let (plain, plain_built, plain_runs) = run_constructs(None, manual);
     assert!(plain.per_listener.iter().all(|events| !events.is_empty()));
     assert!(plain_built > 100, "the closures built {plain_built} nodes");
+    let automatic = CollectionPolicy::Automatic;
+    let (collected, collected_live, collected_runs) = run_constructs(None, automatic);
+    assert_eq!(collected.per_listener, plain.per_listener);
+    assert_eq!(collected.samples, plain.samples);
+    assert!(
+        collected_live < plain_built / 2,
+        "collection freed the bodies left behind: {collected_live} of {plain_built} live"
+    );
     let mut interleavings = std::collections::BTreeSet::new();
     interleavings.insert(plain.interleaving.clone());
     for seed in 0..24 {
-        let (shuffled, built, runs) = run_constructs(Some(seed));
+        let (shuffled, built, runs) = run_constructs(Some(seed), manual);
         assert_eq!(shuffled.per_listener, plain.per_listener, "seed {seed}");
         assert_eq!(shuffled.samples, plain.samples, "seed {seed}");
         assert_eq!(built, plain_built, "seed {seed}");
@@ -913,6 +929,11 @@ fn every_shuffle_seed_gives_the_same_constructs_values_and_events() {
         // runs once per instant.
         assert_eq!(runs, plain_runs, "seed {seed}");
         interleavings.insert(shuffled.interleaving);
+        let (shuffled, live, runs) = run_constructs(Some(seed), automatic);
+        assert_eq!(shuffled.per_listener, plain.per_listener, "seed {seed}");
+        assert_eq!(shuffled.samples, plain.samples, "seed {seed}");
+        assert_eq!(live, collected_live, "seed {seed}");
+        assert_eq!(runs, collected_runs, "seed {seed}");
     }
     assert!(
         interleavings.len() >= 20,

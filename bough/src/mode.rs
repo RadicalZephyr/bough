@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::cell::Cell as CoreCell;
 #[cfg(target_has_atomic = "ptr")]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::engine::{CellValue, Memo};
 
@@ -63,7 +63,8 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     /// The flag a [`Listener`](crate::Listener) or an
     /// [`Anchor`](crate::Anchor) shares with its node, so that dropping the
     /// handle needs no graph access: a counted cell in `Local`, an atomic in
-    /// `Threaded`. This is why a handle carries the mode.
+    /// `Threaded`, each pointing to the graph's count of released handles.
+    /// This is why a handle carries the mode.
     #[doc(hidden)]
     type Flag: FlagOps;
 
@@ -103,11 +104,23 @@ impl Carrier for Box<dyn Any + Send> {
 }
 
 /// The operations the engine needs on a handle's flag.
+///
+/// Every flag of one graph points to the graph's count of released
+/// handles, so that dropping a handle, which has no graph access, still
+/// tells the automatic collection policy that a root went away (RFD 3).
 #[doc(hidden)]
 pub trait FlagOps: Clone + 'static {
-    /// A new flag, set: the handle is live.
-    fn live() -> Self;
-    /// Clears the flag: the handle was dropped.
+    /// The graph's count of released handles, which its flags share.
+    type Released: 'static;
+    /// A new count, at zero.
+    fn released() -> Self::Released;
+    /// The handles released so far. It only grows, and wraps.
+    fn count(released: &Self::Released) -> usize;
+    /// A new flag, set: the handle is live. It counts on `released` when
+    /// it is cleared.
+    fn live(released: &Self::Released) -> Self;
+    /// Clears the flag: the handle was dropped. The first clear counts one
+    /// released handle.
     fn clear(&self);
     /// Whether the handle is still live.
     fn is_live(&self) -> bool;
@@ -204,7 +217,7 @@ pub struct Local;
 impl sealed::Sealed for Local {}
 impl Mode for Local {
     type Carrier = Box<dyn Any>;
-    type Flag = Rc<CoreCell<bool>>;
+    type Flag = LocalFlag;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
         Box::new(value)
     }
@@ -229,7 +242,7 @@ impl sealed::Sealed for Threaded {}
 #[cfg(target_has_atomic = "ptr")]
 impl Mode for Threaded {
     type Carrier = Box<dyn Any + Send>;
-    type Flag = Arc<AtomicBool>;
+    type Flag = ThreadedFlag;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
         Box::new(value)
     }
@@ -245,27 +258,76 @@ impl<T: ?Sized + Send> Accepts<T> for Threaded {
     }
 }
 
-impl FlagOps for Rc<CoreCell<bool>> {
-    fn live() -> Self {
-        Rc::new(CoreCell::new(true))
+/// A `Local` handle's flag: a counted cell, and the graph's count of
+/// released handles.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct LocalFlag(Rc<LocalFlagState>);
+
+struct LocalFlagState {
+    live: CoreCell<bool>,
+    released: Rc<CoreCell<usize>>,
+}
+
+impl FlagOps for LocalFlag {
+    type Released = Rc<CoreCell<usize>>;
+    fn released() -> Self::Released {
+        Rc::new(CoreCell::new(0))
+    }
+    fn count(released: &Self::Released) -> usize {
+        released.get()
+    }
+    fn live(released: &Self::Released) -> Self {
+        LocalFlag(Rc::new(LocalFlagState {
+            live: CoreCell::new(true),
+            released: released.clone(),
+        }))
     }
     fn clear(&self) {
-        self.set(false)
+        if self.0.live.replace(false) {
+            let released = &self.0.released;
+            released.set(released.get().wrapping_add(1));
+        }
     }
     fn is_live(&self) -> bool {
-        self.get()
+        self.0.live.get()
     }
 }
 
+/// A `Threaded` handle's flag: an atomic, and the graph's count of
+/// released handles, since a handle may be dropped on any thread.
 #[cfg(target_has_atomic = "ptr")]
-impl FlagOps for Arc<AtomicBool> {
-    fn live() -> Self {
-        Arc::new(AtomicBool::new(true))
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ThreadedFlag(Arc<ThreadedFlagState>);
+
+#[cfg(target_has_atomic = "ptr")]
+struct ThreadedFlagState {
+    live: AtomicBool,
+    released: Arc<AtomicUsize>,
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl FlagOps for ThreadedFlag {
+    type Released = Arc<AtomicUsize>;
+    fn released() -> Self::Released {
+        Arc::new(AtomicUsize::new(0))
+    }
+    fn count(released: &Self::Released) -> usize {
+        released.load(Ordering::Relaxed)
+    }
+    fn live(released: &Self::Released) -> Self {
+        ThreadedFlag(Arc::new(ThreadedFlagState {
+            live: AtomicBool::new(true),
+            released: released.clone(),
+        }))
     }
     fn clear(&self) {
-        self.store(false, Ordering::Release)
+        if self.0.live.swap(false, Ordering::AcqRel) {
+            self.0.released.fetch_add(1, Ordering::Relaxed);
+        }
     }
     fn is_live(&self) -> bool {
-        self.load(Ordering::Acquire)
+        self.0.live.load(Ordering::Acquire)
     }
 }

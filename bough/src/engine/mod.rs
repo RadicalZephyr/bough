@@ -34,6 +34,7 @@ macro_rules! count {
 }
 
 mod children;
+mod collect;
 mod loops;
 pub(crate) mod nodes;
 mod pull;
@@ -51,6 +52,7 @@ use crate::mode::{Carrier, Mode};
 use crate::token::Token;
 use crate::trace::Tracer;
 
+pub(crate) use collect::{clear_slot, trace_cell, trace_in_place};
 pub(crate) use pull::Passed;
 pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
@@ -164,8 +166,8 @@ pub(crate) struct Relations {
 /// Bookkeeping the fast path never reads.
 #[derive(Default)]
 pub(crate) struct Cold {
-    /// Bumped when collection frees the slot (stage 7), so a stale token
-    /// fails its check.
+    /// Bumped when collection frees the slot, so a stale token fails its
+    /// check. A slot freed at `u32::MAX` is retired.
     pub(crate) generation: u32,
     /// A split capture's output and back; a switch_stream's outer.
     pub(crate) partner: u32,
@@ -190,6 +192,23 @@ pub(crate) struct Cold {
     /// The switch_stream taking events from this linear stream, or node 0
     /// for none: the run-time backstop of the one-consumer rule.
     pub(crate) linear_consumer: u32,
+}
+
+impl Cold {
+    /// A reused slot's bookkeeping, fresh but for the generation, which
+    /// its free bumped, and the capacity of its lists.
+    pub(crate) fn reset(&mut self) {
+        self.partner = 0;
+        self.reach.clear();
+        self.watchers.clear();
+        self.done = 0;
+        self.pulling = 0;
+        self.prep_enter = 0;
+        self.prep_done = 0;
+        self.relink = 0;
+        self.visit = 0;
+        self.linear_consumer = 0;
+    }
 }
 
 /// A stateful cell's value: a hold, an accumulator, a constant, an input
@@ -273,10 +292,11 @@ pub(crate) struct Ops<M: Mode> {
     /// into the slot, first send on the left. The default leaves the value
     /// where it is, which the caller reports as a double send.
     pub(crate) coalesce: CoalesceFn<M>,
-    /// Collection: visits the tokens in the committed value.
+    /// Collection: visits the tokens in the committed value of a stateful
+    /// cell, or in `scan`'s state, which lives in the program.
     pub(crate) trace: TraceFn<M>,
     /// Collection: empties a stream slot, so an event holding a token
-    /// neither roots nor dangles.
+    /// neither roots nor dangles, and an event type needs no `Trace`.
     pub(crate) clear_slot: fn(&mut Data<M>),
 }
 

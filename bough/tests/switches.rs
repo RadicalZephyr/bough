@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use bough::{
     Build, Cell, Graph, Input, Lift, Local, PoisonedError, SendError, Shared, Source, State,
-    Stream, TokenError, Trace, Transaction,
+    Stream, TokenError, TokenRef, Trace, Transaction,
 };
 
 /// The plain order, then seeds for RFD 1's order shuffle.
@@ -205,6 +205,7 @@ fn the_switch_stream_vector_restated_with_inputs() {
             let (sel, sel_in) = b.input::<()>();
             let (s1, s2) = (s1.share(b), s2.share(b));
             let c = sel.map(move |_| s2).hold(b, s1);
+            b.depends(&c, &[&s2]);
             let out = c.switch_stream(b);
             (s1_in, s2_in, sel_in, log_events(b, out))
         });
@@ -238,6 +239,7 @@ fn switch_c_vector(v: &SwitchCVector, order: Order) -> (Vec<(usize, char)>, Vec<
         let (c3, c3_in) = b.input_cell('1');
         let (sel, sel_in) = b.input::<char>();
         let outer = sel.map(move |s| if s == '2' { c2 } else { c3 }).hold(b, c1);
+        b.depends(&outer, &[&c2, &c3]);
         let sw = outer.switch_cell(b);
         ([c1_in, c2_in, c3_in], sel_in, log_steps(b, sw), sw)
     });
@@ -346,6 +348,7 @@ fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_order
                 })
                 .hold(b, 2u32);
             let outer = sel.map(move |_| c2).hold(b, a);
+            b.depends(&outer, &[&c2]);
             let sc = outer.switch_cell(b);
             (sel_in, x_in, sc, log_steps(b, sc))
         });
@@ -421,6 +424,7 @@ fn r3_steps_of_a_map_cell_over_a_loop_closed_with_a_switch_cell() {
             let a = b.constant(1u32);
             let c2 = x.map(|v| v * 10).hold(b, 2u32);
             let outer = sel.map(move |_| c2).hold(b, a);
+            b.depends(&outer, &[&c2]);
             let sw = outer.switch_cell(b);
             closer.close(b, sw);
             (sel_in, x_in, log)
@@ -459,8 +463,10 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
                 let c1 = b.constant(1u32);
                 let c2 = x.map(|v| v * 10).hold(b, 2u32);
                 let outer_b = sb.map(move |_| c2).hold(b, c1);
+                b.depends(&outer_b, &[&c2]);
                 let inner_b = outer_b.switch_cell(b);
                 let outer_a = sa.map(move |_| inner_b).hold(b, c0);
+                b.depends(&outer_a, &[&inner_b]);
                 let top = outer_a.switch_cell(b);
                 (sa_in, sb_in, x_in, log_steps(b, top), top)
             });
@@ -495,6 +501,7 @@ fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
             let c2 = x.map(|v| v * 10).hold(b, 2u32);
             let other = x.map(|v| v - 4).hold(b, 0u32);
             let outer = sel.map(move |_| c2).hold(b, a);
+            b.depends(&outer, &[&c2]);
             let sw = outer.switch_cell(b);
             let l = (sw, other).lift(b, |p, q| p + q);
             (sel_in, x_in, log_steps(b, l))
@@ -523,6 +530,7 @@ fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
             let a = b.constant(1u32);
             let c = b.constant(2u32);
             let def = sel.map(move |_| c).hold(b, a);
+            b.depends(&def, &[&c]);
             closer.close(b, def);
             (sel_in, cur)
         });
@@ -538,18 +546,18 @@ fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
 /// the same instant, which the text cannot evaluate. With `steps`, a steps
 /// view of the loop reads the switch after the instant.
 fn r10(steps: bool) -> (Graph, Input<()>, Cell<u32>) {
-    let (graph, (sel_in, c)) = Graph::build(|b| {
+    let (graph, (sel_in, c, _steps)) = Graph::build(|b| {
         let (sel, sel_in) = b.input::<()>(); // node 1
         let a = b.constant(1u32); // node 2
         let (c, closer) = b.cell_loop::<u32>(); // node 3
         let m = c.map_cell(b, |v| v + 1); // node 4
         let outer = sel.map(move |_| m).hold(b, a); // node 5
+        b.depends(&outer, &[&m]);
         let sw = outer.switch_cell(b); // node 6
         closer.close(b, sw);
-        if steps {
-            let _st = c.steps(b);
-        }
-        (sel_in, c)
+        // Returned, so that collection keeps the view.
+        let steps = steps.then(|| c.steps(b));
+        (sel_in, c, steps)
     });
     (graph, sel_in, c)
 }
@@ -626,9 +634,11 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
             let (a_forward, a_loop) = b.cell_loop::<u32>();
             let p = a_forward.map_cell(b, |v| v + 10);
             let b_outer = sel.map(move |_| q).hold(b, p);
+            b.depends(&b_outer, &[&q]);
             let b_switch = b_outer.switch_cell(b);
             let y = b_switch.map_cell(b, |v| v + 100);
             let a_outer = sel.map(move |_| y).hold(b, x);
+            b.depends(&a_outer, &[&y]);
             let a_switch = a_outer.switch_cell(b);
             a_loop.close(b, a_switch);
             let logs = [log_steps(b, a_switch), log_steps(b, b_switch)];
@@ -664,6 +674,7 @@ fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
             let (forward, closer) = b.cell_loop::<u32>(); // node 4
             let computed = forward.map_cell(b, move |_| one); // node 5
             let outer = sel.map(move |_| computed).hold(b, first); // node 6
+            b.depends(&outer, &[&computed]);
             let middle = outer.switch_cell(b); // node 7
             let top = middle.switch_cell(b); // node 8
             closer.close(b, top);
@@ -722,6 +733,7 @@ fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
         let out = outer.switch_stream(b).share(b); // nodes 5 and 6
         let derived = out.map(|v| v + 1).share(b); // node 7
         let definition = sel.map(move |_| derived).hold(b, x); // node 8
+        b.depends(&definition, &[&derived]);
         closer.close(b, definition);
         let total = out.accumulate(b, 0u32, |v, t| t + v);
         (x_in, sel_in, total)
@@ -775,6 +787,7 @@ fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
             let (sel, sel_in) = b.input::<()>();
             let (a, z) = (a.share(b), z.share(b));
             let outer = sel.map(move |_| z).hold(b, a);
+            b.depends(&outer, &[&z]);
             let out = outer.switch_stream(b);
             (a_in, z_in, sel_in, log_events(b, out))
         });
@@ -830,7 +843,12 @@ fn switch_stream_loop_through_its_selection() {
                         })
                         .collect();
                     let first = cells[0];
+                    // The closure selects from the table it captures, so the
+                    // hold declares the table's cells.
+                    let table = cells.clone();
                     let current = out.map(move |v| cells[v as usize]).hold(b, first);
+                    let on: Vec<&dyn TokenRef> = table.iter().map(|c| c as _).collect();
+                    b.depends(&current, &on);
                     let sw = current.switch_cell(b);
                     sw.switch_stream(b)
                 } else {
@@ -838,7 +856,10 @@ fn switch_stream_loop_through_its_selection() {
                         .map(|k| ticks.map(move |t| t + k).share(b))
                         .collect();
                     let first = streams[0];
+                    let table = streams.clone();
                     let current = out.map(move |v| streams[v as usize]).hold(b, first);
+                    let on: Vec<&dyn TokenRef> = table.iter().map(|s| s as _).collect();
+                    b.depends(&current, &on);
                     current.switch_stream(b)
                 };
                 closer.close(b, switched);
@@ -878,11 +899,13 @@ fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
                     let (forward, closer) = b.cell_loop::<Shared<char>>();
                     let out = forward.switch_stream(b);
                     let def = pick.map(move |p| if p { z } else { a }).hold(b, a);
+                    b.depends(&def, &[&z, &a]);
                     closer.close(b, def);
                     out
                 } else {
                     let picked = pick.hold(b, false);
                     let outer = picked.map_cell(b, move |p| if *p { z } else { a });
+                    b.depends(&outer, &[&z, &a]);
                     outer.switch_stream(b)
                 };
                 (a_in, z_in, pick_in, log_events(b, out))
@@ -998,11 +1021,13 @@ fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
                 let out = if linear {
                     let (ca, cz) = (b.constant(a), b.constant(z));
                     let outer = pick.map(move |p| if p { cz } else { ca }).hold(b, ca);
+                    b.depends(&outer, &[&cz, &ca]);
                     let sw = outer.switch_cell(b);
                     sw.switch_stream(b)
                 } else {
                     let (a, z) = (a.share(b), z.share(b));
                     let outer = pick.map(move |p| if p { z } else { a }).hold(b, a);
+                    b.depends(&outer, &[&z, &a]);
                     outer.switch_stream(b)
                 };
                 (a_in, z_in, pick_in, log_events(b, out))
@@ -1046,6 +1071,7 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
             let (hy, y_in) = b.input_cell(2u32);
             let (sel, sel_in) = b.input::<bool>();
             let outer = sel.map(move |s| if s { hy } else { hx }).hold(b, hx);
+            b.depends(&outer, &[&hy, &hx]);
             let sw = outer.switch_cell(b);
             let tens = sw.map_cell(b, |v| v * 10);
             let logs = [log_steps(b, sw), log_steps(b, tens)];
@@ -1087,6 +1113,7 @@ fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
                 c.set(c.get() + 1);
                 if *p { c2 } else { c1 }
             });
+            b.depends(&outer, &[&c2, &c1]);
             let sw = outer.switch_cell(b);
             (pick_in, c1_in, c2_in, log_steps(b, sw))
         });
@@ -1151,6 +1178,7 @@ fn a_switch_cell_steps_at_its_creation() {
             let (sel, sel_in) = b.input::<()>();
             let five = b.constant(5u32);
             let outer = sel.map(move |_| five).hold(b, hx);
+            b.depends(&outer, &[&five]);
             let sw = outer.switch_cell(b);
             let (forward, closer) = b.cell_loop::<u32>();
             let forward_log = log_steps(b, forward);
@@ -1214,11 +1242,15 @@ fn nested_switches_in_every_send_order() {
             let pick_top = pick_top.share(b);
             let oa = pick_a.map(move |p| if p { l2 } else { l1 }).hold(b, l1);
             let ob = pick_b.map(move |p| if p { l4 } else { l3 }).hold(b, l3);
+            b.depends(&oa, &[&l2, &l1]);
+            b.depends(&ob, &[&l4, &l3]);
             let sa = oa.switch_cell(b);
             let sb = ob.switch_cell(b);
             let ot = pick_top.map(move |p| if p { sb } else { sa }).hold(b, sa);
+            b.depends(&ot, &[&sb, &sa]);
             let top = ot.switch_cell(b);
             let oo = pick_top.map(move |p| if p { ob } else { oa }).hold(b, oa);
+            b.depends(&oo, &[&ob, &oa]);
             let middle = oo.switch_cell(b);
             let twice = middle.switch_cell(b);
             (
@@ -1295,6 +1327,7 @@ fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
             });
             let one = b.constant(1u32);
             let outer = sel.map(move |_| m).hold(b, one);
+            b.depends(&outer, &[&m]);
             let sw = outer.switch_cell(b);
             (x_in, sel_in, log_steps(b, sw), sw)
         });
@@ -1429,6 +1462,7 @@ fn a_switch_cell_over_states_steps_as_a_state() {
                 .accumulate_mut(b, Vec::new(), push);
             let (pick, pick_in) = b.input::<bool>();
             let outer = pick.map(move |p| if p { short } else { all }).hold(b, all);
+            b.depends(&outer, &[&short, &all]);
             let current: State<Vec<String>> = outer.switch_cell(b);
             let lengths: State<usize> = current.map_cell(b, |v| v.len());
             (names_in, pick_in, current, lengths)
@@ -1626,6 +1660,8 @@ fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
             let sel = sel.share(b);
             let outer_a = sel.map(move |_| c2).hold(b, c1);
             let outer_b = sel.map(move |_| c1).hold(b, c3);
+            b.depends(&outer_a, &[&c2]);
+            b.depends(&outer_b, &[&c1]);
             let a = outer_a.switch_cell(b);
             let a = a.switch_stream(b);
             let bb = outer_b.switch_cell(b);

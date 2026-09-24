@@ -19,7 +19,7 @@
 
 use super::Marker;
 use crate::build::Build;
-use crate::engine::{Cx, NodeOps, Ops, part};
+use crate::engine::{Cx, NodeOps, Ops, clear_slot, part};
 use crate::mode::Mode;
 use crate::source::Source;
 
@@ -63,6 +63,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         eval: eval_construct::<M, S, F, B>,
+        clear_slot: clear_slot::<M, B>,
         ..Ops::<M>::DEFAULT
     };
 }

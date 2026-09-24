@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Graph, Lift, Source};
+use crate::{CollectionPolicy, Graph, Lift, Source};
 
 /// Builds and drives the smoke graph with one of the two graph
 /// constructors. A macro rather than a function generic over the mode: the
@@ -113,28 +113,31 @@ macro_rules! smoke_graph {
             let picked = n
                 .map(move |v| if v % 2 == 0 { level } else { three })
                 .hold(b, level);
+            b.depends(&picked, &[&level, &three]);
             let switched = picked.switch_cell(b);
             let switched_steps = switched.steps(b).hold(b, 0u32);
             let logs = n
                 .map(move |v| if v % 2 == 0 { log } else { entries })
                 .hold(b, log);
+            b.depends(&logs, &[&log, &entries]);
             let chosen_log = logs.switch_cell(b);
             let chosen_length = chosen_log.map_cell(b, |l| l.len() as u32);
             let evens = n.filter(|v| v % 2 == 0).share(b);
             let odds = n.filter(|v| v % 2 == 1).share(b);
-            let followed = n
+            let following = n
                 .map(move |v| if v % 2 == 0 { odds } else { evens })
-                .hold(b, evens)
-                .switch_stream(b)
-                .hold(b, 0u32);
+                .hold(b, evens);
+            b.depends(&following, &[&odds, &evens]);
+            let followed = following.switch_stream(b).hold(b, 0u32);
             let plus = n.map(|v| v + 100).node(b);
             let plus = b.constant(plus);
             let times = n.map(|v| v * 100).node(b);
             let times = b.constant(times);
             let lines = n
                 .map(move |v| if v % 2 == 0 { plus } else { times })
-                .hold(b, plus)
-                .switch_cell(b);
+                .hold(b, plus);
+            b.depends(&lines, &[&plus, &times]);
+            let lines = lines.switch_cell(b);
             let taken = lines.switch_stream(b).hold(b, 0u32);
             let stage5 = (
                 [switched, switched_steps, followed, taken],
@@ -152,13 +155,12 @@ macro_rules! smoke_graph {
                 .construct(b, move |b, k| n.map(move |v| v + k).hold(b, k))
                 .hold(b, none)
                 .switch_cell(b);
-            let nested = n
-                .construct(b, move |b, k| {
-                    let inner = n.construct(b, move |b, j| b.constant(j * k));
-                    inner.hold(b, none).switch_cell(b)
-                })
-                .hold(b, none)
-                .switch_cell(b);
+            let bodies = n.construct(b, move |b, k| {
+                let inner = n.construct(b, move |b, j| b.constant(j * k));
+                inner.hold(b, none).switch_cell(b)
+            });
+            b.depends(&bodies, &[&none]);
+            let nested = bodies.hold(b, none).switch_cell(b);
             let looped = n
                 .construct(b, move |b, _| {
                     let (count, count_loop) = b.cell_loop::<u32>();
@@ -247,7 +249,27 @@ macro_rules! smoke_graph {
         let switches =
             switches.iter().map(|c| *graph.sample(*c)).sum::<u32>() + *graph.sample(chosen_length);
         let constructs = stage6.iter().map(|c| *graph.sample(*c)).sum::<u32>();
-        stage1 + cells + states + loops + children + switches + constructs
+
+        // Stage 7: anchors kept, dropped and tried, a listener dropped, both
+        // policies, the stress setting, and collections that free what the
+        // switches left behind. Nothing here changes a value.
+        let length_before = *graph.sample(chosen_length);
+        let anchored = graph.anchor(&stage6);
+        let kept = graph.try_anchor(&(out, chosen_log));
+        graph.listen_steps(chosen_length, |_| ()).unlisten();
+        graph.set_collection_policy(CollectionPolicy::Manual);
+        graph.collect_garbage();
+        anchored.unanchor();
+        if let Ok(kept) = kept {
+            kept.keep();
+        }
+        graph.set_collect_after_every_transaction(true);
+        let _ = graph.try_collect_garbage();
+        graph.set_collect_after_every_transaction(false);
+        graph.set_collection_policy(CollectionPolicy::Automatic);
+        let collected =
+            graph.stale_operations() as u32 + *graph.sample(chosen_length) - length_before;
+        stage1 + cells + states + loops + children + switches + constructs + collected
     }};
 }
 

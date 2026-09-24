@@ -32,7 +32,8 @@ use crate::build::Build;
 use crate::mode::Mode;
 
 impl<M: Mode> Build<M> {
-    /// Creates a capture and its output. The capture depends on its chain's
+    /// Creates a capture and its output, whose slot `slot` is and whose
+    /// functions `output_ops` are. The capture depends on its chain's
     /// dependency and reads the cells the chain reads. The output has no
     /// dependency; it keeps its capture in reach, so collection keeps the
     /// capture while the output is live. Returns the output, the node the
@@ -44,6 +45,7 @@ impl<M: Mode> Build<M> {
         parts: Box<[M::Carrier]>,
         ops: &'static Ops<M>,
         slot: M::Carrier,
+        output_ops: &'static Ops<M>,
     ) -> u32 {
         let capture = self.materialize(
             Kind::SplitCapture,
@@ -58,7 +60,7 @@ impl<M: Mode> Build<M> {
             Kind::SplitOutput,
             Data::Slot(slot),
             Box::new([]),
-            &Ops::<M>::DEFAULT,
+            output_ops,
             &[],
             0,
         );

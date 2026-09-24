@@ -31,10 +31,16 @@
 //! [`construct`](Source::construct), which runs a closure with the build
 //! context at each event of a stream, in the middle of its transaction:
 //! what the closure builds exists from that instant on, and each run is a
-//! scope that must close the loops it declares. Every other operation
-//! still has a `todo!()` body. The examples in the documentation
-//! that call only working operations run, the rest compile, and the
-//! guarantees the RFDs make are fixed by `compile_fail` doc tests.
+//! scope that must close the loops it declares. Stage 7 adds collection
+//! (RFD 3): a node lives while a root reaches it, the build closure's
+//! return value, a live [`Listener`] or a live [`Anchor`]; what it reaches
+//! is its dependencies, the tokens [`Trace`] finds in a stateful cell's
+//! value, and what [`Build::depends`] declares; and collection, automatic
+//! by default and never inside a transaction, frees the rest, so that a
+//! stale token is an error. The I/O edge, `Remote`, `pump`, input slots
+//! and the waker, still has `todo!()` bodies. The examples in the
+//! documentation that call only working operations run, the rest compile,
+//! and the guarantees the RFDs make are fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!

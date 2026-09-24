@@ -49,7 +49,9 @@ use alloc::vec::Vec;
 use super::Marker;
 use crate::build::Build;
 use crate::cell::CellRef;
-use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_LINEAR, WATCHED};
+use crate::engine::{
+    Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_LINEAR, WATCHED, clear_slot,
+};
 use crate::mode::Mode;
 use crate::source::Node;
 use crate::token::Token;
@@ -121,6 +123,7 @@ where
     const OPS: Ops<M> = Ops {
         eval: eval_switch_stream::<M, S>,
         inner: inner_stream::<M, S>,
+        clear_slot: clear_slot::<M, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }

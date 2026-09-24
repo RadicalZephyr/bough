@@ -292,6 +292,8 @@ impl<A: 'static> Cell<Cell<A>> {
     ///     let language = choose
     ///         .map(move |fr| if fr { french } else { english })
     ///         .hold(b, english);
+    ///     // The inner the hold does not hold is named only by the closure.
+    ///     b.depends(&language, &[&french, &english]);
     ///     (english_in, choose_in, language.switch_cell(b))
     /// });
     /// let seen = Rc::new(RefCell::new(Vec::new()));
@@ -304,9 +306,16 @@ impl<A: 'static> Cell<Cell<A>> {
     /// assert_eq!(graph.sample(shown), "bonjour");
     /// ```
     ///
-    /// The outer and the current inner are dependencies: a loop closed
-    /// through either at the same instant is refused, and so is a switch to
-    /// a cell that depends on the switch itself. The switch links the inner
+    /// The outer and the current inner are dependencies, so they stay
+    /// alive with the switch, and the outer's value names the inner it
+    /// selects. An inner not selected is alive only if something else names
+    /// it: a closure that selects among cells it captured declares them
+    /// with [`depends`](Build::depends), as above, or a deselected inner is
+    /// collected and selecting it again is a stale-token error.
+    ///
+    /// A loop closed through the outer or the current inner at the same
+    /// instant is refused, and so is a switch to a cell that depends on the
+    /// switch itself. The switch links the inner
     /// its outer selects at its first evaluation, in the transaction that
     /// creates it but after the closure that built it returns, so its outer
     /// may be a loop that is not closed yet. Its first link and every move
@@ -336,6 +345,7 @@ impl<A: 'static> Cell<State<A>> {
     ///         .accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
     ///     let (pick, pick_in) = b.input::<bool>();
     ///     let chosen = pick.map(move |s| if s { short } else { all }).hold(b, all);
+    ///     b.depends(&chosen, &[&short, &all]);
     ///     let current: State<Vec<String>> = chosen.switch_cell(b);
     ///     (names_in, pick_in, current)
     /// });
@@ -378,6 +388,7 @@ where
     ///     let source = focus
     ///         .map(move |m| if m { mouse } else { keys })
     ///         .hold(b, keys);
+    ///     b.depends(&source, &[&mouse, &keys]); // what the closure selects from
     ///     (keys_in, mouse_in, focus_in, source.switch_stream(b))
     /// });
     /// let seen = Rc::new(RefCell::new(Vec::new()));

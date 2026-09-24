@@ -197,6 +197,7 @@ fn steady_state_transactions_do_not_allocate() {
             let picked = numbers
                 .map(move |x| if x % 2 == 0 { total } else { tripled })
                 .hold(b, total);
+            b.depends(&picked, &[&total, &tripled]);
             let switched = picked.switch_cell(b);
             let switched_view = switched.steps(b);
             let evens = numbers.filter(|x| x % 2 == 0).share(b);
@@ -204,6 +205,7 @@ fn steady_state_transactions_do_not_allocate() {
             let followed = numbers
                 .map(move |x| if x % 2 == 0 { odds } else { evens })
                 .hold(b, evens);
+            b.depends(&followed, &[&odds, &evens]);
             let followed = followed.switch_stream(b).share(b);
             let plus = numbers.map(|x| x + 1).node(b);
             let plus = b.constant(plus);
@@ -211,8 +213,9 @@ fn steady_state_transactions_do_not_allocate() {
             let times = b.constant(times);
             let lines = numbers
                 .map(move |x| if x % 2 == 0 { plus } else { times })
-                .hold(b, plus)
-                .switch_cell(b);
+                .hold(b, plus);
+            b.depends(&lines, &[&plus, &times]);
+            let lines = lines.switch_cell(b);
             let taken = lines.switch_stream(b).share(b);
             let stage5 = (switched, switched_view, followed, taken);
 
@@ -220,19 +223,20 @@ fn steady_state_transactions_do_not_allocate() {
             // passes nothing, and one over an input only the negative
             // control sends to, whose closure builds a hold and a map_cell
             // that a switch_cell follows.
-            let _rejected = numbers
+            let rejected = numbers
                 .filter(|x| *x == u64::MAX)
                 .construct(b, |b, x| b.constant(x));
             let (opens, opens_in) = b.input::<u64>();
             let zero = b.constant(0u64);
-            let opened = opens
-                .construct(b, move |b, k| {
-                    let latest = numbers.map(move |x| x + k).hold(b, k);
-                    latest.map_cell(b, |l| l * 2)
-                })
-                .hold(b, zero)
-                .switch_cell(b);
-            let stage6 = (opens_in, opened);
+            let opening = opens.construct(b, move |b, k| {
+                let latest = numbers.map(move |x| x + k).hold(b, k);
+                latest.map_cell(b, |l| l * 2)
+            });
+            b.depends(&opening, &[&numbers]);
+            let opened = opening.hold(b, zero).switch_cell(b);
+            // Returned, so that the construct that never fires stays and is
+            // marked at every transaction.
+            let stage6 = (opens_in, opened, rejected);
             (
                 (numbers_in, bumps_in, open_in),
                 (total, both, merged),
@@ -316,7 +320,7 @@ fn steady_state_transactions_do_not_allocate() {
         .listen(taken, move |_| on_take.set(on_take.get() + 1))
         .keep();
 
-    let (opens_in, opened) = stage6;
+    let (opens_in, opened, _rejected) = stage6;
     let (openings, on_opened) = tally();
     graph.listen_cell(opened, move |v| on_opened.set(*v)).keep();
 

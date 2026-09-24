@@ -212,34 +212,35 @@ fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
         let pick = pick.share(b);
         let latest = numbers.hold(b, 0u64);
         let doubled = latest.map_cell(b, |n| n * 2);
-        let shown = pick
+        let chosen = pick
             .map(move |p| if p { doubled } else { latest })
-            .hold(b, latest)
-            .switch_cell(b);
+            .hold(b, latest);
+        b.depends(&chosen, &[&doubled, &latest]);
+        let shown = chosen.switch_cell(b);
         let views = shown.steps(b).accumulate(b, 0u64, |v, t| t + v);
         let all = numbers.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<u64>| v.push(n));
         let odd =
             numbers
                 .filter(|n| n % 2 == 1)
                 .accumulate_mut(b, Vec::new(), |n, v: &mut Vec<u64>| v.push(n));
-        let current: State<Vec<u64>> = pick
-            .map(move |p| if p { odd } else { all })
-            .hold(b, all)
-            .switch_cell(b);
+        let chosen = pick.map(move |p| if p { odd } else { all }).hold(b, all);
+        b.depends(&chosen, &[&odd, &all]);
+        let current: State<Vec<u64>> = chosen.switch_cell(b);
         let evens = numbers.filter(|n| n % 2 == 0).share(b);
-        let followed = pick
+        let chosen = pick
             .map(move |p| if p { evens } else { numbers })
-            .hold(b, numbers)
-            .switch_stream(b)
-            .accumulate(b, 0u64, |n, t| t + n);
+            .hold(b, numbers);
+        b.depends(&chosen, &[&evens, &numbers]);
+        let followed = chosen.switch_stream(b).accumulate(b, 0u64, |n, t| t + n);
         let tens = numbers.map(|n| n * 10).node(b);
         let tens = b.constant(tens);
         let hundreds = numbers.map(|n| n * 100).node(b);
         let hundreds = b.constant(hundreds);
-        let lines = pick
+        let chosen = pick
             .map(move |p| if p { hundreds } else { tens })
-            .hold(b, tens)
-            .switch_cell(b);
+            .hold(b, tens);
+        b.depends(&chosen, &[&hundreds, &tens]);
+        let lines = chosen.switch_cell(b);
         let taken = lines.switch_stream(b).accumulate(b, 0u64, |n, t| t + n);
         (
             numbers_in,

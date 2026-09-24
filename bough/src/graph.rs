@@ -19,7 +19,7 @@ use crate::error::{RemoteSendError, RemoteTransactionError};
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
 use crate::source::Node;
-use crate::token::{Input, Token, TokenRef};
+use crate::token::{Input, Token};
 use crate::trace::{Trace, Tracer};
 
 /// A built graph: the only place transactions run, and the only holder of
@@ -36,10 +36,41 @@ use crate::trace::{Trace, Tracer};
 /// `Graph<Threaded>` is `Send` because every field is: the engine stores
 /// each value, closure and chain in the mode's carrier, which is
 /// `Box<dyn Any + Send>` there. No `unsafe impl` says so.
+///
+/// # Memory
+///
+/// Nodes live in an arena the graph owns, and a node is alive while a root
+/// reaches it (RFD 3). There are three kinds of root: whatever the build
+/// closure returned, every live [`Listener`], and every live [`Anchor`].
+/// A node reaches what it depends on, the tokens in a stateful cell's
+/// committed value (found through [`Trace`]), a switch's current inner,
+/// the cells a chain snapshots or gates on, and what
+/// [`Build::depends`](crate::Build::depends) declares. Collection frees
+/// every node no root reaches, and a token naming a freed node is stale:
+/// its next use is an error, never a read of another node. So a token I/O
+/// code keeps, received as data from a listener, must be anchored or
+/// listened to before the next transaction, or it may be lost. Collection
+/// is automatic by default, and never runs inside a transaction; see
+/// [`CollectionPolicy`].
 pub struct Graph<M: Mode = Local> {
     build: Build<M>,
     /// The build closure's return value, traced once: the permanent roots.
     roots: Vec<Token>,
+    /// The anchored nodes, each with the flag its handle shares. A dropped
+    /// anchor is taken out at the next collection.
+    anchors: Vec<(u32, M::Flag)>,
+    /// The count of dropped handles, which every handle's flag shares, so
+    /// that a drop needs no graph access.
+    released: <M::Flag as FlagOps>::Released,
+    /// `released` as the last collection found it.
+    released_before: usize,
+    /// Live nodes after the last collection, zero before the first.
+    baseline: usize,
+    policy: CollectionPolicy,
+    /// `set_collect_after_every_transaction`.
+    stress: bool,
+    /// Operations on collected nodes dropped in release builds.
+    stale_operations: u64,
 }
 
 /// Transaction zero: nothing is started, so the new-node phase runs every
@@ -63,6 +94,13 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Graph<
     let graph = Graph {
         build,
         roots: tracer.visited,
+        anchors: Vec::new(),
+        released: <M::Flag as FlagOps>::released(),
+        released_before: 0,
+        baseline: 0,
+        policy: CollectionPolicy::Automatic,
+        stress: false,
+        stale_operations: 0,
     };
     (graph, r)
 }
@@ -97,6 +135,12 @@ impl Graph<Threaded> {
 }
 
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
+
+/// What the operations on collected nodes that the semantics cannot
+/// observe were asked to do, for the debug-build panic.
+const SEND: &str = "a send to a collected input";
+const LISTEN: &str = "a listener on a collected node";
+const ANCHOR: &str = "an anchor on a collected node";
 
 /// A stream listener's call: take the event from a linear stream, clone it
 /// from a shared one.
@@ -146,6 +190,70 @@ impl<M: Mode> Graph<M> {
         })
     }
 
+    /// The token check of a panicking entry whose operation, on a collected
+    /// node, the semantics cannot observe: a foreign token panics, and a
+    /// stale one is [`stale_operation`](Graph::stale_operation), `None`.
+    fn checked(&mut self, token: Token, what: &str) -> Option<u32> {
+        match self.build.lookup(token) {
+            Ok(i) => Some(i),
+            Err(TokenFault::Foreign) => panic!("bough: a token from another graph"),
+            Err(TokenFault::Stale) => {
+                self.stale_operation(what);
+                None
+            }
+        }
+    }
+
+    /// Sending to a collected input, listening to a collected node or
+    /// anchoring one has no effect the semantics can observe (RFD 5): a
+    /// panic in a debug build and, following the integer-overflow
+    /// precedent, a no-op in a release build, counted so that a release
+    /// build can still report that it drops them.
+    fn stale_operation(&mut self, what: &str) {
+        if cfg!(debug_assertions) {
+            panic!(
+                "bough: {what}: its token is stale. A node no root reaches is collected; \
+                 anchor or listen to what I/O code keeps a token of. In a release build this \
+                 is a no-op that `Graph::stale_operations` counts"
+            );
+        }
+        self.stale_operations += 1;
+    }
+
+    /// Handles dropped since the last collection.
+    fn released_since(&self) -> usize {
+        <M::Flag as FlagOps>::count(&self.released).wrapping_sub(self.released_before)
+    }
+
+    /// Runs a collection if one is due, as a transaction opens: under the
+    /// automatic policy when the nodes allocated and the handles released
+    /// since the last collection exceed the live count it left, and always
+    /// under the stress setting. Before the transaction rather than after
+    /// it, so that I/O code can anchor a token a listener handed it in the
+    /// transaction before (RFD 2's receive, then wire).
+    fn collect_if_due(&mut self) {
+        let due = self.stress
+            || (self.policy == CollectionPolicy::Automatic
+                && self
+                    .build
+                    .store
+                    .allocated
+                    .saturating_add(self.released_since())
+                    > self.baseline);
+        if due {
+            self.collect_now();
+        }
+    }
+
+    /// Collects now, and starts counting toward the next one.
+    fn collect_now(&mut self) {
+        let released = <M::Flag as FlagOps>::count(&self.released);
+        self.build.collect(&self.roots, &mut self.anchors);
+        self.released_before = released;
+        self.baseline = self.build.store.live;
+        self.build.store.allocated = 0;
+    }
+
     /// Sends one value in a transaction of its own. Returns after the
     /// transaction's listeners have run, and after its child transactions,
     /// which a [`split`](crate::Source::split) or a
@@ -154,15 +262,21 @@ impl<M: Mode> Graph<M> {
     ///
     /// Panics on a foreign token or a poisoned graph. Sending to a collected
     /// input is unobservable by the semantics: a panic in debug builds and a
-    /// counted no-op in release builds.
+    /// no-op in release builds, which [`stale_operations`](Graph::stale_operations)
+    /// counts.
+    ///
+    /// A collection that is due runs first, before the transaction opens.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A)
     where
         M: Accepts<A>,
     {
         self.enter();
+        self.collect_if_due();
         // The token is checked before the transaction opens, so a foreign
         // token is a panic that leaves the graph usable.
-        let i = self.build.check(input.token);
+        let Some(i) = self.checked(input.token, SEND) else {
+            return;
+        };
         self.build.begin();
         self.build
             .fire_start(i, value)
@@ -178,6 +292,7 @@ impl<M: Mode> Graph<M> {
         if self.poisoned() {
             return Err(SendError::Poisoned);
         }
+        self.collect_if_due();
         let i = self
             .build
             .lookup(input.token)
@@ -200,8 +315,10 @@ impl<M: Mode> Graph<M> {
     /// transaction's listeners and its child transactions run before it
     /// returns. A panic inside `f`, including one from
     /// [`Transaction::send`], escapes the transaction and poisons the graph.
+    /// A collection that is due runs first, before the transaction opens.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
+        self.collect_if_due();
         self.build.begin();
         let r = f(&mut Transaction { graph: self });
         self.build.finish();
@@ -251,8 +368,10 @@ impl<M: Mode> Graph<M> {
         M: Accepts<F>,
     {
         self.enter();
-        let i = self.build.check(source.node_token());
-        self.attach(i, f, call_stream::<M, S, F>)
+        match self.checked(source.node_token(), LISTEN) {
+            Some(i) => self.attach(i, f, call_stream::<M, S, F>),
+            None => Listener { alive: None },
+        }
     }
 
     /// [`listen`](Graph::listen), returning the error instead of panicking.
@@ -284,7 +403,9 @@ impl<M: Mode> Graph<M> {
         M: Accepts<F>,
     {
         self.enter();
-        let i = self.build.check(cell.token());
+        let Some(i) = self.checked(cell.token(), LISTEN) else {
+            return Listener { alive: None };
+        };
         f(self.build.value::<C::Value>(i));
         self.attach(i, f, call_cell::<M, C::Value, F>)
     }
@@ -314,8 +435,10 @@ impl<M: Mode> Graph<M> {
         M: Accepts<F>,
     {
         self.enter();
-        let i = self.build.check(cell.token());
-        self.attach(i, f, call_cell::<M, C::Value, F>)
+        match self.checked(cell.token(), LISTEN) {
+            Some(i) => self.attach(i, f, call_cell::<M, C::Value, F>),
+            None => Listener { alive: None },
+        }
     }
 
     /// [`listen_steps`](Graph::listen_steps), returning the error instead of
@@ -341,7 +464,7 @@ impl<M: Mode> Graph<M> {
     where
         M: Accepts<F>,
     {
-        let flag = M::Flag::live();
+        let flag = <M::Flag as FlagOps>::live(&self.released);
         let store = &mut self.build.store;
         store.listeners[i as usize].push(Entry {
             flag: flag.clone(),
@@ -352,15 +475,85 @@ impl<M: Mode> Graph<M> {
         Listener { alive: Some(flag) }
     }
 
-    /// Anchors a node that I/O code wants to hold without listening to it,
-    /// returning the handle that keeps it alive.
-    pub fn anchor(&mut self, token: &impl TokenRef) -> Anchor<M> {
-        todo!()
+    /// Anchors what I/O code wants to hold without listening to it, and
+    /// returns the handle that keeps it alive: one of the three kinds of
+    /// root. `value` is a token, or any value that holds tokens, such as the
+    /// tuple or struct of tokens a [`construct`](crate::Source::construct)
+    /// closure made; the anchor roots every token its [`Trace`] finds, as
+    /// the build closure's return value roots its own. Dropping the handle,
+    /// or [`unanchor`](Anchor::unanchor), removes the root;
+    /// [`keep`](Anchor::keep) keeps it for the graph's life.
+    ///
+    /// A token a listener hands I/O code as data names a node that nothing
+    /// may reach, such as an input a closure built. Anchor it after the
+    /// transaction that delivered it and before the next one, when a
+    /// collection may run:
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (open_in, opened)) = Graph::build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // receive
+    /// let counter = received.borrow()[0];
+    /// let _counter = graph.anchor(&counter); // the input and the count
+    /// let (bumps_in, count) = counter;
+    /// graph.send(bumps_in, 5); // then use
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    ///
+    /// Panics on a foreign token or a poisoned graph. Anchoring a collected
+    /// node is a panic in a debug build and, in a release build, a no-op
+    /// that [`stale_operations`](Graph::stale_operations) counts: the handle
+    /// anchors the value's other nodes.
+    pub fn anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Anchor<M> {
+        self.enter();
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        // Every token is checked before any is rooted, so a panic leaves no
+        // root behind that no handle could remove.
+        let nodes: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .filter_map(|token| self.checked(token, ANCHOR))
+            .collect();
+        let flag = <M::Flag as FlagOps>::live(&self.released);
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+        Anchor { alive: Some(flag) }
     }
 
     /// [`anchor`](Graph::anchor), returning the error instead of panicking.
-    pub fn try_anchor(&mut self, token: &impl TokenRef) -> Result<Anchor<M>, TokenError> {
-        todo!()
+    /// A value with a stale or foreign token anchors nothing.
+    pub fn try_anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Result<Anchor<M>, TokenError> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let start = self.anchors.len();
+        let flag = <M::Flag as FlagOps>::live(&self.released);
+        for token in tracer.visited {
+            match self.lookup(token) {
+                Ok(i) => self.anchors.push((i, flag.clone())),
+                Err(error) => {
+                    self.anchors.truncate(start);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Anchor { alive: Some(flag) })
     }
 
     /// The cell's current value, by reference. The cell is a
@@ -394,29 +587,57 @@ impl<M: Mode> Graph<M> {
         Ok(self.build.value::<C::Value>(i))
     }
 
-    /// Runs a garbage collection now (RFD 3).
+    /// Runs a collection now (RFD 3): frees every node that no root
+    /// reaches, whatever the policy. The call the manual policy runs, at
+    /// the end of a frame or wherever the driver chooses to pay.
+    ///
+    /// It marks from the roots, frees what it did not mark, and takes the
+    /// freed nodes out of the lists of those that remain. It empties every
+    /// stream's slot first: an event nobody consumed is dropped, so a token
+    /// in it roots nothing. Nothing is counted, so a cycle, through values
+    /// or through a loop, is collected like anything else. A freed node's
+    /// slot is reused, oldest first, under a new generation, so every token
+    /// naming the old node stays stale. The `Drop` of the values, events and
+    /// closures it frees runs here; a panic in one poisons the graph.
+    ///
+    /// Panics on a poisoned graph.
     pub fn collect_garbage(&mut self) {
-        todo!()
+        self.enter();
+        self.collect_now();
     }
 
     /// [`collect_garbage`](Graph::collect_garbage), returning the error
     /// instead of panicking.
     pub fn try_collect_garbage(&mut self) -> Result<(), PoisonedError> {
-        todo!()
+        if self.poisoned() {
+            return Err(PoisonedError);
+        }
+        self.collect_now();
+        Ok(())
     }
 
-    /// Chooses when collection runs. The default is automatic and amortized.
+    /// Chooses when collection runs. The default is
+    /// [`Automatic`](CollectionPolicy::Automatic).
     pub fn set_collection_policy(&mut self, policy: CollectionPolicy) {
-        todo!()
+        self.policy = policy;
     }
 
-    /// Collects after every transaction, so a stale-token bug surfaces
-    /// deterministically. A test affordance.
+    /// With `true`, collects as every transaction opens, whatever the
+    /// policy, so that a closure capture that should have been declared
+    /// with [`depends`](crate::Build::depends), or a token I/O code kept
+    /// without anchoring it, is a stale-token error the first time the code
+    /// runs rather than whenever the automatic policy happens to collect. A
+    /// test setting: a transaction then costs a collection.
+    ///
+    /// The collection runs when the next transaction opens, which is after
+    /// every transaction by the time another one runs, and never between a
+    /// transaction's listeners and the I/O code they report to.
     pub fn set_collect_after_every_transaction(&mut self, enabled: bool) {
-        todo!()
+        self.stress = enabled;
     }
 
     /// The number of live nodes: how the no-leak requirement is asserted.
+    /// Build, drive, drop the handles, collect, and compare.
     ///
     /// Every materializer creates one node, however long its chain;
     /// `input_cell` creates two, the input and the hold over it, and so do
@@ -447,9 +668,12 @@ impl<M: Mode> Graph<M> {
         self.build.s.statistics
     }
 
-    /// How many operations on collected nodes were dropped in release builds.
+    /// How many operations on collected nodes were dropped in release
+    /// builds: sends to a collected input, listeners on a collected node
+    /// and anchors on one, which a debug build panics on instead. Zero in a
+    /// debug build.
     pub fn stale_operations(&self) -> u64 {
-        todo!()
+        self.stale_operations
     }
 
     /// Runs every pending input slot as a transaction of its own, in
@@ -493,13 +717,19 @@ impl<M: Mode> Graph<M> {
     }
 }
 
-/// When garbage collection runs.
+/// When collection runs. It never runs inside a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionPolicy {
-    /// After a transaction, when the nodes allocated plus the roots released
-    /// since the last collection exceed the live count.
+    /// Amortized: as a transaction opens, when the nodes allocated plus the
+    /// handles released since the last collection exceed the number of
+    /// nodes that collection left alive. Garbage is made by unrooting as
+    /// much as by allocating, so a graph that only drops listeners still
+    /// collects, and a graph that neither allocates nor drops a handle
+    /// never pays. The first transaction after the build collects what the
+    /// build closure built and did not root.
     Automatic,
-    /// Only on [`Graph::collect_garbage`].
+    /// Only on [`Graph::collect_garbage`]: for a frame loop that collects at
+    /// the end of a frame, or a high-rate loop that chooses when it pays.
     Manual,
 }
 
@@ -513,6 +743,10 @@ impl<M: Mode> Transaction<'_, M> {
     ///
     /// Panics on a foreign token and on a second send to a non-coalescing
     /// input. The panic escapes the transaction, so it poisons the graph.
+    /// A send to a collected input is unobservable by the semantics: a
+    /// panic in a debug build, which poisons the graph too, and in a release
+    /// build a no-op that
+    /// [`Graph::stale_operations`](Graph::stale_operations) counts.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A)
     where
         M: Accepts<A>,
@@ -523,9 +757,7 @@ impl<M: Mode> Transaction<'_, M> {
                 panic!("bough: a second send to a non-coalescing input in one transaction")
             }
             Err(TransactionSendError::ForeignGraph) => panic!("bough: a token from another graph"),
-            Err(TransactionSendError::Stale) => {
-                panic!("bough: a stale token: its node was collected")
-            }
+            Err(TransactionSendError::Stale) => self.graph.stale_operation(SEND),
         }
     }
 
@@ -555,6 +787,12 @@ impl<M: Mode> Transaction<'_, M> {
 /// a listener. The flag's type is the mode's, a counted cell in `Local` and
 /// an atomic in `Threaded`, which is why the handle carries the mode; the
 /// parameter is defaulted, so `Local` code never writes it.
+///
+/// A live listener is a root: its node, and everything the node reaches,
+/// stays alive. Dropping the last one lets collection free them; a linear
+/// stream is consumed by `listen`, so once its listener is dropped nothing
+/// can observe it again. The drop counts as a released root for the
+/// automatic policy, through the flag, with no graph access.
 pub struct Listener<M: Mode = Local> {
     /// The flag shared with the node's entry; `None` once kept.
     alive: Option<M::Flag>,
@@ -582,8 +820,10 @@ impl<M: Mode> Drop for Listener<M> {
 }
 
 /// The handle that keeps a node alive from I/O code without listening to
-/// it, one of the three kinds of root. Dropping it removes the root. It
-/// carries the mode for the same reason a [`Listener`] does.
+/// it, one of the three kinds of root, from [`Graph::anchor`]. Dropping it
+/// removes the root, and the node is collected at a later collection if
+/// nothing else reaches it. It borrows nothing from the graph, and carries
+/// the mode for the same reason a [`Listener`] does.
 ///
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
 /// which is the concept this is one kind of.
@@ -595,12 +835,21 @@ pub struct Anchor<M: Mode = Local> {
 impl<M: Mode> Anchor<M> {
     /// Removes the root now, the same as dropping the handle.
     pub fn unanchor(self) {
-        todo!()
+        drop(self);
     }
 
-    /// Keeps the root for the life of the graph.
-    pub fn keep(self) {
-        todo!()
+    /// Keeps the root for the life of the graph, without a handle to hold.
+    /// The handle gives up its share of the flag without clearing it.
+    pub fn keep(mut self) {
+        self.alive = None;
+    }
+}
+
+impl<M: Mode> Drop for Anchor<M> {
+    fn drop(&mut self) {
+        if let Some(flag) = self.alive.take() {
+            flag.clear();
+        }
     }
 }
 
@@ -685,14 +934,16 @@ mod tests {
     /// every consumer.
     #[test]
     fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
-        let (mut graph, (linear_in, shared_in, shared)) = Graph::build(|b| {
+        // The consumers are returned, so that they are roots: a consumer no
+        // root reaches is collected at the first send, and takes nothing.
+        let (mut graph, (linear_in, shared_in, shared, _consumers)) = Graph::build(|b| {
             let (linear, linear_in) = b.input::<u32>();
-            let _latest = linear.hold(b, 0u32);
+            let latest = linear.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
             let shared = events.share(b);
-            let _plus = shared.map(|x| x + 1).hold(b, 0u32);
-            let _same = shared.hold(b, 0u32);
-            (linear_in, shared_in, shared)
+            let plus = shared.map(|x| x + 1).hold(b, 0u32);
+            let same = shared.hold(b, 0u32);
+            (linear_in, shared_in, shared, [latest, plus, same])
         });
         let data = |graph: &Graph, index: u32| {
             *slot::<Local, u32>(&graph.build.store.data[index as usize])

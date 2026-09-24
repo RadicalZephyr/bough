@@ -1,12 +1,28 @@
-//! Stateful cells: holds, input cells (holds over an input), accumulators
-//! and in-place accumulators; and `scan`, a stream whose private state is
-//! the same fold.
+//! Stateful cells: constants, holds, input cells (holds over an input),
+//! accumulators and in-place accumulators; and `scan`, a stream whose
+//! private state is the same fold. Their committed values, and `scan`'s
+//! state, are what collection traces for tokens: the operations that
+//! persist a value require it to be `Trace`.
 
 use super::Marker;
 use crate::build::Build;
-use crate::engine::{Cx, Data, NodeOps, Ops, cell_mut, in_place_mut, part};
-use crate::mode::Mode;
+use crate::engine::{
+    Cx, Data, NodeOps, Ops, cell_mut, clear_slot, in_place_mut, part, trace_cell, trace_in_place,
+};
+use crate::mode::{Carrier, Mode};
 use crate::source::Source;
+use crate::trace::{Trace, Tracer};
+
+/// `constant`: a stateful cell that never steps, so it has no program and
+/// nothing marks it; collection traces its value.
+pub(crate) struct ConstantNode<A>(Marker<A>);
+
+impl<M: Mode, A: Trace + 'static> NodeOps<M> for ConstantNode<A> {
+    const OPS: Ops<M> = Ops {
+        trace: trace_cell::<M, A>,
+        ..Ops::<M>::DEFAULT
+    };
+}
 
 /// `hold`: the chain's event becomes `pending`, and commit moves it into
 /// the value. The hold is the chain's sole consumer, so the event moves
@@ -34,11 +50,12 @@ pub(crate) fn commit_cell<M: Mode, A: 'static>(_: &mut [M::Carrier], d: &mut Dat
 
 impl<M: Mode, S: Source> NodeOps<M> for HoldNode<S>
 where
-    S::Event: 'static,
+    S::Event: Trace + 'static,
 {
     const OPS: Ops<M> = Ops {
         eval: eval_hold::<M, S>,
         commit: commit_cell::<M, S::Event>,
+        trace: trace_cell::<M, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -71,12 +88,13 @@ impl<M, S, St, F> NodeOps<M> for AccumulateNode<S, St, F>
 where
     M: Mode,
     S: Source,
-    St: 'static,
+    St: Trace + 'static,
     F: Fn(S::Event, &St) -> St + 'static,
 {
     const OPS: Ops<M> = Ops {
         eval: eval_accumulate::<M, S, St, F>,
         commit: commit_cell::<M, St>,
+        trace: trace_cell::<M, St>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -120,13 +138,14 @@ impl<M, S, St, F> NodeOps<M> for InPlaceNode<S, St, F>
 where
     M: Mode,
     S: Source,
-    St: 'static,
+    St: Trace + 'static,
     S::Event: 'static,
     F: FnMut(S::Event, &mut St) + 'static,
 {
     const OPS: Ops<M> = Ops {
         eval: eval_in_place::<M, S, St>,
         commit: commit_in_place::<M, S, St, F>,
+        trace: trace_in_place::<M, St>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -159,16 +178,32 @@ where
     b.put_event(me, out);
 }
 
+/// `scan`'s state, the program's third part, which may hold tokens as a
+/// committed value does.
+fn trace_scan<M: Mode, St: Trace + 'static>(
+    _: &Data<M>,
+    parts: &[M::Carrier],
+    tracer: &mut Tracer,
+) {
+    parts[2]
+        .get()
+        .downcast_ref::<St>()
+        .expect("bough engine: scan state type")
+        .trace(tracer);
+}
+
 impl<M, S, St, B, F> NodeOps<M> for ScanNode<S, St, B, F>
 where
     M: Mode,
     S: Source,
-    St: 'static,
+    St: Trace + 'static,
     B: 'static,
     F: Fn(S::Event, &St) -> (B, St) + 'static,
 {
     const OPS: Ops<M> = Ops {
         eval: eval_scan::<M, S, St, B, F>,
+        trace: trace_scan::<M, St>,
+        clear_slot: clear_slot::<M, B>,
         ..Ops::<M>::DEFAULT
     };
 }

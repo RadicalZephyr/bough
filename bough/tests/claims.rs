@@ -61,18 +61,21 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
         drops: drops.clone(),
     };
     let initial = counted(0);
-    let (mut graph, (linear_in, shared_in, last_linear, lengths, bangs)) = Graph::build(move |b| {
-        // Linear: an input of a type with no Clone, consumed by one hold.
-        let (linear, linear_in) = b.input::<NoClone>();
-        let last_linear = linear.hold(b, NoClone(0));
-        // Shared: one shared node, two consumers of different kinds.
-        let (shared, shared_in) = b.input::<Counted>();
-        let shared = shared.share(b);
-        let lengths = shared.map(|c| c.value * 10).hold(b, 0u32);
-        let bangs = shared.map(|c| c.value + 1).node(b);
-        let _keeps = shared.hold(b, initial);
-        (linear_in, shared_in, last_linear, lengths, bangs)
-    });
+    let (mut graph, (linear_in, shared_in, last_linear, lengths, bangs, _keeps)) =
+        Graph::build(move |b| {
+            // Linear: an input of a type with no Clone, consumed by one hold.
+            let (linear, linear_in) = b.input::<NoClone>();
+            let last_linear = linear.hold(b, NoClone(0));
+            // Shared: one shared node, three consumers of different kinds.
+            let (shared, shared_in) = b.input::<Counted>();
+            let shared = shared.share(b);
+            let lengths = shared.map(|c| c.value * 10).hold(b, 0u32);
+            let bangs = shared.map(|c| c.value + 1).node(b);
+            // Returned, so a root: a hold no root reaches is collected at the
+            // first send, and neither clones nor keeps anything.
+            let keeps = shared.hold(b, initial);
+            (linear_in, shared_in, last_linear, lengths, bangs, keeps)
+        });
     let (seen, on) = recorder();
     graph.listen(bangs, on).keep();
 

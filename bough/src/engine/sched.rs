@@ -4,6 +4,8 @@
 
 use alloc::vec::Vec;
 
+use crate::token::Token;
+
 /// The scheduler's buffers and settings.
 #[derive(Default)]
 pub(crate) struct Sched {
@@ -38,7 +40,14 @@ pub(crate) struct Sched {
     pub(crate) depth: usize,
     /// The path checks' stack (stages 3 and 5).
     pub(crate) search: Vec<(u32, u32)>,
+    /// The epoch of the last path check or collection: a node's `visit`
+    /// equal to it was visited by that walk.
     pub(crate) visit_epoch: u64,
+    /// Collection's marking stack (stage 7).
+    pub(crate) gray: Vec<u32>,
+    /// The tokens a `Trace` walk found in one value, before marking takes
+    /// them (stage 7).
+    pub(crate) traced: Vec<Token>,
     /// Loops declared and not yet closed; `scopes` holds offsets into it.
     pub(crate) open_loops: Vec<u32>,
     pub(crate) scopes: Vec<usize>,

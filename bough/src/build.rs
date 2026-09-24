@@ -5,8 +5,8 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cell::CellRef;
-use crate::engine::nodes::cell::HoldNode;
-use crate::engine::nodes::stream::CoalescingInput;
+use crate::engine::nodes::cell::{ConstantNode, HoldNode};
+use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::slot::InputSlot;
@@ -67,7 +67,7 @@ impl<M: Mode> Build<M> {
     /// `erase_send` and needs no `Accepts<Stream<A>>` bound.
     fn hold_input<A>(&mut self, stream: Stream<A>, initial: A) -> Cell<A>
     where
-        A: 'static,
+        A: Trace + 'static,
         M: Accepts<A>,
     {
         let input = self.check(stream.token);
@@ -89,7 +89,8 @@ impl<M: Mode> Build<M> {
         M: Accepts<A>,
     {
         let data = Data::Slot(<M as Accepts<A>>::erase(Erase::Slot));
-        let n = self.materialize(Kind::Input, data, Box::new([]), &Ops::<M>::DEFAULT, &[], 0);
+        let ops = &<SlotNode<A> as NodeOps<M>>::OPS;
+        let n = self.materialize(Kind::Input, data, Box::new([]), ops, &[], 0);
         let t = self.token(n);
         (Stream::from_token(t), Input::from_token(t))
     }
@@ -138,14 +139,8 @@ impl<M: Mode> Build<M> {
         M: Accepts<A>,
     {
         let data = Data::Cell(<M as Accepts<A>>::erase(Erase::Cell(value)));
-        let n = self.materialize(
-            Kind::Constant,
-            data,
-            Box::new([]),
-            &Ops::<M>::DEFAULT,
-            &[],
-            0,
-        );
+        let ops = &<ConstantNode<A> as NodeOps<M>>::OPS;
+        let n = self.materialize(Kind::Constant, data, Box::new([]), ops, &[], 0);
         Cell::from_token(self.token(n))
     }
 
@@ -301,9 +296,49 @@ impl<M: Mode> Build<M> {
 
     /// Declares that `node` keeps every token in `on` alive, for a closure
     /// that captures tokens that are not upstream of its own node (RFD 3).
-    /// One declaration per closure; the slice is heterogeneous.
+    /// One declaration per closure; the slice is heterogeneous, and takes
+    /// references, so a linear stream is not consumed.
+    ///
+    /// A node is alive while a root reaches it: the build closure's return
+    /// value, a live listener, or a live [`Anchor`](crate::Anchor). What a
+    /// node reaches is what it depends on, the tokens in a stateful cell's
+    /// committed value, and what this declares. A closure's captures are
+    /// invisible to the collector, so a capture of a node that is not
+    /// upstream of the closure's own node, a backward or an unrelated one,
+    /// must be declared here, or the node is collected when nothing else
+    /// reaches it and the closure's next use of the token is a stale-token
+    /// error. Here the map emits a cell nothing else names:
+    ///
+    /// ```
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (pick_in, shown)) = Graph::build(|b| {
+    ///     let english = b.constant("hello".to_string());
+    ///     let french = b.constant("bonjour".to_string());
+    ///     let (pick, pick_in) = b.input::<bool>();
+    ///     let language = pick
+    ///         .map(move |fr| if fr { french } else { english })
+    ///         .hold(b, english);
+    ///     // The hold names `english` in its value, but `french` only in
+    ///     // its closure until the first pick.
+    ///     b.depends(&language, &[&french, &english]);
+    ///     (pick_in, language.switch_cell(b))
+    /// });
+    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// graph.send(pick_in, true);
+    /// assert_eq!(graph.sample(shown), "bonjour");
+    /// ```
+    ///
+    /// A capture upstream of the node needs nothing, since the node reaches
+    /// it anyway. A declaration is reach, not a dependency: it orders no
+    /// evaluation and can close no cycle. It panics on a stale or foreign
+    /// token, as every build-time use of one does.
     pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn TokenRef]) {
-        todo!()
+        let n = self.check(node.token());
+        for token in on {
+            let d = self.check(token.token());
+            self.store.cold[n as usize].reach.push(d);
+        }
     }
 
     /// Connects an [`InputSlot`] to an input, so that

@@ -20,8 +20,11 @@
 //! the order of sends could matter, with each transaction's sends in both
 //! orders; each must give GHC's values under all of them. Cells and logs a
 //! closure builds reach the test through a listener on the construct's
-//! stream: the test receives them, then samples them after each
-//! transaction from the one that built them on.
+//! stream: the test receives them, anchors them before the next
+//! transaction, since nothing in the graph names them (RFD 3), and samples
+//! them after each transaction from the one that built them on. A closure
+//! that captures a token its construct's stream does not depend on
+//! declares it with `depends`.
 
 use std::cell::RefCell;
 use std::fmt::Debug;
@@ -29,8 +32,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use bough::{
-    Build, Cell, Graph, Input, Local, PoisonedError, SendError, Shared, Source, Stream, TokenError,
-    Trace, Transaction,
+    Anchor, Build, Cell, Graph, Input, Local, PoisonedError, SendError, Shared, Source, Stream,
+    TokenError, Trace, Transaction,
 };
 
 /// The plain order, then seeds for RFD 1's order shuffle.
@@ -123,12 +126,13 @@ fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
 }
 
 /// Runs `schedule`, one transaction per entry, in `order`, and observes
-/// the graph after each.
+/// the graph after each, before the next, which may collect: the observer
+/// may anchor what it received.
 fn drive<S>(
     graph: &mut Graph,
     order: Order,
     schedule: &[Vec<Send>],
-    observe: impl Fn(&Graph) -> S,
+    mut observe: impl FnMut(&mut Graph) -> S,
 ) -> Vec<S> {
     graph.set_shuffle_seed(order.seed);
     schedule
@@ -138,6 +142,20 @@ fn drive<S>(
             observe(graph)
         })
         .collect()
+}
+
+/// Anchors what a listener received since the last call, one anchor per
+/// value: tokens a closure built reach I/O code as data, which nothing in
+/// the graph names, so they are collected unless anchored before the next
+/// transaction (RFD 3: anchor it or lose it).
+fn anchor_received<T: Trace>(
+    graph: &mut Graph,
+    received: &RefCell<Vec<T>>,
+    anchors: &mut Vec<Anchor>,
+) {
+    for value in &received.borrow()[anchors.len()..] {
+        anchors.push(graph.anchor(value));
+    }
 }
 
 /// Observations after transactions 1, 2, ... of the things closures had
@@ -218,13 +236,15 @@ fn claim4_construct_creates_nodes_while_a_closure_runs_in_both_send_orders() {
             let e = e.share(b);
             let (go, go_in) = b.input::<u32>();
             let zero = b.constant(0u32);
-            let made = go
-                .construct(b, move |b, k| {
-                    let h = e.map(move |v| v + k).hold(b, 0u32);
-                    on_inside(*h.sample(b));
-                    h
-                })
-                .hold(b, zero);
+            let made = go.construct(b, move |b, k| {
+                let h = e.map(move |v| v + k).hold(b, 0u32);
+                on_inside(*h.sample(b));
+                h
+            });
+            // The closure captures `e`, which the construct does not
+            // depend on.
+            b.depends(&made, &[&e]);
+            let made = made.hold(b, zero);
             (e_in, go_in, made)
         });
         graph.set_shuffle_seed(order.seed);
@@ -283,7 +303,9 @@ fn r1_a_loop_in_a_construct_closure_with_readers_built_before_its_definition() {
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         let schedule = [vec![send(s_in, 5)], vec![send(s_in, 7)]];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let (cells, log) = received.borrow()[0];
             (cells.map(|c| *graph.sample(c)), graph.sample(log).clone())
         });
@@ -327,7 +349,9 @@ fn r2(definition_is_a_node: bool) -> Vec<(usize, Vec<u32>)> {
         let (received, on) = recorder::<Cell<u32>>();
         graph.listen(made, on).keep();
         let schedule = [vec![send(s_in, 5)], vec![send(s_in, 7)]];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let held = received.borrow();
             held.iter().map(|h| *graph.sample(*h)).collect::<Vec<_>>()
         });
@@ -397,6 +421,7 @@ fn everything_a_closure_builds_exists_from_its_instant() {
                 ];
                 (*c.sample(b), cells)
             });
+            b.depends(&made, &[&s, &c, &q]);
             ((s_in, c_in, q_in, go_in), made)
         });
         let (received, on) = recorder();
@@ -406,7 +431,9 @@ fn everything_a_closure_builds_exists_from_its_instant() {
             vec![send(s_in, 2), send(c_in, 12), send(go_in, ())],
             vec![send(s_in, 3), send(c_in, 13), send(q_in, 43)],
         ];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
@@ -476,7 +503,9 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
         graph.listen(made, on).keep();
         let at_build = graph.sample(shown).clone();
         let schedule = [vec![send(s_in, 1)], vec![send(s_in, 2)]];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             let holds: Vec<u32> = received.iter().map(|(_, h)| *graph.sample(*h)).collect();
             (
@@ -577,12 +606,14 @@ fn a_construct_built_by_a_closure_runs_at_its_creation_instant_and_after() {
         let (received, on) = recorder::<Cell<u32>>();
         graph.listen(made, on).keep();
         let at_build = graph.sample(top).clone();
+        let mut anchors = Vec::new();
         let schedule = [
             vec![send(s_in, 1)],
             vec![send(s_in, 2)],
             vec![send(s_in, 3)],
         ];
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             let bodies: Vec<u32> = received.iter().map(|sw| *graph.sample(*sw)).collect();
             (graph.sample(top).clone(), bodies)
@@ -647,7 +678,9 @@ fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
             vec![send(lists_in, vec![1, 2, 3])],
             vec![send(lists_in, vec![4])],
         ];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             let holds: Vec<u32> = received.iter().map(|(h, _)| *graph.sample(*h)).collect();
             (logs.map(|l| graph.sample(l).clone()), holds)
@@ -719,12 +752,15 @@ fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
                 let sw = outer.switch_cell(b);
                 (sw.steps(b).hold(b, 99u32), log_steps(b, sw))
             });
+            b.depends(&made, &[&xs]);
             (go_in, xs_in, made)
         });
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         let schedule = [vec![send(xs_in, 4), send(go_in, ())], vec![send(xs_in, 5)]];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let (h, log) = received.borrow()[0];
             (*graph.sample(h), graph.sample(log).clone())
         });
@@ -764,6 +800,8 @@ fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
                 let inside = *sw.sample(b);
                 (inside, sw.steps(b).hold(b, 99u32), log_steps(b, sw))
             });
+            b.depends(&made, &[&outer]);
+            b.depends(&outer, &[&c2]);
             ((sel_in, go_in, x_in), made)
         });
         let (received, on) = recorder();
@@ -773,7 +811,9 @@ fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
             vec![send(go_in, ())],
             vec![send(x_in, 30)],
         ];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
@@ -815,10 +855,12 @@ fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
             let (sel, sel_in) = b.input::<bool>();
             let outer = sel.map(move |p| if p { z } else { a }).hold(b, a);
             let (go, go_in) = b.input::<()>();
+            b.depends(&outer, &[&z, &a]);
             let made = go.construct(b, move |b, ()| {
                 let events = outer.switch_stream(b);
                 log_events(b, events)
             });
+            b.depends(&made, &[&outer]);
             ((a_in, z_in, sel_in, go_in), made)
         });
         let (received, on) = recorder::<Cell<Vec<char>>>();
@@ -835,7 +877,9 @@ fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
             vec![send(a_in, 'd'), send(z_in, 'W'), send(sel_in, false)],
             vec![send(a_in, 'e'), send(z_in, 'V')],
         ];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
@@ -886,6 +930,9 @@ fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t(
             let before = sel1.map(move |_| c2).hold(b, c1);
             let at = sel2.map(move |_| c2).hold(b, c1);
             let after = sel3.map(move |_| c2).hold(b, c1);
+            for outer in [before, at, after] {
+                b.depends(&outer, &[&c2]);
+            }
             let (go, go_in) = b.input::<()>();
             let go = go.share(b);
             let made = go.construct(b, move |b, ()| {
@@ -900,6 +947,7 @@ fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t(
                 let logs = switches.map(|sw| log_steps(b, sw));
                 (inside, switches, logs)
             });
+            b.depends(&made, &[&before, &at, &after, &x, &c3, &sel3]);
             ((x_in, y_in, sel1_in, sel2_in, sel3_in, go_in), made)
         });
         let (x_in, y_in, sel1_in, sel2_in, sel3_in, go_in) = inputs;
@@ -915,7 +963,9 @@ fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t(
             ],
             vec![send(x_in, 30), send(y_in, 300), send(sel3_in, ())],
         ];
+        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
+            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
@@ -1085,14 +1135,16 @@ fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct()
 /// leaves open is a panic when it returns, which poisons the graph.
 #[test]
 fn a_loop_left_open_in_a_construct_closure_panics_and_poisons() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
-        let _made = go.construct(b, |b, _| {
+        let made = go.construct(b, |b, _| {
             let (forward, _closer) = b.cell_loop::<u32>();
             forward
         });
-        (go_in, go.hold(b, 0u32))
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made)
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(
@@ -1132,15 +1184,17 @@ fn a_closer_smuggled_into_a_construct_closure_leaves_its_scope_open() {
 /// from its own forward, at close.
 #[test]
 fn a_loop_a_closure_closes_into_a_same_instant_cycle_is_refused_at_close() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>(); // node 1
         let go = go.share(b); // node 2
-        let _made = go.construct(b, |b, _| {
+        let made = go.construct(b, |b, _| {
             let (forward, closer) = b.cell_loop::<u32>(); // node 5
             let next = forward.map_cell(b, |v| v + 1); // node 6
             closer.close(b, next);
         }); // node 3
-        (go_in, go.hold(b, 0u32)) // node 4
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made) // node 4
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(
@@ -1159,17 +1213,19 @@ fn a_loop_a_closure_closes_into_a_same_instant_cycle_is_refused_at_close() {
 /// yet.
 #[test]
 fn a_switch_a_closure_builds_whose_first_link_closes_a_cycle_is_refused() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>(); // node 1
         let go = go.share(b); // node 2
-        let _made = go.construct(b, |b, _| {
+        let made = go.construct(b, |b, _| {
             let (forward, closer) = b.cell_loop::<u32>(); // node 5
             let next = forward.map_cell(b, |v| v + 1); // node 6
             let outer = b.constant(next); // node 7
             let switched = outer.switch_cell(b); // node 8
             closer.close(b, switched);
         }); // node 3
-        (go_in, go.hold(b, 0u32)) // node 4
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made) // node 4
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(
@@ -1195,6 +1251,7 @@ fn a_switch_moved_onto_a_stream_a_closure_built_from_it_is_refused_at_relink() {
         let (forward, forward_loop) = b.stream_loop::<u32>(); // node 4
         let forward = forward.share(b); // node 5
         let made = go.construct(b, move |b, ()| forward.map(|v| v + 1).share(b)); // node 6
+        b.depends(&made, &[&forward]);
         let out = made.hold(b, x).switch_stream(b).share(b); // nodes 7, 8, 9
         forward_loop.close(b, out);
         let total = out.accumulate(b, 0u32, |v, t| t + v); // node 10
@@ -1221,16 +1278,18 @@ fn a_switch_moved_onto_a_stream_a_closure_built_from_it_is_refused_at_relink() {
 /// is poisoned.
 #[test]
 fn a_construct_closure_that_swaps_its_build_context_panics_and_poisons() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
-        let _made = go.construct(b, |b, _| {
+        let made = go.construct(b, |b, _| {
             let nested = catch_unwind(AssertUnwindSafe(|| {
                 Graph::build(|other| std::mem::swap(b, other))
             }));
             assert!(nested.is_err(), "the nested build refused the swap");
         });
-        (go_in, go.hold(b, 0u32))
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made)
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(
@@ -1272,11 +1331,13 @@ fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
             closer.close(b, switched);
             *switched.sample(b)
         };
-        let (mut graph, (go_in, latest)) = Graph::build(move |b| {
+        let (mut graph, (go_in, latest, _made)) = Graph::build(move |b| {
             let (go, go_in) = b.input::<u32>();
             let go = go.share(b);
-            let _made = go.construct(b, move |b, _| cycle(b));
-            (go_in, go.hold(b, 0u32))
+            let made = go.construct(b, move |b, _| cycle(b));
+            // Returned, so a root: a construct nothing reaches is collected
+            // before it runs.
+            (go_in, go.hold(b, 0u32), made)
         });
         let message = panic_message(|| graph.send(go_in, 1));
         assert!(message.contains(MESSAGE), "{message}");
@@ -1296,10 +1357,10 @@ fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
 /// needs a stream that fires in transaction zero for it.
 #[test]
 fn a_node_pulled_before_a_switch_s_first_link_that_reads_around_a_cycle_panics() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
-        let _made = go.construct(b, move |b, _| {
+        let made = go.construct(b, move |b, _| {
             let (pulled, pulled_loop) = b.stream_loop::<u32>();
             let (forward, closer) = b.cell_loop::<u32>();
             let outer = b.constant(forward);
@@ -1309,7 +1370,9 @@ fn a_node_pulled_before_a_switch_s_first_link_that_reads_around_a_cycle_panics()
             pulled_loop.close(b, reads);
             pulled.hold(b, 0u32)
         });
-        (go_in, go.hold(b, 0u32))
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made)
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(
@@ -1353,10 +1416,10 @@ fn a_read_through_unlinked_switches_without_a_cycle_reads_the_selection() {
 /// the cycle ten thousand times and overflowed the stack first.
 #[test]
 fn a_read_around_a_cycle_panics_however_many_switches_are_unlinked() {
-    let (mut graph, (go_in, latest)) = Graph::build(|b| {
+    let (mut graph, (go_in, latest, _made)) = Graph::build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
-        let _made = go.construct(b, |b, _| {
+        let made = go.construct(b, |b, _| {
             let one = b.constant(1u32);
             for _ in 0..10_000 {
                 let _unread = b.constant(one).switch_cell(b);
@@ -1367,7 +1430,9 @@ fn a_read_around_a_cycle_panics_however_many_switches_are_unlinked() {
             closer.close(b, switched);
             *switched.sample(b)
         });
-        (go_in, go.hold(b, 0u32))
+        // Returned, so a root: a construct nothing reaches is collected
+        // before it runs.
+        (go_in, go.hold(b, 0u32), made)
     });
     let message = panic_message(|| graph.send(go_in, 1));
     assert!(

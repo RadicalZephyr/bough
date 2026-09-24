@@ -1,13 +1,25 @@
-//! Stream nodes: coalescing inputs, open stream loops, fused chains,
-//! merges, and the stream views of a cell.
+//! Stream nodes: inputs, open stream loops, fused chains, merges, and the
+//! stream views of a cell.
 
 use core::any::Any;
 
 use super::Marker;
 use crate::build::Build;
-use crate::engine::{Cx, Data, NodeOps, Ops, part, slot_mut};
+use crate::engine::{Cx, Data, NodeOps, Ops, clear_slot, part, slot_mut};
 use crate::mode::Mode;
 use crate::source::Source;
+
+/// A stream node with no program whose slot holds `A`s: an input, which a
+/// send fires, and a split's or a defer's output, which the child
+/// scheduler fires. Collection empties its slot.
+pub(crate) struct SlotNode<A>(Marker<A>);
+
+impl<M: Mode, A: 'static> NodeOps<M> for SlotNode<A> {
+    const OPS: Ops<M> = Ops {
+        clear_slot: clear_slot::<M, A>,
+        ..Ops::<M>::DEFAULT
+    };
+}
 
 /// `input_coalescing`: an input whose second send in one instant is folded
 /// into the first, first send on the left. Its one part is the function.
@@ -41,6 +53,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         coalesce: coalesce_input::<M, A, F>,
+        clear_slot: clear_slot::<M, A>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -84,6 +97,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         eval: eval_chain::<M, S>,
+        clear_slot: clear_slot::<M, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -126,6 +140,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         eval: eval_merge::<M, S, T, F>,
+        clear_slot: clear_slot::<M, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -166,6 +181,7 @@ where
 {
     const OPS: Ops<M> = Ops {
         eval: eval_steps::<M, A, CURRENT>,
+        clear_slot: clear_slot::<M, A>,
         ..Ops::<M>::DEFAULT
     };
 }
