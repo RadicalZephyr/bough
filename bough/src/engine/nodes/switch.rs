@@ -30,13 +30,26 @@
 //! outer queues the switch for relink and does not descend into it, so a
 //! selection moves the switch even at an instant its old inner is quiet,
 //! when nothing else would reach it.
+//!
+//! A linear stream has one consumer (RFD 4), so a cell holding linear
+//! streams may have one switch_stream. A second on the same cell is refused
+//! when it is built, and so is one on a cell that is the same cell by
+//! construction, a cell loop's forward and its definition, then or when the
+//! loop closes. A switch_cell can still select, at run time, a cell whose
+//! streams another switch_stream takes from, so each linear stream records
+//! the switch_stream consuming it, set when a switch links it and cleared
+//! when the switch moves away, and a link to a stream another switch
+//! consumes is a panic that poisons the graph. Relink clears every claim
+//! the instant's moves give up before it makes any, so two switches that
+//! trade streams in one instant are accepted in either order.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use super::Marker;
 use crate::build::Build;
 use crate::cell::CellRef;
-use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, WATCHED};
+use crate::engine::{Cx, Data, Kind, LINKED, NodeOps, Ops, TAKES_LINEAR, WATCHED};
 use crate::mode::Mode;
 use crate::source::Node;
 use crate::token::Token;
@@ -140,20 +153,31 @@ impl<M: Mode> Build<M> {
 
     /// A switch_stream over `outer`, a cell holding `S` tokens, with the
     /// slot its `Accepts` bound made. It has no dependency until its first
-    /// evaluation. The outer keeps it in reach and watches for it.
+    /// evaluation. The outer keeps it in reach and watches for it. Over
+    /// linear streams, refused if the outer, or a cell that is the same by
+    /// construction, has a switch_stream already.
     pub(crate) fn switch_stream_node<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
     where
         S::Event: 'static,
     {
         let outer = self.check(outer);
+        if S::LINEAR {
+            assert!(
+                !self.has_linear_switch(outer),
+                "bough: a cell holding linear streams may have exactly one switch_stream, and \
+                 this cell, or a cell loop that is the same cell, has one already. A linear \
+                 stream has one consumer; share the streams to switch to them from several places"
+            );
+        }
         let ops = &<SwitchStreamNode<S> as NodeOps<M>>::OPS;
+        let flags = if S::LINEAR { TAKES_LINEAR } else { 0 };
         let n = self.materialize(
             Kind::SwitchStream,
             Data::Slot(slot),
             Box::new([]),
             ops,
             &[],
-            0,
+            flags,
         );
         let cold = &mut self.store.cold[n as usize];
         cold.partner = outer;
@@ -189,12 +213,69 @@ impl<M: Mode> Build<M> {
 
     /// A switch's first evaluation links the inner its outer selected
     /// before the instant. Refused, with the cycle's nodes, if that inner
-    /// depends on the switch.
+    /// depends on the switch, and over linear streams if another
+    /// switch_stream consumes it.
     pub(crate) fn link_inner(&mut self, n: u32) {
         let inner = self.selected(n, false);
         self.refuse_switch_cycle(inner, n);
+        self.claim_linear(inner, n);
         self.link(inner, n);
         self.store.hot[n as usize].flags |= LINKED;
+    }
+
+    /// A switch_stream over linear streams becomes the one consumer of
+    /// `stream`. A stream another switch_stream consumes can only have been
+    /// selected through a switch_cell, which no build-time check sees.
+    fn claim_linear(&mut self, stream: u32, n: u32) {
+        if self.store.hot[n as usize].flags & TAKES_LINEAR == 0 {
+            return;
+        }
+        let consumer = &mut self.store.cold[stream as usize].linear_consumer;
+        assert!(
+            *consumer == 0 || *consumer == n,
+            "bough: a linear stream selected by a second switch_stream: the switch_stream at \
+             node {n} selected the stream at node {stream}, which the switch_stream at node \
+             {other} takes from. A cell holding linear streams may have exactly one \
+             switch_stream, and a switch_cell selected such a cell for another; share the \
+             streams to switch to them from several places",
+            other = *consumer
+        );
+        *consumer = n;
+    }
+
+    /// Whether a switch_stream over linear streams watches `cell`, or a
+    /// cell that is the same by construction: a closed cell loop's forward
+    /// and its definition, followed down to the definition that is no
+    /// forward and back up through every forward closed with it.
+    pub(crate) fn has_linear_switch(&self, cell: u32) -> bool {
+        let mut root = cell;
+        while self.store.hot[root as usize].kind == Kind::Loop {
+            match self.store.relations[root as usize].deps.first() {
+                Some(&target) => root = target,
+                None => break,
+            }
+        }
+        // A loop's one dependency is its definition, so the loops in a
+        // node's dependents are exactly the forwards closed with it, and
+        // closing refuses cycles: no node is reached twice.
+        let mut same = Vec::from([root]);
+        while let Some(c) = same.pop() {
+            let linear = self.store.cold[c as usize]
+                .watchers
+                .iter()
+                .any(|&w| self.store.hot[w as usize].flags & TAKES_LINEAR != 0);
+            if linear {
+                return true;
+            }
+            same.extend(
+                self.store.relations[c as usize]
+                    .dependents
+                    .iter()
+                    .copied()
+                    .filter(|&d| self.store.hot[d as usize].kind == Kind::Loop),
+            );
+        }
+        false
     }
 
     /// Queues a switch for relink at this instant's commit, once.
@@ -230,9 +311,10 @@ impl<M: Mode> Build<M> {
     }
 
     /// The first pass of relink at commit: moves a switch to the inner its
-    /// outer holds now, if that is another node. Returns whether it moved.
-    /// A dependents list keeps its capacity, so moving back and forth
-    /// between inners seen before allocates nothing.
+    /// outer holds now, if that is another node, giving up its claim on
+    /// the old one. Returns whether it moved. A dependents list keeps its
+    /// capacity, so moving back and forth between inners seen before
+    /// allocates nothing.
     pub(crate) fn move_inner(&mut self, n: u32) -> bool {
         let new = self.selected(n, false);
         let at = inner_at(self.store.hot[n as usize].kind);
@@ -241,6 +323,10 @@ impl<M: Mode> Build<M> {
             return false;
         }
         count!(self.s, relinks);
+        let linear = &mut self.store.cold[old as usize].linear_consumer;
+        if *linear == n {
+            *linear = 0;
+        }
         let dependents = &mut self.store.relations[old as usize].dependents;
         let p = dependents
             .iter()
@@ -253,10 +339,12 @@ impl<M: Mode> Build<M> {
     }
 
     /// The second pass of relink at commit, once every switch of the
-    /// instant has moved: the dependency graph must still be acyclic.
+    /// instant has moved and given up its old stream: the dependency graph
+    /// must still be acyclic, and a linear stream may have one consumer.
     pub(crate) fn check_moved(&mut self, n: u32) {
         let at = inner_at(self.store.hot[n as usize].kind);
         let inner = self.store.relations[n as usize].deps[at];
         self.refuse_switch_cycle(inner, n);
+        self.claim_linear(inner, n);
     }
 }

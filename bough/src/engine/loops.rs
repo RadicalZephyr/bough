@@ -103,11 +103,19 @@ impl<M: Mode> Build<M> {
     }
 
     /// Closes a cell loop: its node depends on `definition` from now on.
+    /// The forward becomes the same cell as the definition, so if each had
+    /// a switch_stream over linear streams, the cell would have two.
     pub(crate) fn close_cell_loop(&mut self, forward: Token, definition: Token) {
         let l = self.check(forward);
         let d = self.check(definition);
         self.close_in_scope(l);
         self.refuse_cycle(l, d);
+        assert!(
+            !(self.has_linear_switch(l) && self.has_linear_switch(d)),
+            "bough: closing this loop gives a cell holding linear streams two switch_streams, \
+             one over the forward and one over the definition. A linear stream has one \
+             consumer; share the streams to switch to them from several places"
+        );
         self.link(d, l);
     }
 

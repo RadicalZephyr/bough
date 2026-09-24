@@ -405,6 +405,28 @@ where
     /// first link and every move check that no cycle forms, and one that
     /// does is a panic that poisons the graph, naming the cycle's nodes.
     ///
+    /// A linear stream has one consumer, and a switch over linear streams
+    /// takes their events, so a cell holding linear streams may have one
+    /// switch. A second over the same cell panics where it is built, and so
+    /// does one over a cell loop's forward when its definition has one, or
+    /// the other way round, where the loop closes. A switch_cell can still
+    /// select, at run time, a cell whose streams another switch already
+    /// takes from, since which cell it selects is known only then: the
+    /// switch that links such a stream panics then, which poisons the graph.
+    /// Two switches may trade linear streams in one instant. To switch to a
+    /// stream from several places, [`share`](crate::Source::share) it.
+    ///
+    /// ```should_panic
+    /// use bough::{Graph, Source};
+    ///
+    /// let (_graph, _) = Graph::build(|b| {
+    ///     let (clicks, _clicks_in) = b.input::<u32>();
+    ///     let current = b.constant(clicks);
+    ///     let _first = current.switch_stream(b);
+    ///     let _second = current.switch_stream(b); // panics: a second switch
+    /// });
+    /// ```
+    ///
     /// The switch's slot keeps an event nobody consumed between
     /// transactions, so the mode must accept the event type; a `Threaded`
     /// graph refuses a switch between streams of `Rc`s:

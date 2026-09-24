@@ -127,6 +127,9 @@ pub(crate) const COMMITS: u8 = 1 << 3;
 pub(crate) const LINKED: u8 = 1 << 4;
 /// The slot holds a node that collection has not freed.
 pub(crate) const LIVE: u8 = 1 << 5;
+/// A switch_stream over linear streams: the one consumer of the inner it
+/// links, which it records in that inner's `linear_consumer`.
+pub(crate) const TAKES_LINEAR: u8 = 1 << 6;
 
 /// What marking and the evaluation loop touch: 32 bytes, two per cache
 /// line.
@@ -183,8 +186,8 @@ pub(crate) struct Cold {
     pub(crate) relink: Tx,
     /// Path checks; collection's mark epoch.
     pub(crate) visit: u64,
-    /// The switch_stream taking events from this linear stream, if any
-    /// (stage 5's one-consumer backstop).
+    /// The switch_stream taking events from this linear stream, or node 0
+    /// for none: the run-time backstop of the one-consumer rule.
     pub(crate) linear_consumer: u32,
 }
 
