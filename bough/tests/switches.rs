@@ -1026,6 +1026,45 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
     assert_eq!(samples[0], [1, 5, 2, 30, 8]);
 }
 
+/// A switch_cell whose outer is a map_cell of a boolean: at a switch
+/// instant the steps view prepares the map_cell, which computes its value
+/// after the instant, and reads the new inner through it; commit promotes
+/// that value into the map_cell's memo, and the relink reads the memo. So
+/// the map_cell's function runs once at the first link and once per step
+/// of its input, three times in all. Each new inner steps at its switch
+/// instant. Stage5.hs:
+///
+/// ```text
+/// map outer: steps sw: (1,[([0],1),([1],2),([2],20),([3],30),([4],5)])
+/// ```
+#[test]
+fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
+    let (steps, calls) = every_order(|order| {
+        let (calls, c) = counter();
+        let (mut graph, (pick_in, c1_in, c2_in, log)) = Graph::build(move |b| {
+            let (pick, pick_in) = b.input_cell(false);
+            let (c1, c1_in) = b.input_cell(1u32);
+            let (c2, c2_in) = b.input_cell(10u32);
+            let outer = pick.map_cell(b, move |p| {
+                c.set(c.get() + 1);
+                if *p { c2 } else { c1 }
+            });
+            let sw = outer.switch_cell(b);
+            (pick_in, c1_in, c2_in, log_steps(b, sw))
+        });
+        let schedule = [
+            vec![send(c1_in, 2)],
+            vec![send(c1_in, 3), send(c2_in, 20), send(pick_in, true)],
+            vec![send(c1_in, 4), send(c2_in, 30)],
+            vec![send(c1_in, 5), send(pick_in, false)],
+        ];
+        let (logs, _) = drive::<u32, ()>(&mut graph, order, &schedule, &[log], &[]);
+        (logs, calls.get())
+    });
+    assert_eq!(steps[0], [(0, 1), (1, 2), (2, 20), (3, 30), (4, 5)]);
+    assert_eq!(calls, 3);
+}
+
 /// The outer steps to the inner the switch already follows: still a step
 /// of the switch. Stage5.hs:
 ///
