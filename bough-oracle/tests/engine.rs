@@ -28,8 +28,12 @@
 //! capped by its own value, two loops that read each other, the
 //! sodium-rust#52 shape, a state loop, stream loops through a hold and
 //! through children, splits sharing child indices with each other and with
-//! a defer, and transaction zero's children. Each asserts the oracle's
-//! answer, times included, as well as the engine's agreement with it.
+//! a defer, and transaction zero's children; and the switches: the five
+//! switch vectors of sodium.hs, the two switch_stream probes, a switch to a
+//! quiet inner, two switches that reverse a dependency in one instant
+//! (finding F46), switches at child instants, nested switches, and a switch
+//! over States. Each asserts the oracle's answer, times included, as well
+//! as the engine's agreement with it.
 //!
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
 //! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
@@ -45,8 +49,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use Definition::{
-    Accumulate, AccumulateMut, CellLoop, Close, Constant, Filter, Hold, InputCell, Lift, Map,
-    MapCell, MapList, Merge, Once, Share, Snapshot, Steps, StepsWithCurrent, StreamLoop,
+    Accumulate, AccumulateMut, CellLoop, Close, Constant, Filter, Hold, HoldCell, HoldStream,
+    InputCell, Lift, Map, MapCell, MapList, Merge, Once, PickCell, PickStream, Share, Snapshot,
+    Steps, StepsWithCurrent, StreamLoop, SwitchCell, SwitchStream,
 };
 use Expression::{Argument, ArgumentAt, Literal, SecondArgument};
 use Reference::TopLevel;
@@ -1574,6 +1579,588 @@ fn a_loop_through_its_holds_steps_view_is_refused_at_close() {
             "{message}"
         );
     }
+}
+
+// ----- fixed programs: switches -----
+
+/// A letter's code: the vectors of sodium.hs carry letters.
+fn code(letter: char) -> i64 {
+    letter as i64
+}
+
+/// `SwitchS` of sodium.hs with its events moved from `[k]` to `[k + 1]`: the
+/// outer selects s2 at [2], where s2's X is not forwarded and s1's b is:
+/// a, b, Y, Z.
+#[test]
+fn the_switch_stream_vector_restated_with_inputs() {
+    let Some(oracle) = oracle() else { return };
+    let vector = program(
+        integers(3),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Definition::Input(1),
+            Share(TopLevel(2)),
+            Definition::Input(2),
+            PickStream {
+                index: Argument,
+                streams: vec![TopLevel(1), TopLevel(3)],
+                source: TopLevel(4),
+            },
+            HoldStream {
+                initial: TopLevel(1),
+                source: TopLevel(5),
+            },
+            SwitchStream(TopLevel(6)),
+        ],
+        vec![7],
+        &[
+            &[(0, code('a')), (1, code('W'))],
+            &[(0, code('b')), (1, code('X')), (2, 1)],
+            &[(0, code('c')), (1, code('Y'))],
+            &[(0, code('d')), (1, code('Z'))],
+        ],
+    );
+    let [a, b, y, z] = ['a', 'b', 'Y', 'Z'].map(code);
+    assert_eq!(agree(oracle, &vector), [stream(&[&[a], &[b], &[y], &[z]])]);
+}
+
+/// One of sodium.hs's `SwitchC` vectors with its events moved from `[k]` to
+/// `[k + 1]`: c2's letter before its sends, c2's and c3's sends and the
+/// selections at [1] to [4]. c1 is 'a' and is sent b, c, d and e; c3 is
+/// '1'; the selection is an index into c1, c2 and c3.
+struct SwitchCVector {
+    c2: char,
+    c2_sends: [Option<char>; 4],
+    c3_sends: [Option<char>; 4],
+    selects: [Option<i64>; 4],
+}
+
+impl SwitchCVector {
+    fn program(&self) -> Program {
+        let c1_sends = ['b', 'c', 'd', 'e'];
+        let schedule: Vec<Vec<(usize, i64)>> = (0..4)
+            .map(|k| {
+                let mut sends = vec![(0, code(c1_sends[k]))];
+                sends.extend(self.c2_sends[k].map(|c| (1, code(c))));
+                sends.extend(self.c3_sends[k].map(|c| (2, code(c))));
+                sends.extend(self.selects[k].map(|s| (3, s)));
+                sends
+            })
+            .collect();
+        let schedule: Vec<&[(usize, i64)]> = schedule.iter().map(Vec::as_slice).collect();
+        program(
+            integers(4),
+            vec![
+                InputCell {
+                    input: 0,
+                    initial: Literal(code('a')),
+                },
+                InputCell {
+                    input: 1,
+                    initial: Literal(code(self.c2)),
+                },
+                InputCell {
+                    input: 2,
+                    initial: Literal(code('1')),
+                },
+                Definition::Input(3),
+                PickCell {
+                    index: Argument,
+                    cells: vec![TopLevel(0), TopLevel(1), TopLevel(2)],
+                    source: TopLevel(3),
+                },
+                HoldCell {
+                    initial: TopLevel(0),
+                    source: TopLevel(4),
+                },
+                SwitchCell(TopLevel(5)),
+                Steps(TopLevel(6)),
+            ],
+            vec![6, 7],
+            &schedule,
+        )
+    }
+}
+
+/// `SwitchC 1` to `SwitchC 4` of sodium.hs with their events moved from
+/// `[k]` to `[k + 1]`. The outer switches to c2 at [2], where c2 steps to
+/// X: after a step at [1] in 1, for the first time in 2. In 3, c2 is X from
+/// the start and quiet at [2]. In 4 the outer switches on to c3 at [4],
+/// where c3 steps. After the build the switch holds a, then b, X, Y, and Z,
+/// or 5 in 4, and its steps view carries the same.
+#[test]
+fn the_switch_cell_vectors_restated_with_inputs() {
+    let Some(oracle) = oracle() else { return };
+    let all = [Some('W'), Some('X'), Some('Y'), Some('Z')];
+    let none = [None; 4];
+    let at_2 = [None, Some(1), None, None];
+    let vectors = [
+        SwitchCVector {
+            c2: 'V',
+            c2_sends: all,
+            c3_sends: none,
+            selects: at_2,
+        },
+        SwitchCVector {
+            c2: 'W',
+            c2_sends: [None, Some('X'), Some('Y'), Some('Z')],
+            c3_sends: none,
+            selects: at_2,
+        },
+        SwitchCVector {
+            c2: 'X',
+            c2_sends: [None, None, Some('Y'), Some('Z')],
+            c3_sends: none,
+            selects: at_2,
+        },
+        SwitchCVector {
+            c2: 'V',
+            c2_sends: all,
+            c3_sends: [Some('2'), Some('3'), Some('4'), Some('5')],
+            selects: [None, Some(1), None, Some(2)],
+        },
+    ];
+    for (vector, last) in vectors.iter().zip(['Z', 'Z', 'Z', '5']) {
+        let [b, x, y, last] = ['b', 'X', 'Y', last].map(code);
+        assert_eq!(
+            agree(oracle, &vector.program()),
+            [
+                cell(code('a'), &[Some(b), Some(x), Some(y), Some(last)]),
+                stream(&[&[b], &[x], &[y], &[last]]),
+            ]
+        );
+    }
+}
+
+/// The selector probe (SwitchS.hs): the outer selects z at [2], where the
+/// old stream is quiet, so only the watcher reaches the switch; from [3] on
+/// z's events come through: a, Y, Z. An outer that was only reach would
+/// never move the switch.
+#[test]
+fn a_switch_stream_moves_on_a_selection_while_its_old_stream_is_quiet() {
+    let Some(oracle) = oracle() else { return };
+    let probe = program(
+        integers(3),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Definition::Input(1),
+            Share(TopLevel(2)),
+            Definition::Input(2),
+            PickStream {
+                index: Literal(1),
+                streams: vec![TopLevel(1), TopLevel(3)],
+                source: TopLevel(4),
+            },
+            HoldStream {
+                initial: TopLevel(1),
+                source: TopLevel(5),
+            },
+            SwitchStream(TopLevel(6)),
+        ],
+        vec![7],
+        &[
+            &[(0, code('a')), (1, code('X'))],
+            &[(2, 0)],
+            &[(0, code('b')), (1, code('Y'))],
+            &[(0, code('c')), (1, code('Z'))],
+        ],
+    );
+    let [a, y, z] = ['a', 'Y', 'Z'].map(code);
+    assert_eq!(agree(oracle, &probe), [stream(&[&[a], &[], &[y], &[z]])]);
+}
+
+/// The loop through the selection (SwitchS.hs): every event v of the
+/// switch selects, through a hold, the stream it follows from the next
+/// instant on, ticks + v, and the switch's events close the stream loop
+/// that selects. With the outer a dependency the loop would be a cycle,
+/// refused at close; the outer is a watcher, and the loop gives 1, 2, 3, 4.
+#[test]
+fn a_switch_stream_loop_through_its_selection() {
+    let Some(oracle) = oracle() else { return };
+    let mut definitions = vec![
+        StreamLoop(Type::Integer),
+        Share(TopLevel(0)),
+        Definition::Input(0),
+        Share(TopLevel(2)),
+    ];
+    let mut streams = Vec::new();
+    for k in 0..5 {
+        definitions.push(Map {
+            function: Argument + Literal(k),
+            source: TopLevel(3),
+        });
+        definitions.push(Share(TopLevel(definitions.len() - 1)));
+        streams.push(TopLevel(definitions.len() - 1));
+    }
+    let pick = definitions.len();
+    definitions.push(PickStream {
+        index: Argument,
+        streams: streams.clone(),
+        source: TopLevel(1),
+    });
+    definitions.push(HoldStream {
+        initial: streams[0],
+        source: TopLevel(pick),
+    });
+    definitions.push(SwitchStream(TopLevel(pick + 1)));
+    definitions.push(Close {
+        forward: 0,
+        definition: TopLevel(pick + 2),
+    });
+    let tick: &[(usize, i64)] = &[(0, 1)];
+    let probe = program(integers(1), definitions, vec![1], &[tick; 4]);
+    assert!(bough_oracle::well_founded(&probe));
+    assert_eq!(agree(oracle, &probe), [stream(&[&[1], &[2], &[3], &[4]])]);
+}
+
+/// A switch_cell that switches to a quiet inner steps with that inner's
+/// value; the old inner's step at the switch instant is dropped; a switch
+/// back to an inner that steps at that instant carries the step: 5, 2, 30,
+/// 8. A map_cell and a steps view of the switch step with it.
+#[test]
+fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
+    let Some(oracle) = oracle() else { return };
+    let quiet = program(
+        integers(3),
+        vec![
+            InputCell {
+                input: 0,
+                initial: Literal(1),
+            },
+            InputCell {
+                input: 1,
+                initial: Literal(2),
+            },
+            Definition::Input(2),
+            PickCell {
+                index: Argument,
+                cells: vec![TopLevel(0), TopLevel(1)],
+                source: TopLevel(2),
+            },
+            HoldCell {
+                initial: TopLevel(0),
+                source: TopLevel(3),
+            },
+            SwitchCell(TopLevel(4)),
+            MapCell {
+                function: Argument * Literal(10),
+                cell: TopLevel(5),
+            },
+            Steps(TopLevel(5)),
+        ],
+        vec![5, 6, 7],
+        &[
+            &[(0, 5)],
+            &[(0, 6), (2, 1)],
+            &[(0, 7), (1, 30)],
+            &[(0, 8), (2, 0)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &quiet),
+        [
+            cell(1, &[Some(5), Some(2), Some(30), Some(8)]),
+            cell(10, &[Some(50), Some(20), Some(300), Some(80)]),
+            stream(&[&[5], &[2], &[30], &[8]]),
+        ]
+    );
+}
+
+/// Two switches reverse a dependency between them in one instant (finding
+/// F46). Before [1], B follows p = A + 10, so B depends on A, which is a
+/// cell loop's definition read through its forward; at [1], A moves to
+/// y = B + 100 while B moves to a constant, so A depends on B. The graph
+/// the two moves make together has no cycle, and GHC gives A 1 then 102
+/// and B 11 then 2. A relink that checked each move as it made it would
+/// find the cycle y, B, p, the loop, A through B's old inner. The program
+/// is not what [`well_founded`](bough_oracle::well_founded) calls well
+/// founded, since each switch may select a cell that depends on the other,
+/// so the generator never makes one like it.
+#[test]
+fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
+    let Some(oracle) = oracle() else { return };
+    let reversal = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Constant(Literal(1)),
+            Constant(Literal(2)),
+            CellLoop(Type::Integer),
+            MapCell {
+                function: Argument + Literal(10),
+                cell: TopLevel(4),
+            },
+            PickCell {
+                index: Literal(0),
+                cells: vec![TopLevel(3)],
+                source: TopLevel(1),
+            },
+            HoldCell {
+                initial: TopLevel(5),
+                source: TopLevel(6),
+            },
+            SwitchCell(TopLevel(7)),
+            MapCell {
+                function: Argument + Literal(100),
+                cell: TopLevel(8),
+            },
+            PickCell {
+                index: Literal(0),
+                cells: vec![TopLevel(9)],
+                source: TopLevel(1),
+            },
+            HoldCell {
+                initial: TopLevel(2),
+                source: TopLevel(10),
+            },
+            SwitchCell(TopLevel(11)),
+            Close {
+                forward: 4,
+                definition: TopLevel(12),
+            },
+        ],
+        vec![12, 8, 5, 9],
+        &[&[(0, 0)], &[]],
+    );
+    assert!(!bough_oracle::well_founded(&reversal));
+    assert_eq!(
+        agree(oracle, &reversal),
+        [
+            cell(1, &[Some(102), None]),
+            cell(11, &[Some(2), None]),
+            cell(11, &[Some(112), None]),
+            cell(111, &[Some(102), None]),
+        ]
+    );
+}
+
+/// Switches move at child instants. A switch_cell's selector is split into
+/// two elements, so each child instant is a switch instant whose commit
+/// moves the switch before the next child: at [1, 0] to c2, which stepped
+/// at [1], and at [1, 1] to a constant; at [2] c1 steps while deselected,
+/// [2, 0] selects it and [2, 1] c2. A switch_stream's selector is
+/// deferred, so it moves at [k, 0], and z deferred twice fires at
+/// [k, 0, 0], after the move of its transaction: at [1] the switch forwards
+/// a, and z's 10 at [1, 0, 0]; at [2] nothing of a; at [3] it moves back
+/// at [3, 0], and at [4] forwards a again but not z.
+#[test]
+fn switches_move_at_child_instants() {
+    let Some(oracle) = oracle() else { return };
+    let split = program(
+        integers(3),
+        vec![
+            InputCell {
+                input: 0,
+                initial: Literal(1),
+            },
+            InputCell {
+                input: 1,
+                initial: Literal(2),
+            },
+            Constant(Literal(3)),
+            Definition::Input(2),
+            MapList {
+                length: Literal(2),
+                element: Argument + SecondArgument,
+                source: TopLevel(3),
+            },
+            Definition::Split(TopLevel(4)),
+            PickCell {
+                index: Argument,
+                cells: vec![TopLevel(0), TopLevel(1), TopLevel(2)],
+                source: TopLevel(5),
+            },
+            HoldCell {
+                initial: TopLevel(0),
+                source: TopLevel(6),
+            },
+            SwitchCell(TopLevel(7)),
+            Steps(TopLevel(8)),
+        ],
+        vec![8, 9],
+        &[&[(1, 20), (2, 1)], &[(0, 5), (2, 0)], &[(1, 21)]],
+    );
+    let steps: &[(&[i64], i64)] = &[
+        (&[1, 0], 20),
+        (&[1, 1], 3),
+        (&[2, 0], 5),
+        (&[2, 1], 20),
+        (&[3], 21),
+    ];
+    assert_eq!(
+        agree(oracle, &split),
+        [timed_cell(1, 3, steps), timed_stream(3, steps)]
+    );
+    let deferred = program(
+        integers(3),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            Definition::Input(1),
+            Definition::Defer(TopLevel(2)),
+            Definition::Defer(TopLevel(3)),
+            Share(TopLevel(4)),
+            Definition::Input(2),
+            Definition::Defer(TopLevel(6)),
+            PickStream {
+                index: Argument,
+                streams: vec![TopLevel(1), TopLevel(5)],
+                source: TopLevel(7),
+            },
+            HoldStream {
+                initial: TopLevel(1),
+                source: TopLevel(8),
+            },
+            SwitchStream(TopLevel(9)),
+        ],
+        vec![10],
+        &[
+            &[(0, 1), (1, 10), (2, 1)],
+            &[(0, 2), (1, 20)],
+            &[(0, 3), (2, 0)],
+            &[(0, 4), (1, 40)],
+        ],
+    );
+    assert_eq!(
+        agree(oracle, &deferred),
+        [timed_stream(
+            4,
+            &[(&[1], 1), (&[1, 0, 0], 10), (&[2, 0, 0], 20), (&[4], 4)]
+        )]
+    );
+}
+
+/// A switch_cell among two switch_cells, each between two leaves. Leaves,
+/// middles and the top move in one instant and apart, over six
+/// transactions of up to seven sends: at [3] the top moves to the second
+/// middle, which moves to a quiet leaf in the same instant; at [6]
+/// everything moves and every leaf steps. The top: 11, 22, 40, 23, 15, 36.
+#[test]
+fn a_switch_cell_among_switch_cells() {
+    let Some(oracle) = oracle() else { return };
+    let mut definitions: Vec<Definition> = (0..4)
+        .map(|leaf| InputCell {
+            input: leaf,
+            initial: Literal(10 * (leaf as i64 + 1)),
+        })
+        .collect();
+    definitions.extend((4..7).map(Definition::Input));
+    let switch = |definitions: &mut Vec<Definition>, cells: [usize; 2], selector: usize| {
+        let pick = definitions.len();
+        definitions.push(PickCell {
+            index: Argument,
+            cells: cells.into_iter().map(TopLevel).collect(),
+            source: TopLevel(selector),
+        });
+        definitions.push(HoldCell {
+            initial: TopLevel(cells[0]),
+            source: TopLevel(pick),
+        });
+        definitions.push(SwitchCell(TopLevel(pick + 1)));
+        pick + 2
+    };
+    let first = switch(&mut definitions, [0, 1], 4);
+    let second = switch(&mut definitions, [2, 3], 5);
+    let top = switch(&mut definitions, [first, second], 6);
+    definitions.push(Steps(TopLevel(top)));
+    let nested = program(
+        integers(7),
+        definitions,
+        vec![top, top + 1, first, second],
+        &[
+            &[(0, 11)],
+            &[(1, 22), (4, 1)],
+            &[(0, 13), (1, 23), (5, 1), (6, 1)],
+            &[(2, 34), (6, 0)],
+            &[(0, 15), (3, 45), (4, 0)],
+            &[(0, 16), (1, 26), (2, 36), (3, 46), (4, 1), (5, 0), (6, 1)],
+        ],
+    );
+    let top = [Some(11), Some(22), Some(40), Some(23), Some(15), Some(36)];
+    assert_eq!(
+        agree(oracle, &nested),
+        [
+            cell(10, &top),
+            stream(&[&[11], &[22], &[40], &[23], &[15], &[36]]),
+            cell(
+                10,
+                &[Some(11), Some(22), Some(23), None, Some(15), Some(26)]
+            ),
+            cell(30, &[None, None, Some(40), None, Some(45), Some(36)]),
+        ]
+    );
+}
+
+/// A switch_cell over two in-place accumulators is a State, and so is a
+/// map_cell of it; its listeners hear each step after commit, the step at
+/// the switch instant included, where the new State steps too: 3, 8, 32,
+/// 321, 18.
+#[test]
+fn a_switch_cell_over_states_steps_as_a_state() {
+    let Some(oracle) = oracle() else { return };
+    let states = program(
+        integers(2),
+        vec![
+            Definition::Input(0),
+            Share(TopLevel(0)),
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(1),
+            },
+            Filter {
+                predicate: Argument.less_than(Literal(4)),
+                source: TopLevel(1),
+            },
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument * Literal(10) + Argument,
+                source: TopLevel(3),
+            },
+            Definition::Input(1),
+            PickCell {
+                index: Argument,
+                cells: vec![TopLevel(2), TopLevel(4)],
+                source: TopLevel(5),
+            },
+            HoldCell {
+                initial: TopLevel(2),
+                source: TopLevel(6),
+            },
+            SwitchCell(TopLevel(7)),
+            MapCell {
+                function: Argument + Literal(1000),
+                cell: TopLevel(8),
+            },
+        ],
+        vec![8, 9],
+        &[
+            &[(0, 3)],
+            &[(0, 5)],
+            &[(0, 2), (1, 1)],
+            &[(0, 1)],
+            &[(0, 7), (1, 0)],
+        ],
+    );
+    let state = NodeType::Cell {
+        value: Scalar::Integer,
+        state: true,
+    };
+    let types = check(&states).unwrap();
+    assert_eq!([types[8], types[9]], [state; 2]);
+    assert_eq!(
+        agree(oracle, &states),
+        [
+            cell(0, &[Some(3), Some(8), Some(32), Some(321), Some(18)]),
+            cell(
+                1000,
+                &[Some(1003), Some(1008), Some(1032), Some(1321), Some(1018)]
+            ),
+        ]
+    );
 }
 
 // ----- the builder and the generator alone -----
