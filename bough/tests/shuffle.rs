@@ -768,3 +768,155 @@ fn every_shuffle_seed_gives_the_same_switches_values_and_events() {
         interleavings.len()
     );
 }
+
+/// Stage 6's constructs under the shuffle: a construct whose closure builds
+/// a hold over another input and a lift over it, which a switch_cell with
+/// a steps view follows; a construct whose closure builds a linear merge
+/// of two inputs, which a switch_stream takes from; a construct whose
+/// closure declares and closes a counter loop; a construct built by a
+/// closure, over the input that runs the outer one, so that it runs at its
+/// creation instant; and a closure that builds a hold over its construct's
+/// own events, through a stream loop, which a switch_cell with a steps
+/// view follows: at the instant the hold is built, the view reads it after
+/// the instant, which pulls what it depends on when the view runs first.
+/// Listeners on every stream and cell.
+/// Besides the events and values, the run counts the nodes the closures
+/// built and, with the `statistics` feature, the nodes run, in order,
+/// pulled out of it or new: each node runs once per instant whatever the
+/// order.
+fn run_constructs(seed: Option<u64>) -> (Run, usize, Option<u64>) {
+    let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
+        let (a, a_in) = b.input::<u64>();
+        let (c, c_in) = b.input::<u64>();
+        let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
+        let a = a.share(b);
+        let c = c.share(b);
+        let d = d.share(b);
+        let hc = c.hold(b, 0u64);
+        let c0 = b.constant(0u64);
+
+        let made = a.construct(b, move |b, x| {
+            let h = c.map(move |v| v + x).hold(b, x);
+            (h, hc).lift(b, |h, c| h * 2 + c)
+        });
+        let shown = made.hold(b, c0).switch_cell(b);
+        let shown_steps = shown.steps(b).share(b);
+
+        let first = a.map(|x| x + 1).node(b);
+        let lines = d.construct(b, move |b, k| a.merge(b, c, move |l, r| l * k + r));
+        let followed = lines.hold(b, first).switch_stream(b).share(b);
+
+        let counters = c.filter(|v| v % 4 == 0).construct(b, move |b, _| {
+            let (count, count_loop) = b.cell_loop::<u64>();
+            let next = a.snapshot(count, |_, n| n + 1).hold(b, 0u64);
+            count_loop.close(b, next);
+            count
+        });
+        let counted = counters.hold(b, c0).switch_cell(b);
+
+        let nested = d
+            .construct(b, move |b, k| {
+                let inner = d.construct(b, move |b, j| a.map(move |x| x + j * k).hold(b, j));
+                inner.hold(b, c0).switch_cell(b)
+            })
+            .hold(b, c0)
+            .switch_cell(b);
+
+        let (outs, outs_loop) = b.stream_loop::<u64>();
+        let outs = outs.share(b);
+        let own = c
+            .construct(b, move |b, v| {
+                (v + 1, outs.map(move |o| o * 2 + v).hold(b, v))
+            })
+            .share(b);
+        outs_loop.close(b, own.map(|(n, _)| n));
+        let own = own.map(|(_, h)| h).hold(b, c0).switch_cell(b);
+        let own_steps = own.steps(b).share(b);
+
+        let inputs: [Input<u64>; 3] = [a_in, c_in, d_in];
+        (
+            inputs,
+            [shown_steps, followed, outs, own_steps],
+            [shown, counted, nested, own, hc],
+        )
+    });
+    graph.set_shuffle_seed(seed);
+
+    let log: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+    let order: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let add = |log: &Rc<RefCell<Vec<Vec<String>>>>| {
+        log.borrow_mut().push(Vec::new());
+        log.borrow().len() - 1
+    };
+    let listener = |id: usize, tag: &'static str| {
+        let (log, order) = (log.clone(), order.clone());
+        move |v: &u64| {
+            log.borrow_mut()[id].push(format!("{tag} {v}"));
+            order.borrow_mut().push(id);
+        }
+    };
+    for stream in streams {
+        for _ in 0..2 {
+            let on = listener(add(&log), "event");
+            graph.listen(stream, move |v| on(&v)).keep();
+        }
+    }
+    for cell in cells {
+        graph.listen_cell(cell, listener(add(&log), "cell")).keep();
+        graph.listen_steps(cell, listener(add(&log), "step")).keep();
+    }
+    let before = graph.live_nodes();
+    for sends in schedule() {
+        graph.transaction(|tx| {
+            for (input, value) in sends {
+                tx.send(inputs[input], value);
+            }
+        });
+    }
+    let samples = cells.iter().map(|c| *graph.sample(*c)).collect();
+    let per_listener = log.borrow().clone();
+    let interleaving = order.borrow().clone();
+    let run = Run {
+        per_listener,
+        samples,
+        interleaving,
+    };
+    (run, graph.live_nodes() - before, node_runs(&graph))
+}
+
+/// The nodes run since the graph was built: in order, pulled out of it,
+/// or as nodes new in their instant.
+#[cfg(feature = "statistics")]
+fn node_runs(graph: &Graph) -> Option<u64> {
+    let s = graph.statistics();
+    Some(s.evaluations + s.pulls + s.new_nodes)
+}
+
+#[cfg(not(feature = "statistics"))]
+fn node_runs(_: &Graph) -> Option<u64> {
+    None
+}
+
+#[test]
+fn every_shuffle_seed_gives_the_same_constructs_values_and_events() {
+    let (plain, plain_built, plain_runs) = run_constructs(None);
+    assert!(plain.per_listener.iter().all(|events| !events.is_empty()));
+    assert!(plain_built > 100, "the closures built {plain_built} nodes");
+    let mut interleavings = std::collections::BTreeSet::new();
+    interleavings.insert(plain.interleaving.clone());
+    for seed in 0..24 {
+        let (shuffled, built, runs) = run_constructs(Some(seed));
+        assert_eq!(shuffled.per_listener, plain.per_listener, "seed {seed}");
+        assert_eq!(shuffled.samples, plain.samples, "seed {seed}");
+        assert_eq!(built, plain_built, "seed {seed}");
+        // Pulls move with the order; every node, new ones included, still
+        // runs once per instant.
+        assert_eq!(runs, plain_runs, "seed {seed}");
+        interleavings.insert(shuffled.interleaving);
+    }
+    assert!(
+        interleavings.len() >= 20,
+        "the shuffle moved dispatch order ({} distinct interleavings of 25)",
+        interleavings.len()
+    );
+}

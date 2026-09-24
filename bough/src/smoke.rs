@@ -141,14 +141,53 @@ macro_rules! smoke_graph {
                 chosen_log,
                 chosen_length,
             );
+
+            // Stage 6: a construct whose closure builds a hold, which a
+            // switch_cell follows; a construct a closure builds, which runs
+            // at its creation instant; a loop declared and closed in a
+            // closure; and a construct over a split, whose closure runs in
+            // child instants.
+            let none = b.constant(0u32);
+            let opened = n
+                .construct(b, move |b, k| n.map(move |v| v + k).hold(b, k))
+                .hold(b, none)
+                .switch_cell(b);
+            let nested = n
+                .construct(b, move |b, k| {
+                    let inner = n.construct(b, move |b, j| b.constant(j * k));
+                    inner.hold(b, none).switch_cell(b)
+                })
+                .hold(b, none)
+                .switch_cell(b);
+            let looped = n
+                .construct(b, move |b, _| {
+                    let (count, count_loop) = b.cell_loop::<u32>();
+                    let next = n.snapshot(count, |_, c| c + 1).hold(b, 0u32);
+                    count_loop.close(b, next);
+                    count
+                })
+                .hold(b, none)
+                .switch_cell(b);
+            let parts = n
+                .map(|v| [v, v * 2])
+                .split(b)
+                .construct(b, |b, v| b.constant(v))
+                .hold(b, none)
+                .switch_cell(b);
+            let stage6 = [opened, nested, looped, parts];
             (
                 (n_in, words_in, level_in, digits_in),
                 (total, words, out, merged),
-                (stage2, stage3, stage4, stage5),
+                (stage2, stage3, stage4, stage5, stage6),
             )
         });
-        let (stage2, (ticks, tick_steps, running, entry_count), (stage4, countdown), stage5) =
-            later;
+        let (
+            stage2,
+            (ticks, tick_steps, running, entry_count),
+            (stage4, countdown),
+            stage5,
+            stage6,
+        ) = later;
         let (switches, chosen_log, chosen_length) = stage5;
         let (
             (scaled, pair, six, count, labels),
@@ -207,7 +246,8 @@ macro_rules! smoke_graph {
         let children = stage4.iter().map(|c| *graph.sample(*c)).sum::<u32>();
         let switches =
             switches.iter().map(|c| *graph.sample(*c)).sum::<u32>() + *graph.sample(chosen_length);
-        stage1 + cells + states + loops + children + switches
+        let constructs = stage6.iter().map(|c| *graph.sample(*c)).sum::<u32>();
+        stage1 + cells + states + loops + children + switches + constructs
     }};
 }
 

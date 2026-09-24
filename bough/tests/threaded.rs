@@ -275,3 +275,66 @@ fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
     assert_eq!(streams, [7, 570]);
     assert_eq!(*heard.lock().unwrap(), [1, 1, 2]);
 }
+
+/// Stage 6's construct in a `Threaded` graph: the closure and its output
+/// go through the mode's `Accepts` bounds, which `Send` closures over
+/// tokens and `u64` meet. Built on one thread; on another, each event runs
+/// the closure there, which builds a hold, a loop and a switch_stream's
+/// inner, and I/O code receives an input a closure built and sends to it.
+#[test]
+fn a_threaded_graph_runs_construct_closures_on_another_thread() {
+    let (mut graph, (numbers_in, opens_in, made, cells)) = Graph::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        let numbers = numbers.share(b);
+        let (opens, opens_in) = b.input::<u64>();
+        let opens = opens.share(b);
+        let zero = b.constant(0u64);
+        let latest = opens
+            .construct(b, move |b, k| numbers.map(move |n| n + k).hold(b, k))
+            .hold(b, zero)
+            .switch_cell(b);
+        let counted = opens
+            .construct(b, move |b, _| {
+                let (count, count_loop) = b.cell_loop::<u64>();
+                let next = numbers.snapshot(count, |_, c| c + 1).hold(b, 0u64);
+                count_loop.close(b, next);
+                count
+            })
+            .hold(b, zero)
+            .switch_cell(b);
+        let first = numbers.map(|n| n).node(b);
+        let taken = opens
+            .construct(b, move |b, k| numbers.map(move |n| n * k).node(b))
+            .hold(b, first)
+            .switch_stream(b)
+            .accumulate(b, 0u64, |n, t| t + n);
+        let made = opens.construct(b, |b, k| {
+            let (sends, sends_in) = b.input::<u64>();
+            (sends_in, sends.accumulate(b, k, |n, t| t + n))
+        });
+        (numbers_in, opens_in, made, (latest, counted, taken))
+    });
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let writer = received.clone();
+    graph
+        .listen(made, move |m| writer.lock().unwrap().push(m))
+        .keep();
+    let driver = thread::spawn(move || {
+        graph.send(numbers_in, 1);
+        graph.send(opens_in, 10);
+        graph.send(numbers_in, 2);
+        let (sends_in, total) = received.lock().unwrap()[0];
+        graph.send(sends_in, 5);
+        let (latest, counted, taken) = cells;
+        [
+            *graph.sample(latest),
+            *graph.sample(counted),
+            *graph.sample(taken),
+            *graph.sample(total),
+        ]
+    });
+    // latest: 10 from [2], 2 + 10 at [3]. counted: built at [2], one
+    // number since. taken: 1 and, the old stream at [2], nothing; then
+    // 2 * 10. total: 10 + 5.
+    assert_eq!(driver.join().unwrap(), [12, 1, 21, 15]);
+}

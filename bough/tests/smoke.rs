@@ -47,6 +47,15 @@ fn the_smoke_graph_runs_in_every_mode() {
     // evens give 2 and the switch_stream moves to the odds; `times` gives
     // 200. So 2 + 2 + 2 + 200 + 2 = 208.
     //
-    // Each mode gives 26 + 241 + 9 + 13 + 208, and the host has both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208));
+    // Stage 6. n = 1: the first closure builds a hold over n + 1 at [1],
+    // which takes 1 there, 2; the nested closure builds a construct that
+    // runs at [1] too, building the constant 1 * 1; the looped closure's
+    // counter takes n at [1], 1; the split's closure runs at [1,0] and
+    // [1,1], building 1 and then 2. n = 2 at [3]: the switches follow what
+    // the closures build there: 2 + 2, the constant 2 * 2, a new counter at
+    // 1, and 2 then 4. So 4 + 4 + 1 + 4 = 13.
+    //
+    // Each mode gives 26 + 241 + 9 + 13 + 208 + 13, and the host has both
+    // modes.
+    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208 + 13));
 }

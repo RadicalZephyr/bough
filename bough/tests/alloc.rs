@@ -25,7 +25,11 @@
 //! seen before: a switch_cell with a steps view and a cell listener, a
 //! switch_stream between shared streams, and a switch_stream between
 //! linear streams in constant cells, selected through a switch_cell, whose
-//! one-consumer claim moves with it. Later stages widen it.
+//! one-consumer claim moves with it; and from stage 6 constructs that do
+//! not fire in the steady state, one whose chain rejects every event and
+//! one over an input the drives do not send to. A construct allocates when
+//! it fires, since its closure builds nodes, by design; once it has, the
+//! grown graph is steady again. Later stages widen it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
@@ -211,13 +215,31 @@ fn steady_state_transactions_do_not_allocate() {
                 .switch_cell(b);
             let taken = lines.switch_stream(b).share(b);
             let stage5 = (switched, switched_view, followed, taken);
+
+            // Stage 6: a construct marked at every transaction whose chain
+            // passes nothing, and one over an input only the negative
+            // control sends to, whose closure builds a hold and a map_cell
+            // that a switch_cell follows.
+            let _rejected = numbers
+                .filter(|x| *x == u64::MAX)
+                .construct(b, |b, x| b.constant(x));
+            let (opens, opens_in) = b.input::<u64>();
+            let zero = b.constant(0u64);
+            let opened = opens
+                .construct(b, move |b, k| {
+                    let latest = numbers.map(move |x| x + k).hold(b, k);
+                    latest.map_cell(b, |l| l * 2)
+                })
+                .hold(b, zero)
+                .switch_cell(b);
+            let stage6 = (opens_in, opened);
             (
                 (numbers_in, bumps_in, open_in),
                 (total, both, merged),
-                (stage2, stage3, stage4, stage5),
+                (stage2, stage3, stage4, stage5, stage6),
             )
         });
-    let (stage2, stage3, stage4, stage5) = later;
+    let (stage2, stage3, stage4, stage5, stage6) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
     let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
     let (heard, recorder) = tally();
@@ -294,6 +316,10 @@ fn steady_state_transactions_do_not_allocate() {
         .listen(taken, move |_| on_take.set(on_take.get() + 1))
         .keep();
 
+    let (opens_in, opened) = stage6;
+    let (openings, on_opened) = tally();
+    graph.listen_cell(opened, move |v| on_opened.set(*v)).keep();
+
     let drive = |graph: &mut Graph, i: u64| {
         graph.send(numbers_in, i);
         graph.transaction(|tx| {
@@ -332,13 +358,41 @@ fn steady_state_transactions_do_not_allocate() {
 
     assert_eq!(plain, 0, "allocations in 30,000 steady-state transactions");
     assert_eq!(shuffled, 0, "allocations with the shuffle on");
-    // A negative control: the counter sees what does allocate.
+    // Negative controls: the counter sees what does allocate. A construct
+    // that fires builds nodes.
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     graph.listen_steps(total, |_| ()).keep();
     assert!(
         ALLOCATIONS.load(Ordering::Relaxed) > before,
         "listen allocates"
     );
+    let live = graph.live_nodes();
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    graph.send(opens_in, 1000);
+    assert!(
+        ALLOCATIONS.load(Ordering::Relaxed) > before,
+        "a construct that fires allocates"
+    );
+    assert_eq!(graph.live_nodes(), live + 2, "its closure built two nodes");
+    // The graph it grew is steady again.
+    for i in 0..100 {
+        drive(&mut graph, i);
+    }
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for i in 0..1_000 {
+        drive(&mut graph, i);
+    }
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed) - before,
+        0,
+        "allocations in 3,000 transactions after the construct fired"
+    );
+    assert_eq!(
+        openings.get(),
+        *graph.sample(opened),
+        "the switch follows the cell the closure built"
+    );
+    assert!(openings.get() > 2000);
     assert_eq!(
         heard.get(),
         *graph.sample(both),
