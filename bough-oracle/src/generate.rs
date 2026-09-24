@@ -1,4 +1,4 @@
-//! Random well-typed programs in the subset of stages 1 to 5, and a reducer
+//! Random well-typed programs in the subset of stages 1 to 6, and a reducer
 //! that shrinks a failing program further than proptest can.
 //!
 //! [`programs`] draws a recipe and interprets it into a [`Program`]: one to
@@ -86,14 +86,58 @@
 //! make a legal program (finding F46), which the generator never makes.
 //! [`with_switch_cycle`] makes a program with such a cycle on purpose.
 //!
+//! # Constructs
+//!
+//! A construct step runs a body of one to five definitions at each event of
+//! a stream it takes. One time in four that stream is a map or a filter of a
+//! shared stream, which the body is given to prefer, so that what it builds
+//! over it takes its event at the construct's instant; one time in four it
+//! is a defer or a split, so that the closure runs in child instants. A
+//! body builds holds over shared streams, which take their event at the
+//! instant, maps and filters of them, snapshots and gates of cells, steps
+//! views, mostly `steps_with_current`, which fires at the instant, a
+//! `switch_cell` over a top-level outer that may have switched before it
+//! (finding F6), now and then beside one built in the build, accumulators
+//! and scans, read-through cells, merges, a `once`, a split or a defer, a
+//! constant of the event, and now and then a construct of its own, whose
+//! body has one to three definitions. Its functions read the construct's
+//! event now and then, and its initial values sample cells, which a body
+//! reads as they were before its instant. It emits a value of the event and
+//! of a sampled cell, a cell, a `State`, a shared stream or a linear stream.
+//! A hold keeps the tokens, from a top-level token of their kind, and a
+//! switch follows the hold.
+//!
+//! RFD 4's dynamic pattern is a construct that builds a screen, a linear
+//! stream of the clicks it sees, each numbered by a counter built with it; a
+//! hold that keeps the current screen, from one built in the build; and the
+//! hold's one `switch_stream`. RFD 2's navigation loop runs that construct on
+//! a stream loop's forward, which a click of 0 on the current screen fires:
+//! a loop through a `switch_stream`'s selection, which is legal (finding
+//! F14).
+//!
+//! A construct depends on its source alone: what its body builds is new
+//! nodes, which depend on what they read. A switch over a hold of what a
+//! construct emits depends, for [`Reach`] and [`well_founded`], on every
+//! top-level node the emitted token depends on through the body. A body
+//! declares no loop: the oracle builds a body's runs for its source's
+//! events before the construct existed (finding F44), where a loop may not
+//! settle, and [`well_founded`] refuses one. A body whose construct may run
+//! at a child instant, as far as the draft can tell, builds no split or
+//! defer, and neither does a body inside a body: the text's `Split` has no
+//! creation time, so a split built at a child instant splits the event its
+//! input had at the instant before, into children at or after its
+//! creation, which the engine does not and cannot do (a fixed test pins
+//! both answers).
+//!
 //! The recipe observes a random subset of the nodes that can be observed:
 //! every cell, every shared stream, and every linear stream nothing
 //! consumes; the builder gives a chain a `node` to listen to.
 //!
 //! [`reduce`] takes a failing program and a test for failure, and cuts what
 //! it can while the test still fails: dead definitions, transactions,
-//! definitions with everything that reads them, inputs nothing reads,
-//! observations, sends and coalescing functions. It bypasses identity
+//! definitions with everything that reads them, a construct body's
+//! definitions with everything in the body that reads them, inputs nothing
+//! reads, observations, sends and coalescing functions. It bypasses identity
 //! nodes, moves a reference or an observation to an ancestor, which strands
 //! what was between, and simplifies expressions and sent values. Every
 //! program it keeps passes [`build::check`], and, if the one it started
@@ -104,7 +148,9 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 
 use crate::build::{self, NodeType, Scalar};
-use crate::program::{Definition, Expression, Input, Program, Reference, Type, Value, Window};
+use crate::program::{
+    Body, BodyResult, Definition, Expression, Input, Program, Reference, Type, Value, Window,
+};
 
 /// At most this many definitions.
 pub const MAX_DEFINITIONS: usize = 64;
@@ -168,6 +214,10 @@ enum Kind {
     SwitchState,
     NestedSwitch,
     SwitchLoop,
+    // Constructs.
+    Construct,
+    Screens,
+    Navigation,
 }
 
 /// One step of a recipe: its kind and the choices it makes.
@@ -246,6 +296,9 @@ fn kind() -> impl Strategy<Value = Kind> {
         4 => Just(Kind::SwitchState),
         4 => Just(Kind::NestedSwitch),
         4 => Just(Kind::SwitchLoop),
+        16 => Just(Kind::Construct),
+        3 => Just(Kind::Screens),
+        3 => Just(Kind::Navigation),
     ]
 }
 
@@ -683,6 +736,16 @@ struct Reach {
     /// The open loops whose values reach the node by any edge: a
     /// definition that reads its own loop is one worth closing it with.
     reads: u128,
+    /// Whether the node may fire or step in a child instant, as far as the
+    /// draft can tell: a split or a defer, a loop, whose definition is not
+    /// known when it is declared, a construct whose body splits, defers or
+    /// constructs, and anything that depends on one of those. A construct
+    /// whose source may fire in a child instant builds no split or defer in
+    /// its body: the text's `Split` has no creation time, and one built at
+    /// a child instant would split the event its input had at the parent
+    /// instant, before the split existed, into children at or after its
+    /// creation, which the engine does not do, nor Java's Sodium.
+    children: bool,
 }
 
 /// A program under construction.
@@ -701,6 +764,171 @@ fn top(node: usize) -> Reference {
     Reference::TopLevel(node)
 }
 
+/// What a construct's body emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Want {
+    /// An integer.
+    Value,
+    /// A cell of integers, which a hold of them and a `switch_cell` read.
+    Cell,
+    /// A `State` of integers, likewise.
+    State,
+    /// A shared stream of integers, which a hold of them and a
+    /// `switch_stream` read.
+    Shared,
+    /// A linear stream of integers the body builds, which a hold of them
+    /// and the hold's one `switch_stream` read.
+    Linear,
+}
+
+impl Want {
+    fn of(step: &Step) -> Want {
+        match (step.pick(4) >> 4) % 20 {
+            0..=5 => Want::Value,
+            6..=10 => Want::Cell,
+            11 | 12 => Want::State,
+            13..=15 => Want::Shared,
+            _ => Want::Linear,
+        }
+    }
+}
+
+/// A function of a construct body, now and then reading the construct's
+/// event too.
+fn with_event(e: Expression, step: &Step) -> Expression {
+    match (step.pick(4) >> 9) % 3 {
+        0 => e + Expression::ConstructEvent,
+        1 => e * literal(10) + Expression::ConstructEvent,
+        _ => e,
+    }
+}
+
+/// A construct body under construction: its nodes, and what each is, as
+/// [`Slot`] says of the top level's.
+#[derive(Clone, Debug, Default)]
+struct BodyDraft {
+    definitions: Vec<Definition>,
+    slots: Vec<Slot>,
+    /// Whether it may split or defer: only if its construct runs at
+    /// external instants alone (see [`Reach::children`]).
+    splits: bool,
+}
+
+impl BodyDraft {
+    /// Adds a definition, consuming the body's linear streams it consumes.
+    fn push(&mut self, definition: Definition, slot: Slot) -> Reference {
+        for reference in build::consumed_streams(&definition) {
+            if let Reference::Local(node) = reference {
+                self.consume(node);
+            }
+        }
+        self.definitions.push(definition);
+        self.slots.push(slot);
+        Reference::Local(self.definitions.len() - 1)
+    }
+
+    fn push_stream(&mut self, definition: Definition, scalar: Scalar) -> Reference {
+        let shared = matches!(definition, Definition::Share(_));
+        self.push(
+            definition,
+            Slot::Stream {
+                scalar,
+                shared,
+                consumed: false,
+            },
+        )
+    }
+
+    fn push_cell(&mut self, definition: Definition, scalar: Scalar, state: bool) -> Reference {
+        self.push(definition, Slot::Cell { scalar, state })
+    }
+
+    fn consume(&mut self, node: usize) {
+        if let Slot::Stream {
+            shared: false,
+            consumed,
+            ..
+        } = &mut self.slots[node]
+        {
+            *consumed = true;
+        }
+    }
+
+    fn scalar(&self, node: usize) -> Scalar {
+        match self.slots[node] {
+            Slot::Stream { scalar, .. } | Slot::Cell { scalar, .. } => scalar,
+            _ => unreachable!("bough-oracle: body node {node} has no scalar"),
+        }
+    }
+
+    fn state(&self, node: usize) -> bool {
+        matches!(self.slots[node], Slot::Cell { state: true, .. })
+    }
+
+    /// The streams a definition may consume, of one scalar or any.
+    fn streams(&self, scalar: Option<Scalar>) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| match self.slots[node] {
+                Slot::Stream {
+                    scalar: s,
+                    shared,
+                    consumed,
+                } => (shared || !consumed) && scalar.is_none_or(|want| want == s),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// The linear streams of the scalar nothing consumed.
+    fn unconsumed(&self, scalar: Scalar) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Stream { scalar: s, shared: false, consumed: false } if s == scalar
+                )
+            })
+            .collect()
+    }
+
+    /// The `Share`s of the scalar.
+    fn shares(&self, scalar: Scalar) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Stream { scalar: s, shared: true, .. } if s == scalar
+                )
+            })
+            .collect()
+    }
+
+    /// The cells of one scalar or any, `State`s only if `state`.
+    fn cells(&self, scalar: Option<Scalar>, state: bool) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| match self.slots[node] {
+                Slot::Cell {
+                    scalar: s,
+                    state: st,
+                } => scalar.is_none_or(|want| want == s) && (state || !st),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// The cells of integers of exactly the kind `state` says.
+    fn integer_cells(&self, state: bool) -> Vec<usize> {
+        (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Cell { scalar: Scalar::Integer, state: s } if s == state
+                )
+            })
+            .collect()
+    }
+}
+
 fn bit(node: usize) -> u128 {
     1 << node
 }
@@ -713,33 +941,42 @@ fn type_of(scalar: Scalar) -> Type {
 }
 
 /// The top-level nodes a definition depends on, as [`Reach`] counts them:
-/// what it consumes and the cells it reads through, but not a snapshot's
-/// or a gate's cell or a `Sample`. A `switch_cell` depends on its outer, and
-/// a switch on every token its outer may select, among the `definitions`
-/// before it; a `switch_stream`'s outer is read before the instant, and is
-/// no dependency.
+/// see [`depends_on`].
 fn dependencies(definitions: &[Definition], definition: &Definition) -> Vec<usize> {
+    depends_on(definitions, definitions, definition)
+        .into_iter()
+        .filter_map(|reference| match reference {
+            Reference::TopLevel(node) => Some(node),
+            Reference::Local(_) => None,
+        })
+        .collect()
+}
+
+/// The nodes a definition depends on in its scope, as [`Reach`] counts
+/// them: what it consumes and the cells it reads through, but not a
+/// snapshot's or a gate's cell or a `Sample`. `top` is the program's
+/// definitions, and `scope` those of the definition's own scope: the same
+/// at the top level, a construct body's in a body.
+///
+/// A construct depends on its source alone: its body's nodes are new
+/// nodes, built when it runs, which depend on what they read. A
+/// `switch_cell` depends on its outer, and a switch on every token its
+/// outer may select ([`selectable`]); a `switch_stream`'s outer is read
+/// before the instant, and is no dependency.
+fn depends_on(top: &[Definition], scope: &[Definition], definition: &Definition) -> Vec<Reference> {
     let mut nodes = Vec::new();
-    let mut add = |reference: &Reference| {
-        if let Reference::TopLevel(node) = reference {
-            nodes.push(*node);
-        }
-    };
-    let candidates = |outer: &Reference| match outer {
-        Reference::TopLevel(outer) => build::switch_candidates(definitions, *outer),
-        Reference::Local(_) => Vec::new(),
-    };
     match definition {
         Definition::PickStream { source, .. }
         | Definition::PickCell { source, .. }
         | Definition::HoldStream { source, .. }
-        | Definition::HoldCell { source, .. } => add(source),
-        Definition::MapPickCell { cell, .. } => add(cell),
+        | Definition::HoldCell { source, .. }
+        | Definition::Construct { source, .. } => nodes.push(*source),
+        Definition::MapPickCell { cell, .. } => nodes.push(*cell),
         Definition::SwitchCell(outer) => {
-            add(outer);
-            candidates(outer).iter().for_each(add);
+            nodes.push(*outer);
+            nodes.extend(selectable(top, scope, outer));
         }
-        Definition::SwitchStream(outer) => candidates(outer).iter().for_each(add),
+        Definition::SwitchStream(outer) => nodes.extend(selectable(top, scope, outer)),
         Definition::Map { source, .. }
         | Definition::Filter { source, .. }
         | Definition::FilterMap { source, .. }
@@ -750,7 +987,7 @@ fn dependencies(definitions: &[Definition], definition: &Definition) -> Vec<usiz
         | Definition::Hold { source, .. }
         | Definition::Accumulate { source, .. }
         | Definition::AccumulateMut { source, .. }
-        | Definition::MapList { source, .. } => add(source),
+        | Definition::MapList { source, .. } => nodes.push(*source),
         Definition::Once(source)
         | Definition::Node(source)
         | Definition::Share(source)
@@ -758,16 +995,79 @@ fn dependencies(definitions: &[Definition], definition: &Definition) -> Vec<usiz
         | Definition::Defer(source)
         | Definition::Steps(source)
         | Definition::StepsWithCurrent(source)
-        | Definition::ToBoolean(source) => add(source),
-        Definition::MapCell { cell, .. } => add(cell),
+        | Definition::ToBoolean(source) => nodes.push(*source),
+        Definition::MapCell { cell, .. } => nodes.push(*cell),
         Definition::Merge { left, right, .. } | Definition::OrElse { left, right } => {
-            add(left);
-            add(right);
+            nodes.push(*left);
+            nodes.push(*right);
         }
-        Definition::Lift { cells, .. } => cells.iter().for_each(add),
+        Definition::Lift { cells, .. } => nodes.extend(cells.iter().copied()),
         _ => {}
     }
     nodes
+}
+
+/// The tokens a switch over `outer` may select, which it depends on:
+/// [`build::switch_candidates`] in the outer's scope, and for a hold of
+/// what a construct emits, which is built at run time, the top-level nodes
+/// the emitted token depends on ([`emitted_dependencies`]).
+fn selectable(top: &[Definition], scope: &[Definition], outer: &Reference) -> Vec<Reference> {
+    let named = |reference: &Reference| match reference {
+        Reference::TopLevel(node) => top.get(*node),
+        Reference::Local(node) => scope.get(*node),
+    };
+    match named(outer) {
+        Some(
+            Definition::HoldStream { initial, source } | Definition::HoldCell { initial, source },
+        ) => {
+            let mut found = vec![*initial];
+            match named(source) {
+                Some(
+                    Definition::PickStream {
+                        streams: listed, ..
+                    }
+                    | Definition::PickCell { cells: listed, .. },
+                ) => found.extend(listed.iter().copied()),
+                Some(Definition::Construct { body, .. }) => found.extend(
+                    emitted_dependencies(top, body)
+                        .into_iter()
+                        .map(Reference::TopLevel),
+                ),
+                _ => {}
+            }
+            found
+        }
+        Some(Definition::ConstantStream(token) | Definition::ConstantCell(token)) => vec![*token],
+        Some(Definition::MapPickCell { cells, .. }) => cells.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The top-level nodes the token a construct body emits depends on, as
+/// [`depends_on`] counts them, through the body's nodes: those a switch
+/// over a hold of the construct's tokens may come to depend on. None for a
+/// body that emits a value.
+fn emitted_dependencies(top: &[Definition], body: &Body) -> Vec<usize> {
+    let BodyResult::Node(node) = &body.result else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut seen = vec![false; body.definitions.len()];
+    let mut stack = vec![*node];
+    while let Some(reference) = stack.pop() {
+        match reference {
+            Reference::TopLevel(node) => found.push(node),
+            Reference::Local(node) => {
+                if node < seen.len() && !seen[node] {
+                    seen[node] = true;
+                    stack.extend(depends_on(top, &body.definitions, &body.definitions[node]));
+                }
+            }
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 impl Draft {
@@ -784,15 +1084,33 @@ impl Draft {
             Reach {
                 depends: bit(index),
                 reads: bit(index),
+                children: true,
             }
         } else {
             let mut reach = Reach::default();
             for node in dependencies(&self.definitions, &definition) {
                 reach.depends |= self.reach[node].depends;
+                reach.children |= self.reach[node].children;
             }
             for node in references(&definition) {
                 reach.reads |= self.reach[node].reads;
             }
+            reach.children |= match &definition {
+                Definition::Split(_) | Definition::Defer(_) => true,
+                Definition::Construct { body, .. } => in_children(body),
+                // Its events are those of what a construct emits, which the
+                // hold it switches over reads.
+                Definition::SwitchStream(Reference::TopLevel(outer)) => {
+                    match self.definitions.get(*outer) {
+                        Some(Definition::HoldStream {
+                            source: Reference::TopLevel(held),
+                            ..
+                        }) => self.reach[*held].children,
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
             reach
         };
         for reference in build::consumed_streams(&definition) {
@@ -1259,6 +1577,15 @@ impl Draft {
             }
             Kind::NestedSwitch => self.nested_switch(step),
             Kind::SwitchLoop => self.switch_loop(step),
+            Kind::Construct => self.construct(step),
+            Kind::Screens => {
+                let source = self.stream_of(step.pick(1), Scalar::Integer);
+                let events = self.screens(step, source, 0);
+                if step.pick(4) % 2 == 0 {
+                    self.push_stream(Definition::Share(top(events)), Scalar::Integer);
+                }
+            }
+            Kind::Navigation => self.navigation(step),
         }
     }
 
@@ -2265,8 +2592,22 @@ impl Draft {
         selector: Option<usize>,
         avoid: u128,
     ) -> usize {
+        let outer = self.cell_outer(step, candidates, state, selector, avoid);
+        self.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state)
+    }
+
+    /// The outer of [`Draft::switch_cell_over`]: a cell of the candidates,
+    /// `State`s when `state`. Returns it.
+    fn cell_outer(
+        &mut self,
+        step: &Step,
+        candidates: &[usize],
+        state: bool,
+        selector: Option<usize>,
+        avoid: u128,
+    ) -> usize {
         let cells: Vec<Reference> = candidates.iter().map(|&c| top(c)).collect();
-        let outer = match (selector, step.pick(2) % 8) {
+        match (selector, step.pick(2) % 8) {
             (None, 0) => self.push(Definition::ConstantCell(cells[0]), Slot::Outer),
             (None, 1 | 2) => {
                 let readable: Vec<usize> = self
@@ -2312,8 +2653,7 @@ impl Draft {
                     Slot::Outer,
                 )
             }
-        };
-        self.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state)
+        }
     }
 
     /// A `switch_stream` among two to four shared streams that depend on
@@ -2461,6 +2801,717 @@ impl Draft {
                 self.close(forward, held);
             }
         }
+    }
+
+    // ----- constructs -----
+
+    /// A construct: the stream it runs on, a body of one to five
+    /// definitions, and what reads what it emits.
+    fn construct(&mut self, step: &Step) {
+        let (source, prefer) = self.construct_source(step);
+        let want = Want::of(step);
+        let mut body = BodyDraft {
+            splits: !self.reach[source].children,
+            ..BodyDraft::default()
+        };
+        let result = self.body(&mut body, step, 1 + step.pick(5) % 5, want, prefer, 0);
+        let construct = Definition::Construct {
+            body: Body {
+                definitions: body.definitions,
+                result,
+            },
+            source: top(source),
+        };
+        let construct = match want {
+            Want::Value => self.push_stream(construct, Scalar::Integer),
+            _ => self.push(construct, Slot::Tokens),
+        };
+        self.emitted(step, construct, want);
+    }
+
+    /// The stream a construct runs on, consumed. One time in four it is a
+    /// map or a filter of a shared stream, which the body is given to prefer
+    /// where it reads a stream, so that what the body builds over it takes
+    /// its event at the construct's instant. One time in four it is
+    /// deferred or split, so that the closure runs in child instants.
+    /// Returns it and the stream to prefer.
+    fn construct_source(&mut self, step: &Step) -> (usize, Option<usize>) {
+        let source = self.stream(step.pick(1), None);
+        let (source, prefer) = match (step.pick(2) >> 4) % 8 {
+            0 | 1 => {
+                let shared = self.shared(source);
+                let kind = if step.pick(2) % 2 == 0 {
+                    Kind::Map
+                } else {
+                    Kind::Filter
+                };
+                (self.adapter(kind, step, shared), Some(shared))
+            }
+            2 => {
+                let scalar = self.scalar(source);
+                (
+                    self.push_stream(Definition::Defer(top(source)), scalar),
+                    None,
+                )
+            }
+            3 => (self.split(step, 0, source), None),
+            _ => (source, None),
+        };
+        // Taken now, so that nothing the body needs built takes it too.
+        self.consume(source);
+        (source, prefer)
+    }
+
+    /// What reads what a construct emits. Its stream of values stays for
+    /// later steps. A hold keeps the latest token it emits, starting from a
+    /// top-level token of their kind, and a switch follows the hold: a
+    /// `switch_cell` of cells or `State`s, and one `switch_stream` of shared
+    /// or linear streams.
+    fn emitted(&mut self, step: &Step, construct: usize, want: Want) {
+        match want {
+            Want::Value => {}
+            Want::Cell | Want::State => {
+                let state = want == Want::State;
+                let initial = self.integer_cell(step, step.pick(3), state);
+                let outer = self.push(
+                    Definition::HoldCell {
+                        initial: top(initial),
+                        source: top(construct),
+                    },
+                    Slot::Outer,
+                );
+                let switch =
+                    self.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state);
+                if !state && step.pick(3) % 3 == 0 {
+                    self.push_stream(Definition::Steps(top(switch)), Scalar::Integer);
+                }
+            }
+            Want::Shared | Want::Linear => {
+                let initial = if want == Want::Shared {
+                    match recent(&self.shares(Some(Scalar::Integer), 0), step.pick(3)) {
+                        Some(share) if step.pick(3) % 4 != 0 => share,
+                        _ => self.new_share(step.pick(3), Scalar::Integer, 0),
+                    }
+                } else {
+                    let stream = self.stream_of(step.pick(3), Scalar::Integer);
+                    self.push_stream(
+                        Definition::Map {
+                            function: step.unary(),
+                            source: top(stream),
+                        },
+                        Scalar::Integer,
+                    )
+                };
+                let outer = self.push(
+                    Definition::HoldStream {
+                        initial: top(initial),
+                        source: top(construct),
+                    },
+                    Slot::Outer,
+                );
+                let switch =
+                    self.push_stream(Definition::SwitchStream(top(outer)), Scalar::Integer);
+                if step.pick(3) % 3 == 0 {
+                    self.push_stream(Definition::Share(top(switch)), Scalar::Integer);
+                }
+            }
+        }
+    }
+
+    /// A top-level cell of integers of exactly the kind `state` says, most
+    /// recent first, or a new one.
+    fn integer_cell(&mut self, step: &Step, choice: usize, state: bool) -> usize {
+        let cells: Vec<usize> = (0..self.slots.len())
+            .filter(|&node| {
+                matches!(
+                    self.slots[node],
+                    Slot::Cell { scalar: Scalar::Integer, state: s } if s == state
+                )
+            })
+            .collect();
+        match recent(&cells, choice) {
+            Some(cell) if choice % 4 != 0 => cell,
+            _ => self.new_cell(step, choice, state, 0),
+        }
+    }
+
+    /// Fills a construct body with about `count` definitions and returns
+    /// what it emits, as `want` says. Each definition reads the body's nodes
+    /// and the top level's shared streams and cells, and now and then the
+    /// stream `prefer`. `depth` counts the constructs around this body; a
+    /// body inside another builds no construct.
+    fn body(
+        &mut self,
+        body: &mut BodyDraft,
+        step: &Step,
+        count: usize,
+        want: Want,
+        prefer: Option<usize>,
+        depth: usize,
+    ) -> BodyResult {
+        let mut part = 1;
+        while body.definitions.len() < count.saturating_sub(1).max(1) {
+            self.body_step(body, &step.varied(part), prefer, depth);
+            part += 1;
+        }
+        self.body_result(body, &step.varied(part), want, prefer)
+    }
+
+    /// One definition of a construct body, or a small pattern of them.
+    fn body_step(
+        &mut self,
+        body: &mut BodyDraft,
+        step: &Step,
+        prefer: Option<usize>,
+        depth: usize,
+    ) {
+        match step.pick(0) % 26 {
+            // A hold created at the instant takes the event its stream has
+            // then.
+            0..=3 => {
+                let initial = self.body_initial(body, step);
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, source);
+                body.push_cell(Definition::Hold { initial, source }, scalar, false);
+            }
+            // Maps and filters, reading the construct's event now and then.
+            4..=7 => {
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, source);
+                match step.pick(2) % 4 {
+                    0 => body.push_stream(
+                        Definition::Map {
+                            function: with_event(step.unary(), step),
+                            source,
+                        },
+                        Scalar::Integer,
+                    ),
+                    1 => body.push_stream(
+                        Definition::Filter {
+                            predicate: step.predicate(),
+                            source,
+                        },
+                        scalar,
+                    ),
+                    2 => body.push_stream(
+                        Definition::FilterMap {
+                            keep: step.predicate(),
+                            function: with_event(step.unary(), step),
+                            source,
+                        },
+                        Scalar::Integer,
+                    ),
+                    _ => body.push_stream(
+                        Definition::MapTo {
+                            value: Value::Integer(step.literal),
+                            source,
+                        },
+                        Scalar::Integer,
+                    ),
+                };
+            }
+            // Snapshots and gates read a cell before the instant.
+            8..=10 => {
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let cell = self.body_cell(body, step.pick(2), None, true);
+                body.push_stream(
+                    Definition::Snapshot {
+                        function: with_event(step.binary(), step),
+                        source,
+                        cell,
+                    },
+                    Scalar::Integer,
+                );
+            }
+            11 => {
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, source);
+                let cell = self.body_cell(body, step.pick(2), Some(Scalar::Boolean), true);
+                body.push_stream(Definition::Gate { source, cell }, scalar);
+            }
+            // Steps views created at the instant: steps_with_current fires
+            // then with the value after it.
+            12..=14 => {
+                let cell = self.body_cell(body, step.pick(1), None, false);
+                let scalar = self.body_scalar(body, cell);
+                let definition = if step.pick(2) % 3 == 0 {
+                    Definition::Steps(cell)
+                } else {
+                    Definition::StepsWithCurrent(cell)
+                };
+                body.push_stream(definition, scalar);
+            }
+            // A switch_cell created at the instant over a top-level outer,
+            // which may have switched before it: it starts from the outer's
+            // value then (finding F6).
+            15 | 16 => {
+                let state = step.pick(3) % 4 == 0;
+                let candidates = self.cell_candidates(step, state, 0);
+                let outer = self.cell_outer(step, &candidates, state, None, 0);
+                if step.pick(4) % 3 == 0 {
+                    // A switch built in the build over the same outer.
+                    self.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state);
+                }
+                body.push_cell(Definition::SwitchCell(top(outer)), Scalar::Integer, state);
+            }
+            // Accumulators and scans created at the instant.
+            17 | 18 => {
+                let initial = self.body_initial(body, step);
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                match step.pick(2) % 3 {
+                    0 => body.push_cell(
+                        Definition::Accumulate {
+                            initial,
+                            function: step.accumulator(),
+                            source,
+                        },
+                        Scalar::Integer,
+                        false,
+                    ),
+                    1 => body.push_cell(
+                        Definition::AccumulateMut {
+                            initial,
+                            function: step.accumulator(),
+                            source,
+                        },
+                        Scalar::Integer,
+                        true,
+                    ),
+                    _ => body.push_stream(
+                        Definition::Scan {
+                            initial,
+                            output: step.binary(),
+                            state: step.accumulator(),
+                            source,
+                        },
+                        Scalar::Integer,
+                    ),
+                };
+            }
+            // Read-through cells.
+            19 => {
+                let first = self.body_cell(body, step.pick(1), None, true);
+                if step.pick(2) % 2 == 0 {
+                    let state = self.body_state(body, first);
+                    body.push_cell(
+                        Definition::MapCell {
+                            function: with_event(step.unary(), step),
+                            cell: first,
+                        },
+                        Scalar::Integer,
+                        state,
+                    );
+                } else {
+                    let second = self.body_cell(body, step.pick(3), None, true);
+                    let state = self.body_state(body, first) || self.body_state(body, second);
+                    body.push_cell(
+                        Definition::Lift {
+                            function: step.lift(2),
+                            cells: vec![first, second],
+                        },
+                        Scalar::Integer,
+                        state,
+                    );
+                }
+            }
+            // Two streams joined.
+            20 => {
+                let left = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, left);
+                let right = self.body_stream(body, step.pick(2) >> 1, Some(scalar), None);
+                let definition = if step.pick(3) % 2 == 0 {
+                    Definition::Merge {
+                        function: step.combine(),
+                        left,
+                        right,
+                    }
+                } else {
+                    Definition::OrElse { left, right }
+                };
+                body.push_stream(definition, scalar);
+            }
+            // A once created at the instant, and child instants of it.
+            21 => {
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, source);
+                match step.pick(2) % 3 {
+                    _ if !body.splits => body.push_stream(Definition::Once(source), scalar),
+                    0 => body.push_stream(Definition::Once(source), scalar),
+                    1 => body.push_stream(Definition::Defer(source), scalar),
+                    _ => {
+                        let lists = body.push(
+                            Definition::MapList {
+                                length: step.length(0),
+                                element: step.element(0),
+                                source,
+                            },
+                            Slot::Lists,
+                        );
+                        body.push_stream(Definition::Split(lists), Scalar::Integer)
+                    }
+                };
+            }
+            // A constant of the construct's event.
+            22 => {
+                body.push_cell(
+                    Definition::Constant(Expression::ConstructEvent + literal(step.literal)),
+                    Scalar::Integer,
+                    false,
+                );
+            }
+            _ if depth == 0 => self.body_construct(body, step, prefer),
+            _ => {
+                let source = self.body_stream(body, step.pick(1), None, prefer);
+                let scalar = self.body_scalar(body, source);
+                body.push_cell(
+                    Definition::Hold {
+                        initial: Expression::ConstructEvent,
+                        source,
+                    },
+                    scalar,
+                    false,
+                );
+            }
+        }
+    }
+
+    /// A construct inside a body, over a stream of the body or a shared
+    /// one, with a body of its own of one or two definitions, which reads
+    /// the top level and its own nodes but not those of the body around it.
+    /// What reads its emissions is built in the body around it, as
+    /// [`Draft::emitted`] builds it at the top level.
+    fn body_construct(&mut self, body: &mut BodyDraft, step: &Step, prefer: Option<usize>) {
+        let source = self.body_stream(body, step.pick(1), None, prefer);
+        let want = Want::of(&step.varied(9));
+        let mut inner = BodyDraft::default();
+        let result = self.body(
+            &mut inner,
+            &step.varied(11),
+            2 + step.pick(2) % 2,
+            want,
+            prefer,
+            1,
+        );
+        let construct = Definition::Construct {
+            body: Body {
+                definitions: inner.definitions,
+                result,
+            },
+            source,
+        };
+        match want {
+            Want::Value => {
+                body.push_stream(construct, Scalar::Integer);
+            }
+            Want::Cell | Want::State => {
+                let state = want == Want::State;
+                let made = body.push(construct, Slot::Tokens);
+                let initial = match recent(&body.integer_cells(state), step.pick(3)) {
+                    Some(cell) if step.pick(3) % 2 == 0 => Reference::Local(cell),
+                    _ => top(self.integer_cell(step, step.pick(3), state)),
+                };
+                let outer = body.push(
+                    Definition::HoldCell {
+                        initial,
+                        source: made,
+                    },
+                    Slot::Outer,
+                );
+                body.push_cell(Definition::SwitchCell(outer), Scalar::Integer, state);
+            }
+            Want::Shared | Want::Linear => {
+                let made = body.push(construct, Slot::Tokens);
+                let initial = if want == Want::Shared {
+                    match recent(&self.shares(Some(Scalar::Integer), 0), step.pick(3)) {
+                        Some(share) => top(share),
+                        None => top(self.new_share(step.pick(3), Scalar::Integer, 0)),
+                    }
+                } else {
+                    let stream = self.body_stream(body, step.pick(3), None, prefer);
+                    body.push_stream(
+                        Definition::Map {
+                            function: step.unary(),
+                            source: stream,
+                        },
+                        Scalar::Integer,
+                    )
+                };
+                let outer = body.push(
+                    Definition::HoldStream {
+                        initial,
+                        source: made,
+                    },
+                    Slot::Outer,
+                );
+                body.push_stream(Definition::SwitchStream(outer), Scalar::Integer);
+            }
+        }
+    }
+
+    /// What a body emits, as `want` says: a value of the construct's event
+    /// and of a cell before the instant, one the body built or a top-level
+    /// one; or a cell, a `State`, a shared stream or a linear stream of
+    /// integers, one the body built, or a new one.
+    fn body_result(
+        &mut self,
+        body: &mut BodyDraft,
+        step: &Step,
+        want: Want,
+        prefer: Option<usize>,
+    ) -> BodyResult {
+        match want {
+            Want::Value => {
+                let sampled = match recent(&body.cells(None, true), step.pick(1)) {
+                    Some(cell) if step.pick(1) % 3 != 0 => Some(Reference::Local(cell)),
+                    _ => recent(&self.cells(None, true), step.pick(2)).map(top),
+                };
+                let event = Expression::ConstructEvent;
+                BodyResult::Value(match (sampled, step.pick(3) % 3) {
+                    (Some(cell), 0) => event * literal(100) + Expression::Sample(cell),
+                    (Some(cell), 1) => Expression::Sample(cell) - event,
+                    _ => event + literal(step.literal),
+                })
+            }
+            Want::Cell | Want::State => {
+                let state = want == Want::State;
+                let node = match recent(&body.integer_cells(state), step.pick(1)) {
+                    Some(cell) => Reference::Local(cell),
+                    None => {
+                        let initial = self.body_initial(body, step);
+                        let source = self.body_stream(body, step.pick(2), None, prefer);
+                        if state {
+                            body.push_cell(
+                                Definition::AccumulateMut {
+                                    initial,
+                                    function: step.accumulator(),
+                                    source,
+                                },
+                                Scalar::Integer,
+                                true,
+                            )
+                        } else {
+                            body.push_cell(
+                                Definition::Accumulate {
+                                    initial,
+                                    function: step.accumulator(),
+                                    source,
+                                },
+                                Scalar::Integer,
+                                false,
+                            )
+                        }
+                    }
+                };
+                BodyResult::Node(node)
+            }
+            Want::Shared => {
+                let node = match recent(&body.shares(Scalar::Integer), step.pick(1)) {
+                    Some(share) => Reference::Local(share),
+                    None => {
+                        let source = self.body_stream(body, step.pick(2), None, prefer);
+                        let mapped = body.push_stream(
+                            Definition::Map {
+                                function: with_event(step.unary(), step),
+                                source,
+                            },
+                            Scalar::Integer,
+                        );
+                        body.push_stream(Definition::Share(mapped), Scalar::Integer)
+                    }
+                };
+                BodyResult::Node(node)
+            }
+            Want::Linear => {
+                let node = match recent(&body.unconsumed(Scalar::Integer), step.pick(1)) {
+                    Some(stream) => {
+                        body.consume(stream);
+                        Reference::Local(stream)
+                    }
+                    None => {
+                        let source = self.body_stream(body, step.pick(2), None, prefer);
+                        let mapped = body.push_stream(
+                            Definition::Map {
+                                function: with_event(step.unary(), step),
+                                source,
+                            },
+                            Scalar::Integer,
+                        );
+                        if let Reference::Local(node) = mapped {
+                            body.consume(node);
+                        }
+                        mapped
+                    }
+                };
+                BodyResult::Node(node)
+            }
+        }
+    }
+
+    /// A stream a body's definition consumes: one time in two the stream
+    /// to prefer, if it carries the scalar; else a body stream nothing
+    /// consumed yet or a body's `Share`, or a top-level `Share`, most recent
+    /// first; a new top-level `Share` when there is none. A body stream is
+    /// marked consumed.
+    fn body_stream(
+        &mut self,
+        body: &mut BodyDraft,
+        choice: usize,
+        scalar: Option<Scalar>,
+        prefer: Option<usize>,
+    ) -> Reference {
+        if let Some(prefer) = prefer {
+            if choice % 2 == 0 && scalar.is_none_or(|want| want == self.scalar(prefer)) {
+                return top(prefer);
+            }
+        }
+        let locals = body.streams(scalar);
+        let shares = self.shares(scalar, 0);
+        let total = locals.len() + shares.len();
+        if total == 0 {
+            return top(self.new_share(choice, scalar.unwrap_or(Scalar::Integer), 0));
+        }
+        let k = (choice >> 1) % total;
+        if k < locals.len() {
+            let node = locals[locals.len() - 1 - k];
+            body.consume(node);
+            Reference::Local(node)
+        } else {
+            top(shares[shares.len() - 1 - (k - locals.len())])
+        }
+    }
+
+    /// A cell a body's definition reads, of one scalar or any, a `State`
+    /// only if `state`: the body's or a top-level one, most recent first,
+    /// or a new top-level one.
+    fn body_cell(
+        &mut self,
+        body: &BodyDraft,
+        choice: usize,
+        scalar: Option<Scalar>,
+        state: bool,
+    ) -> Reference {
+        let locals = body.cells(scalar, state);
+        let tops = self.cells(scalar, state);
+        let total = locals.len() + tops.len();
+        if total == 0 {
+            return top(self.cell(choice, scalar, state));
+        }
+        let k = choice % total;
+        if k < locals.len() {
+            Reference::Local(locals[locals.len() - 1 - k])
+        } else {
+            top(tops[tops.len() - 1 - (k - locals.len())])
+        }
+    }
+
+    /// An initial value in a body: a literal, and now and then the
+    /// construct's event or the value before the instant of a cell.
+    fn body_initial(&self, body: &BodyDraft, step: &Step) -> Expression {
+        let cell = match recent(&body.cells(None, true), step.pick(3)) {
+            Some(cell) => Some(Reference::Local(cell)),
+            None => recent(&self.cells(None, true), step.pick(3)).map(top),
+        };
+        match (step.pick(5) % 6, cell) {
+            (0, _) => Expression::ConstructEvent + literal(step.literal),
+            (1 | 2, Some(cell)) => Expression::Sample(cell) + literal(step.literal),
+            _ => literal(step.literal),
+        }
+    }
+
+    fn body_scalar(&self, body: &BodyDraft, reference: Reference) -> Scalar {
+        match reference {
+            Reference::Local(node) => body.scalar(node),
+            Reference::TopLevel(node) => self.scalar(node),
+        }
+    }
+
+    fn body_state(&self, body: &BodyDraft, reference: Reference) -> bool {
+        match reference {
+            Reference::Local(node) => body.state(node),
+            Reference::TopLevel(node) => self.state(node),
+        }
+    }
+
+    /// RFD 4's dynamic pattern: each event of `source` builds a screen, a
+    /// linear stream of the clicks it sees, each numbered by a counter
+    /// built with it, `base + click * 10 + seen`, `base` the construct's
+    /// event. A hold keeps the current screen, from a first one built in
+    /// the build with `base` 0, and one `switch_stream` takes its events.
+    /// The construct consumes `source`. The clicks depend on none of the
+    /// loops in `avoid`. Returns the switch.
+    fn screens(&mut self, step: &Step, source: usize, avoid: u128) -> usize {
+        self.consume(source);
+        let clicks = match recent(&self.shares(Some(Scalar::Integer), avoid), step.pick(2)) {
+            Some(share) if step.pick(2) % 3 != 0 => share,
+            _ => self.new_share(step.pick(2), Scalar::Integer, avoid),
+        };
+        let state = step.pick(3) % 3 == 0;
+        let counter = || {
+            let (initial, function, source) =
+                (literal(0), SecondArgument + literal(1), top(clicks));
+            if state {
+                Definition::AccumulateMut {
+                    initial,
+                    function,
+                    source,
+                }
+            } else {
+                Definition::Accumulate {
+                    initial,
+                    function,
+                    source,
+                }
+            }
+        };
+        let screen = |base: Expression, count: Reference| Definition::Snapshot {
+            function: base + (Argument * literal(10) + (SecondArgument + literal(1))),
+            source: top(clicks),
+            cell: count,
+        };
+        let count = self.push_cell(counter(), Scalar::Integer, state);
+        let first = self.push_stream(screen(literal(0), top(count)), Scalar::Integer);
+        let body = Body {
+            definitions: vec![
+                counter(),
+                screen(Expression::ConstructEvent, Reference::Local(0)),
+            ],
+            result: BodyResult::Node(Reference::Local(1)),
+        };
+        let construct = self.push(
+            Definition::Construct {
+                body,
+                source: top(source),
+            },
+            Slot::Tokens,
+        );
+        let outer = self.push(
+            Definition::HoldStream {
+                initial: top(first),
+                source: top(construct),
+            },
+            Slot::Outer,
+        );
+        self.push_stream(Definition::SwitchStream(top(outer)), Scalar::Integer)
+    }
+
+    /// RFD 2's navigation loop through RFD 4's dynamic pattern: the screens'
+    /// construct runs on a stream loop's forward, and a click of 0 on a
+    /// screen navigates, at the click's instant, to a new screen whose base
+    /// is 100 more. The loop runs through the `switch_stream`'s selection,
+    /// which is read before the instant, so it is legal (finding F14).
+    fn navigation(&mut self, step: &Step) {
+        let navigate = self.declare_stream_loop();
+        let events = self.screens(step, navigate, bit(navigate));
+        let shared = self.push_stream(Definition::Share(top(events)), Scalar::Integer);
+        let next = self.push_stream(
+            Definition::FilterMap {
+                keep: Argument.modulo(100).less_than(literal(10)),
+                function: Argument - Argument.modulo(100) + literal(100),
+                source: top(shared),
+            },
+            Scalar::Integer,
+        );
+        self.close(navigate, next);
     }
 
     /// The nodes that can be observed: every cell, every shared stream, and
@@ -2649,6 +3700,11 @@ fn is_guarded(program: &Program, node: usize) -> bool {
 /// input fires finitely often. So each time round, the value is below the
 /// last, and the guard's filter ends it.
 pub fn well_founded(program: &Program) -> bool {
+    if program.definitions.iter().any(
+        |definition| matches!(definition, Definition::Construct { body, .. } if loops_in(body)),
+    ) {
+        return false;
+    }
     let n = program.definitions.len();
     let mut next: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (index, definition) in program.definitions.iter().enumerate() {
@@ -2715,6 +3771,28 @@ pub fn well_founded(program: &Program) -> bool {
         }
     }
     true
+}
+
+/// Whether what a construct body builds may fire in a child instant of its
+/// construct's: it splits, defers, or builds a construct, whose events come
+/// from a stream of its own.
+fn in_children(body: &Body) -> bool {
+    body.definitions.iter().any(|definition| {
+        matches!(
+            definition,
+            Definition::Split(_) | Definition::Defer(_) | Definition::Construct { .. }
+        )
+    })
+}
+
+/// Whether a construct body, or one nested in it, declares or closes a
+/// loop.
+fn loops_in(body: &Body) -> bool {
+    body.definitions.iter().any(|definition| match definition {
+        Definition::CellLoop(_) | Definition::StreamLoop(_) | Definition::Close { .. } => true,
+        Definition::Construct { body, .. } => loops_in(body),
+        _ => false,
+    })
 }
 
 /// Whether a graph has a cycle, the edges `skip` names left out.
@@ -2997,8 +4075,9 @@ pub fn with_switch_cycle(program: &Program, which: usize) -> Option<Program> {
 // ----- reducing a failing program -----
 
 /// Every top-level node a definition reads: its streams, its cells, the
-/// cells its expressions sample, and for a `Close`, its loop and its
-/// definition.
+/// cells its expressions sample, for a `Close`, its loop and its
+/// definition, and for a construct, its source and every top-level node its
+/// body reads.
 pub fn references(definition: &Definition) -> Vec<usize> {
     let mut nodes = Vec::new();
     let mut add = |reference: &Reference| {
@@ -3137,6 +4216,12 @@ pub fn references(definition: &Definition) -> Vec<usize> {
         | Definition::ConstantCell(token)
         | Definition::SwitchStream(token)
         | Definition::SwitchCell(token) => add(token),
+        Definition::Construct { body, source } => {
+            add(source);
+            for node in build::body_references(body) {
+                add(&Reference::TopLevel(node));
+            }
+        }
         _ => {}
     }
     for expression in expressions {
@@ -3154,14 +4239,32 @@ fn samples(expression: &Expression, nodes: &mut Vec<usize>) {
     }
 }
 
-/// Renames every top-level reference, in definitions and expressions, and
-/// the loop a `Close` closes.
+/// Renames every top-level reference, in definitions and expressions, in
+/// construct bodies too, and the loop a `Close` closes.
 fn rename(definition: &Definition, map: &dyn Fn(usize) -> usize) -> Definition {
-    let r = |reference: &Reference| match reference {
-        Reference::TopLevel(node) => Reference::TopLevel(map(*node)),
-        local => *local,
-    };
-    let e = |expression: &Expression| rename_expression(expression, map);
+    relabel(
+        definition,
+        &Labels {
+            top: map,
+            local: &|node| node,
+        },
+    )
+}
+
+/// How [`relabel`] renumbers the references of a definition: those to
+/// top-level nodes, and those to the nodes of the construct body it is in.
+struct Labels<'a> {
+    top: &'a dyn Fn(usize) -> usize,
+    local: &'a dyn Fn(usize) -> usize,
+}
+
+/// Renumbers every reference of a definition, in its expressions and in a
+/// construct's body too, whose own nodes keep their numbers, and the loop
+/// a `Close` closes.
+fn relabel(definition: &Definition, labels: &Labels<'_>) -> Definition {
+    let r = |reference: &Reference| relabel_reference(*reference, labels);
+    let e = |expression: &Expression| relabel_expression(expression, labels);
+    let map = labels.top;
     match definition {
         Definition::InputCell { input, initial } => Definition::InputCell {
             input: *input,
@@ -3315,16 +4418,52 @@ fn rename(definition: &Definition, map: &dyn Fn(usize) -> usize) -> Definition {
         },
         Definition::SwitchStream(outer) => Definition::SwitchStream(r(outer)),
         Definition::SwitchCell(outer) => Definition::SwitchCell(r(outer)),
+        Definition::Construct { body, source } => Definition::Construct {
+            body: rename_body(body, map),
+            source: r(source),
+        },
         other => other.clone(),
     }
 }
 
-fn rename_expression(expression: &Expression, map: &dyn Fn(usize) -> usize) -> Expression {
-    let go = |e: &Expression| Box::new(rename_expression(e, map));
+fn relabel_reference(reference: Reference, labels: &Labels<'_>) -> Reference {
+    match reference {
+        Reference::TopLevel(node) => Reference::TopLevel((labels.top)(node)),
+        Reference::Local(node) => Reference::Local((labels.local)(node)),
+    }
+}
+
+/// Renames every top-level reference of a construct body: in its
+/// definitions, their expressions, its result, and the bodies nested in it.
+fn rename_body(body: &Body, map: &dyn Fn(usize) -> usize) -> Body {
+    relabel_body(
+        body,
+        &Labels {
+            top: map,
+            local: &|node| node,
+        },
+    )
+}
+
+/// Renumbers every reference of a construct body, as [`relabel`] does.
+fn relabel_body(body: &Body, labels: &Labels<'_>) -> Body {
+    Body {
+        definitions: body
+            .definitions
+            .iter()
+            .map(|definition| relabel(definition, labels))
+            .collect(),
+        result: match &body.result {
+            BodyResult::Value(value) => BodyResult::Value(relabel_expression(value, labels)),
+            BodyResult::Node(node) => BodyResult::Node(relabel_reference(*node, labels)),
+        },
+    }
+}
+
+fn relabel_expression(expression: &Expression, labels: &Labels<'_>) -> Expression {
+    let go = |e: &Expression| Box::new(relabel_expression(e, labels));
     match expression {
-        Expression::Sample(Reference::TopLevel(node)) => {
-            Expression::Sample(Reference::TopLevel(map(*node)))
-        }
+        Expression::Sample(cell) => Expression::Sample(relabel_reference(*cell, labels)),
         Expression::Add(a, b) => Expression::Add(go(a), go(b)),
         Expression::Subtract(a, b) => Expression::Subtract(go(a), go(b)),
         Expression::Multiply(a, b) => Expression::Multiply(go(a), go(b)),
@@ -3337,6 +4476,77 @@ fn rename_expression(expression: &Expression, map: &dyn Fn(usize) -> usize) -> E
         Expression::If(c, a, b) => Expression::If(go(c), go(a), go(b)),
         leaf => leaf.clone(),
     }
+}
+
+/// A construct body without its node `remove` and every node of it that
+/// reads that one, renumbered; `None` if its result reads one of them.
+fn without_local(body: &Body, remove: usize) -> Option<Body> {
+    let locals = |references: Vec<Reference>| -> Vec<usize> {
+        references
+            .into_iter()
+            .filter_map(|reference| match reference {
+                Reference::Local(node) => Some(node),
+                Reference::TopLevel(_) => None,
+            })
+            .collect()
+    };
+    let mut gone = vec![false; body.definitions.len()];
+    gone[remove] = true;
+    for (index, definition) in body.definitions.iter().enumerate() {
+        let mut references = build::named(definition);
+        for expression in build::expressions(definition) {
+            build::sampled(expression, &mut references);
+        }
+        if locals(references).iter().any(|&node| gone[node]) {
+            gone[index] = true;
+        }
+    }
+    let mut result = Vec::new();
+    match &body.result {
+        BodyResult::Node(node) => result.push(*node),
+        BodyResult::Value(value) => build::sampled(value, &mut result),
+    }
+    if locals(result).iter().any(|&node| gone[node]) {
+        return None;
+    }
+    let mut index = vec![usize::MAX; gone.len()];
+    let mut next = 0;
+    for (node, removed) in gone.iter().enumerate() {
+        if !removed {
+            index[node] = next;
+            next += 1;
+        }
+    }
+    let labels = Labels {
+        top: &|node| node,
+        local: &|node| index[node],
+    };
+    let kept = Body {
+        definitions: body
+            .definitions
+            .iter()
+            .zip(&gone)
+            .filter(|(_, removed)| !**removed)
+            .map(|(definition, _)| definition.clone())
+            .collect(),
+        result: body.result.clone(),
+    };
+    // The kept nodes read only kept nodes, so the old numbers map.
+    let renumbered = relabel_body(
+        &Body {
+            definitions: Vec::new(),
+            result: kept.result,
+        },
+        &labels,
+    );
+    Some(Body {
+        definitions: kept
+            .definitions
+            .iter()
+            .map(|definition| relabel(definition, &labels))
+            .collect(),
+        result: renumbered.result,
+    })
 }
 
 /// The program without the given definitions and everything that reads
@@ -3553,6 +4763,22 @@ fn candidates(program: &Program) -> Vec<Program> {
     // Definitions and everything that reads them, the last first.
     for node in (0..program.definitions.len()).rev() {
         smaller.extend(without(program, &[node]));
+    }
+    // A construct body's definitions, each with everything in the body that
+    // reads it, the last first.
+    for (node, definition) in program.definitions.iter().enumerate() {
+        if let Definition::Construct { body, source } = definition {
+            for local in (0..body.definitions.len()).rev() {
+                if let Some(body) = without_local(body, local) {
+                    let mut p = program.clone();
+                    p.definitions[node] = Definition::Construct {
+                        body,
+                        source: *source,
+                    };
+                    smaller.push(p);
+                }
+            }
+        }
     }
     // Loops cut open: the forward made a constant, or a stream that never
     // fires, and its Close dropped, so what the loop fed back no longer

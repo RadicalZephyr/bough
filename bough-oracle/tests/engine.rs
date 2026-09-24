@@ -16,9 +16,10 @@
 //!
 //! The random programs come from `bough_oracle::programs()`, in four tests
 //! that run in parallel. Most have loops, cell, state and stream loops,
-//! child transactions and switches, and some loops run through children or
-//! through a switch's selection; one in seven is a program of stages 1 and
-//! 2 alone. Each shard prints what its programs held, how many observed
+//! child transactions, switches and constructs, and some loops run through
+//! children or through a switch's selection; some constructs are nested,
+//! run in child instants, build RFD 4's screens, or run RFD 2's navigation
+//! loop; one in seven is a program of stages 1 and 2 alone. Each shard prints what its programs held, how many observed
 //! nodes had events in child transactions, and what the switches the
 //! comparison sees did, which a second question to the oracle about each
 //! program shows: how many moved to another inner, and how often the new
@@ -259,6 +260,11 @@ struct Tally {
     switch_states: u32,
     nested_switches: u32,
     selectors_in_children: u32,
+    constructs: u32,
+    nested_constructs: u32,
+    constructs_in_children: u32,
+    linear_tokens: u32,
+    navigation: u32,
     observed: u64,
     active: u64,
     in_children: u64,
@@ -297,6 +303,11 @@ impl Tally {
         self.switch_states += u32::from(c.switch_states);
         self.nested_switches += u32::from(c.nested_switches);
         self.selectors_in_children += u32::from(c.selectors_in_children);
+        self.constructs += u32::from(c.constructs);
+        self.nested_constructs += u32::from(c.nested_constructs);
+        self.constructs_in_children += u32::from(c.constructs_in_children);
+        self.linear_tokens += u32::from(c.linear_tokens);
+        self.navigation += u32::from(c.navigation);
         match switching {
             None => {}
             Some(Ok(count)) => {
@@ -361,8 +372,10 @@ impl std::fmt::Display for Tally {
              events or steps and {:.0}% had them in child transactions, down to depth {}; of \
              {} observed loop forwards {:.0}% stepped or fired; switch_streams in {:.0}%, \
              switch_cells in {:.0}% (over States in {:.0}%), nested switches in {:.0}%, a \
-             selector in child instants in {:.0}%; of {} programs whose switches the comparison \
-             sees, {:.0}% had one that moved: {}; {}",
+             selector in child instants in {:.0}%; constructs in {:.0}% (nested in {:.0}%, in \
+             child instants in {:.0}%, emitting linear streams in {:.0}%, the navigation loop in \
+             {:.0}%); of {} programs whose switches the comparison sees, {:.0}% had one that \
+             moved: {}; {}",
             self.percent(self.loops),
             self.percent(self.stream_loops),
             self.percent(self.state_loops),
@@ -380,6 +393,11 @@ impl std::fmt::Display for Tally {
             self.percent(self.switch_states),
             self.percent(self.nested_switches),
             self.percent(self.selectors_in_children),
+            self.percent(self.constructs),
+            self.percent(self.nested_constructs),
+            self.percent(self.constructs_in_children),
+            self.percent(self.linear_tokens),
+            self.percent(self.navigation),
             self.watched,
             share(u64::from(self.switched), u64::from(self.watched)),
             switching("switch_streams", &self.switching.streams),
@@ -670,9 +688,11 @@ fn same_instant_cycles_through_a_switch_are_refused_or_poison_the_graph() {
          each in both modes, plainly and under a shuffle",
         linked[0], linked[1], linked[2], moved[0], moved[1], moved[2], moved[3]
     );
-    // Most generated programs have a switch.
+    // Of 256 programs, about 90 have a switch to rewire at its first link
+    // and about 53 at a move, each give or take 7. The floors sit far below
+    // both, so that no seed trips them.
     assert!(
-        linked[0] > 40 && moved[0] > 40,
+        linked[0] > 40 && moved[0] > 20,
         "only {} and {} of 256 programs had a switch to rewire",
         linked[0],
         moved[0]
@@ -3700,6 +3720,37 @@ struct Census {
     /// events: the generator's loops through a switch's selection, and any
     /// other loop a switch closes.
     loops_closed_with_switches: bool,
+    constructs: bool,
+    /// A construct in a construct's body.
+    nested_constructs: bool,
+    /// A construct whose source is a split or a defer, whose closure runs
+    /// in child instants.
+    constructs_in_children: bool,
+    /// A construct that emits linear streams: RFD 4's dynamic pattern.
+    linear_tokens: bool,
+    /// A construct whose source is a stream loop's forward: RFD 2's
+    /// navigation loop.
+    navigation: bool,
+    /// A body's switch_cell over a top-level outer, which may have switched
+    /// before the body ran (F6).
+    late_switches: bool,
+    /// A body's steps_with_current, which fires at the body's instant.
+    late_steps: bool,
+}
+
+/// Every construct body of a program, those nested in bodies included.
+fn bodies(program: &Program) -> Vec<&Body> {
+    fn nested<'a>(definitions: &'a [Definition], found: &mut Vec<&'a Body>) {
+        for definition in definitions {
+            if let Construct { body, .. } = definition {
+                found.push(body);
+                nested(&body.definitions, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    nested(&program.definitions, &mut found);
+    found
 }
 
 fn census(program: &Program) -> Census {
@@ -3774,9 +3825,44 @@ fn census(program: &Program) -> Census {
             _ => {}
         }
     }
+    for (node, definition) in program.definitions.iter().enumerate() {
+        if let Construct { source, .. } = definition {
+            census.constructs = true;
+            census.constructs_in_children |= matches!(
+                definition_of(program, source),
+                Some(Definition::Split(_) | Definition::Defer(_))
+            );
+            census.navigation |= matches!(definition_of(program, source), Some(StreamLoop(_)));
+            census.linear_tokens |= types[node] == NodeType::Tokens(Held::Linear(Scalar::Integer));
+        }
+    }
+    let bodies = bodies(program);
+    census.nested_constructs = bodies.iter().any(|body| {
+        body.definitions
+            .iter()
+            .any(|d| matches!(d, Construct { .. }))
+    });
+    census.late_switches = bodies.iter().any(|body| {
+        body.definitions
+            .iter()
+            .any(|d| matches!(d, SwitchCell(TopLevel(_))))
+    });
+    census.late_steps = bodies.iter().any(|body| {
+        body.definitions
+            .iter()
+            .any(|d| matches!(d, StepsWithCurrent(_)))
+    });
     census.loops = census.cell_loops || census.stream_loops;
     census.loops_or_children = census.loops || census.splits || census.defers;
     census
+}
+
+/// The top-level definition a reference names, if it names one.
+fn definition_of<'a>(program: &'a Program, reference: &Reference) -> Option<&'a Definition> {
+    match reference {
+        TopLevel(node) => program.definitions.get(*node),
+        Reference::Local(_) => None,
+    }
 }
 
 /// Every generated program passes the builder's check and is well founded,
@@ -3793,7 +3879,10 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
     let mut defined = std::collections::BTreeSet::new();
     let mut observed = std::collections::BTreeSet::new();
     let (mut shared_diamonds, mut lifts, mut sizes, mut watched) = (0, 0, Vec::new(), 0);
-    let mut counts = [0_usize; 14];
+    let mut counts = [0_usize; 21];
+    // What construct bodies define, and how many definitions each has.
+    let mut in_bodies = std::collections::BTreeSet::new();
+    let mut body_sizes = Vec::new();
     const PROGRAMS: usize = 400;
     for _ in 0..PROGRAMS {
         let program = strategy.new_tree(&mut runner).unwrap().current();
@@ -3814,6 +3903,12 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         }
         for &node in &program.observe {
             observed.insert(bough_oracle::name(&program.definitions[node]));
+        }
+        for body in bodies(&program) {
+            body_sizes.push(body.definitions.len());
+            for definition in &body.definitions {
+                in_bodies.insert(bough_oracle::name(definition));
+            }
         }
         // A diamond: a Share read by two nodes that both lead to one node.
         let readers = |node: usize| -> Vec<usize> {
@@ -3842,6 +3937,13 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
             c.nested_switches,
             c.selectors_in_children,
             c.loops_closed_with_switches,
+            c.constructs,
+            c.nested_constructs,
+            c.constructs_in_children,
+            c.linear_tokens,
+            c.navigation,
+            c.late_switches,
+            c.late_steps,
         ]) {
             *count += usize::from(has);
         }
@@ -3886,9 +3988,44 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "MapPickCell",
         "SwitchStream",
         "SwitchCell",
+        "Construct",
     ];
     for kind in every {
         assert!(defined.contains(kind), "no {kind} in {PROGRAMS} programs");
+    }
+    // What the bodies build: the shapes of stage 6.
+    for kind in [
+        "Hold",
+        "Map",
+        "Filter",
+        "FilterMap",
+        "MapTo",
+        "Snapshot",
+        "Gate",
+        "StepsWithCurrent",
+        "Steps",
+        "SwitchCell",
+        "SwitchStream",
+        "Accumulate",
+        "AccumulateMut",
+        "Scan",
+        "MapCell",
+        "Lift",
+        "Merge",
+        "OrElse",
+        "Once",
+        "Split",
+        "Defer",
+        "Constant",
+        "Construct",
+        "HoldCell",
+        "HoldStream",
+        "Share",
+    ] {
+        assert!(
+            in_bodies.contains(kind),
+            "no {kind} in a construct body in {PROGRAMS} programs"
+        );
     }
     for kind in [
         "Input",
@@ -3942,6 +4079,13 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         nested,
         selectors_in_children,
         loops_closed_with_switches,
+        constructs,
+        nested_constructs,
+        constructs_in_children,
+        linear_tokens,
+        navigation,
+        late_switches,
+        late_steps,
     ] = counts;
     let mean = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
     eprintln!(
@@ -3950,7 +4094,10 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
          {:.0}%, stream {:.0}%), splits {:.0}%, defers {:.0}%, a loop through children {:.0}%, \
          a loop or children {:.0}%; switch_streams {:.0}%, switch_cells {:.0}% (over States \
          {:.0}%), nested switches {:.0}%, a selector in child instants {:.0}%, a loop closed \
-         with a switch {:.0}%",
+         with a switch {:.0}%; constructs {:.0}% (nested {:.0}%, in child instants {:.0}%, \
+         emitting linear streams {:.0}%, the navigation loop {:.0}%), a switch_cell built in a \
+         body {:.0}%, a steps_with_current built in a body {:.0}%, {} bodies of {:.1} \
+         definitions on average",
         watched as f64 / PROGRAMS as f64,
         percent(loops),
         percent(cell_loops),
@@ -3966,6 +4113,15 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         percent(nested),
         percent(selectors_in_children),
         percent(loops_closed_with_switches),
+        percent(constructs),
+        percent(nested_constructs),
+        percent(constructs_in_children),
+        percent(linear_tokens),
+        percent(navigation),
+        percent(late_switches),
+        percent(late_steps),
+        body_sizes.len(),
+        body_sizes.iter().sum::<usize>() as f64 / body_sizes.len().max(1) as f64,
     );
     // Switches of every kind are in many programs.
     assert!(
@@ -3980,6 +4136,20 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "switch_cells over States in {switch_states}, nested switches in {nested}, selectors \
          in child instants in {selectors_in_children}, loops closed with switches in \
          {loops_closed_with_switches}"
+    );
+    // Constructs are in most programs, of every shape.
+    assert!(percent(constructs) > 50.0, "constructs in {constructs}");
+    assert!(
+        percent(nested_constructs) > 8.0
+            && percent(constructs_in_children) > 12.0
+            && percent(linear_tokens) > 20.0
+            && percent(navigation) > 5.0
+            && percent(late_switches) > 8.0
+            && percent(late_steps) > 8.0,
+        "nested constructs in {nested_constructs}, constructs in child instants in \
+         {constructs_in_children}, linear streams emitted in {linear_tokens}, navigation loops \
+         in {navigation}, switch_cells built in bodies in {late_switches}, steps_with_current \
+         built in bodies in {late_steps}"
     );
     // Loops and children are in most programs, and the first-order and
     // cell programs of stages 1 and 2 stay in the mix.
@@ -4047,4 +4217,56 @@ fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
     assert_eq!(reduced.observe, [2]);
     assert!(reduced.schedule.is_empty());
     assert!(reduced.inputs.len() <= 2, "{reduced:?}");
+}
+
+/// The reducer cuts a construct's body to what a failure needs, as it cuts
+/// the top level. The failure here is made up: an observed node reads,
+/// however indirectly, a construct whose body snapshots a cell. What is
+/// left is one construct, whose body is the snapshot and at most what it
+/// reads, and the few top-level nodes it and the observation need.
+#[test]
+fn the_reducer_cuts_a_construct_body_to_what_the_failure_needs() {
+    let mut runner = TestRunner::new(Config {
+        rng_seed: RngSeed::Fixed(11),
+        ..Config::default()
+    });
+    let strategy = programs();
+    // Whether an observed node reads a construct whose body snapshots.
+    let fails = |program: &Program| {
+        let mut read = vec![false; program.definitions.len()];
+        let mut stack = program.observe.clone();
+        while let Some(node) = stack.pop() {
+            if std::mem::replace(&mut read[node], true) {
+                continue;
+            }
+            stack.extend(bough_oracle::references(&program.definitions[node]));
+            stack.extend(program.definitions.iter().enumerate().filter_map(
+                |(close, definition)| match definition {
+                    Close { forward, .. } if *forward == node => Some(close),
+                    _ => None,
+                },
+            ));
+        }
+        program
+            .definitions
+            .iter()
+            .zip(read)
+            .any(|(definition, read)| {
+                read && matches!(definition, Construct { body, .. }
+                if body.definitions.iter().any(|d| matches!(d, Snapshot { .. })))
+            })
+    };
+    let program = (0..2000)
+        .map(|_| strategy.new_tree(&mut runner).unwrap().current())
+        .find(|program| fails(program) && bodies(program).iter().any(|b| b.definitions.len() >= 4))
+        .expect("a program that reads a body with a snapshot, and has a body of four definitions");
+    let reduced = reduce(&program, |candidate| {
+        assert!(check(candidate).is_ok(), "{candidate:?}");
+        assert!(bough_oracle::well_founded(candidate), "{candidate:?}");
+        fails(candidate)
+    });
+    let left = bodies(&reduced);
+    assert_eq!(left.len(), 1, "{reduced:?}");
+    assert!(left[0].definitions.len() <= 2, "{reduced:?}");
+    assert!(reduced.definitions.len() <= 8, "{reduced:?}");
 }
