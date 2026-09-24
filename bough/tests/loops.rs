@@ -5,9 +5,9 @@
 //!
 //! Where a test quotes GHC, the value comes from GHC running the unchanged
 //! `Denotational.hs` with every loop solved by explicit fixed-point
-//! iteration, the research's method (research-loop-shapes/loop-shapes.md);
-//! the programs are in the spike's scratchpad as `stage3-ghc/Stage3.hs` and
-//! `stage3-ghc/Boundary.hs`, and each test quotes their output. The other
+//! iteration, the research's method (`probes/loop-shapes/loop-shapes.md`);
+//! the programs are `bough-oracle/haskell/probes/stage3/Stage3.hs` and
+//! `Boundary.hs` beside it, and each test quotes their output. The other
 //! tests state the semantics they follow. Instant `[0]` is the build, and
 //! `[k]` is the k-th transaction after it.
 
@@ -71,7 +71,7 @@ fn a_counter_reads_its_own_forward_token_through_a_snapshot() {
 /// Fact 1's capped counter, on which the lazy executable semantics do not
 /// terminate: `c = hold 0 (filter (<= 10) (snapshot ticks c (+1)))`. The
 /// fixed point steps 1 to 10 at `[1]` to `[10]` and never again (GHC,
-/// research-loop-shapes/loop-shapes.md, "calibration: fact 1's capped
+/// probes/loop-shapes/loop-shapes.md, "calibration: fact 1's capped
 /// counter", 12 evaluations; also `capped` in Stage3.hs).
 #[test]
 fn the_capped_counter_the_lazy_semantics_cannot_run_steps_ten_times() {

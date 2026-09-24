@@ -2,8 +2,8 @@
 //! each event of a stream, in the middle of that event's transaction, with
 //! the build context, so that logic is added after build.
 //!
-//! The expected values are GHC's. The spike's scratchpad holds the program,
-//! stage6-ghc/Stage6.hs, which runs each test's program over an unchanged
+//! The expected values are GHC's. The program is
+//! `bough-oracle/haskell/probes/stage6/Stage6.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patches F6 and F7
 //! and solves each loop by fixed-point iteration, a loop declared in a
 //! construct body inside the body. The text's `Execute` has no creation
@@ -11,7 +11,7 @@
 //! source's events before t0, which nothing built at t0 can observe, so
 //! the program keeps the events at or after t0. Its `SwitchS` has no
 //! creation time either, and a switch_stream built at t0 is compared from
-//! t0 on. stage6-ghc/output.txt is its output, and each test quotes the
+//! t0 on. `Stage6.out` beside it is its output, and each test quotes the
 //! lines it uses. Instant `[0]` is the build and `[k]` the k-th
 //! transaction after it; a sample inside a closure at `[k]` reads the
 //! value before `[k]`.

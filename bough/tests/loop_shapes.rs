@@ -4,11 +4,11 @@
 //! ported from its Bough sketch, and the expected values are GHC's: the
 //! research ran its `Shapes.hs` over the unchanged `Denotational.hs`, with
 //! each loop solved by explicit fixed-point iteration, and a verification
-//! checked every value against an independent model. Both are in the
-//! spike's scratchpad: research-loop-shapes/loop-shapes.md (shapes 1, 2a, 2b,
-//! 3b and 3c, whose tables are quoted at each test) and
-//! research-loop-shapes-verify/verification.md. Values the research did not
-//! print come from the same program text extended in stage3-ghc/Slice.hs:
+//! checked every value against an independent model. Both are in
+//! `bough-oracle/haskell/probes/loop-shapes/`: `loop-shapes.md` (shapes 1,
+//! 2a, 2b, 3b and 3c, whose tables are quoted at each test) and
+//! `verification.md`. Values the research did not print come from the same
+//! program text extended in `probes/stage3/Slice.hs`:
 //! the verification's edge schedule, the variant that reads every looped
 //! cell through its forward token, and the two-input reduction.
 //!

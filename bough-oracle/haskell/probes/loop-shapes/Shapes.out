@@ -1,0 +1,100 @@
+== calibration: fact 1's capped counter
+  initial 0; steps [1] 1 [2] 2 [3] 3 [4] 4 [5] 5 [6] 6 [7] 7 [8] 8 [9] 9 [10] 10
+  program text evaluated 12 times
+  PASS capped counter steps 1..10 at [1]..[10]
+
+== shape 1: sodium-rust#52 (bevy-sodium 0003-lift2-loop-bug.rs)
+inputs:
+  heal     [1] 100
+  damage   [1] 50
+  level_up [1] 100
+fixed point (program text evaluated 2 times):
+  max_health initial 100; steps [1] 200
+  shield     initial 30; steps [1] 0
+  took       [1] -20
+  delta      [1] 80
+  health     initial 60; steps [1] 100
+  fraction   initial 0.6; steps [1] 0.5
+  effective  initial 90; steps [1] 100
+  PASS lazy knot terminates and equals the fixed point
+  PASS matches the hand computation
+  the four rows of the reproduction, health after the instant:
+    no lift2                    health = 100  (lift steps forced: 0)
+  PASS row "no lift2": health = 100
+    lift2(max_health, health)   health = 100  (lift steps forced: 1)
+  PASS row "lift2(max_health, health)": health = 100
+    lift2(health, shield)       health = 100  (lift steps forced: 1)
+  PASS row "lift2(health, shield)": health = 100
+    both                        health = 100  (lift steps forced: 2)
+  PASS row "both": health = 100
+  PASS snapshot3 as nested snapshots = snapshot of a lift2 pair cell
+  PASS fraction and effective each step once in the instant (5.14 no-glitch)
+
+== shape 2a: the health slice, stage 1 (no shield), record 0003's instant without damage
+fixed point (program text evaluated 2 times):
+  max_health initial 100; steps [1] 200
+  health     initial 60; steps [1] 100
+  fraction   initial 0.6; steps [1] 0.5
+  PASS lazy knot terminates and equals the fixed point
+  PASS health 100 (clamped by the maximum from before the instant), max 200, fraction 0.5
+
+== shape 2b: the health-and-shield slice (stage 2), long schedule
+inputs:
+  heal     [2] 100 [4] 500 [5] 100 [7] 40
+  damage   [1] 10 [2] 50 [3] 30 [6] 300
+  level_up [2] 100 [4] 50
+fixed point (program text evaluated 3 times):
+  max_health initial 100; steps [2] 200 [4] 250
+  shield     initial 30; steps [1] 20 [2] 0 [3] 0 [6] 0
+  took       [1] 0 [2] -30 [3] -30 [6] -300
+  delta      [1] 0 [2] 70 [3] -30 [4] 500 [5] 100 [6] -300 [7] 40
+  health     initial 60; steps [1] 60 [2] 100 [3] 70 [4] 200 [5] 250 [6] 0 [7] 40
+  fraction   initial 0.6; steps [1] 0.6 [2] 0.5 [3] 0.35 [4] 0.8 [5] 1.0 [6] 0.0 [7] 0.16
+  effective  initial 90; steps [1] 80 [2] 100 [3] 70 [4] 200 [5] 250 [6] 0 [7] 40
+  PASS lazy knot terminates and equals the fixed point
+  PASS matches the hand computation
+  PASS snapshot3 as nested snapshots = snapshot of a lift2 pair cell
+  PASS fraction steps exactly at the union of max_health's and health's step times
+  PASS effective steps exactly at the union of health's and shield's step times
+
+== shape 3: the reductions sodium-rust#52 reports (reconstructed), record 0003's instant
+NoMaxRead (program text evaluated 2 times):
+  max_health initial 100; steps [1] 200
+  shield     initial 30; steps [1] 0
+  took       [1] -20
+  delta      [1] 80
+  health     initial 60; steps [1] 140
+  fraction   initial 0.6; steps [1] 0.7
+  effective  initial 90; steps [1] 140
+  PASS NoMaxRead: lazy knot terminates and equals the fixed point
+  PASS NoMaxRead: health after the instant = 140
+NoMerge (program text evaluated 2 times):
+  max_health initial 100; steps [1] 200
+  shield     initial 30; steps [1] 0
+  took       [1] -20
+  delta      [1] -20
+  health     initial 60; steps [1] 40
+  fraction   initial 0.6; steps [1] 0.2
+  effective  initial 90; steps [1] 40
+  PASS NoMerge: lazy knot terminates and equals the fixed point
+  PASS NoMerge: health after the instant = 40
+  (NoMaxRead and NoMerge on the long schedule:)
+  NoMaxRead health initial 60; steps [1] 60 [2] 130 [3] 100 [4] 600 [5] 700 [6] 400 [7] 440  [7 evaluations]
+  PASS NoMaxRead long: lazy knot equals the fixed point
+  NoMerge health initial 60; steps [1] 60 [2] 30 [3] 0 [6] 0  [3 evaluations]
+  PASS NoMerge long: lazy knot equals the fixed point
+
+== shape 3c: health steps only when its value changes (not in the records), long schedule
+fixed point (program text evaluated 3 times):
+  max_health initial 100; steps [2] 200 [4] 250
+  shield     initial 30; steps [1] 20 [2] 0 [3] 0 [6] 0
+  took       [1] 0 [2] -30 [3] -30 [6] -300
+  delta      [1] 0 [2] 70 [3] -30 [4] 500 [5] 100 [6] -300 [7] 40
+  health     initial 60; steps [2] 100 [3] 70 [4] 200 [5] 250 [6] 0 [7] 40
+  fraction   initial 0.6; steps [2] 0.5 [3] 0.35 [4] 0.8 [5] 1.0 [6] 0.0 [7] 0.16
+  effective  initial 90; steps [1] 80 [2] 100 [3] 70 [4] 200 [5] 250 [6] 0 [7] 40
+  PASS health: no step at [1] (delta 0), otherwise as shape 2b
+  PASS everything but health, fraction and effective as shape 2b
+  lazy knot: run `./shapes knot-3c` under a timeout; it is expected not to return.
+
+all checks passed

@@ -2,11 +2,11 @@
 //! `split` and `defer` start, run after t's listeners, depth first, each a
 //! whole transaction, and poison across them.
 //!
-//! The expected values are GHC's. The spike's scratchpad holds the program,
-//! stage4-ghc/Stage4.hs, which runs each test's program over an unchanged
+//! The expected values are GHC's. The program is
+//! `bough-oracle/haskell/probes/stage4/Stage4.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patch F7, Split's
 //! output sorted stably by time, and solves each loop by fixed-point
-//! iteration; stage4-ghc/output.txt is its output, and each test quotes the
+//! iteration; `Stage4.out` beside it is its output, and each test quotes the
 //! lines it uses. Instant [k] is the k-th transaction after the build, and
 //! each instant's sends are one transaction.
 //!

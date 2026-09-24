@@ -1,12 +1,12 @@
 //! Switches (RFD 4): `switch_cell`, the semantics' `SwitchC` with the
 //! oracle's patch F6, and `switch_stream`, the semantics' `SwitchS`.
 //!
-//! The expected values are GHC's. The spike's scratchpad holds the program,
-//! stage5-ghc/Stage5.hs, which runs each test's program over an unchanged
+//! The expected values are GHC's. The program is
+//! `bough-oracle/haskell/probes/stage5/Stage5.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patch F6 (a
 //! switch cell created at t0 switches over its outer chopped at t0,
 //! bough-oracle's `switchCell`) and solves each loop by fixed-point
-//! iteration; stage5-ghc/output.txt is its output, and each test quotes the
+//! iteration; `Stage5.out` beside it is its output, and each test quotes the
 //! lines it uses. Instant `[0]` is the build and `[k]` the k-th transaction
 //! after it; every switch here is built at `[0]`. GHC prints a cell's steps
 //! as `(value before [0], [(instant, value)])`. The tests record a cell's
