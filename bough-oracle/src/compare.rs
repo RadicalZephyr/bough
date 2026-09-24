@@ -2,13 +2,42 @@
 //!
 //! [`expected`] reads the oracle's answer to a program, window
 //! `FromFirstTransaction`, as what each listener should see: a stream's
-//! events at `[k]`, and a cell's value after transaction zero, its step at
-//! `[k]`, and its value after `[k]`. [`compare`] holds one engine run to
-//! it. For a cell that is `listen_cell`'s one call at registration, its
-//! calls during transaction k, which are the steps, a step to an equal value
-//! included; `listen_steps`'s calls, the same steps and nothing at
-//! registration; and `graph.sample` after transaction k, the value after
-//! `[k]`. For a stream it is the events of transaction k.
+//! events in transaction k, and a cell's value after transaction zero, its
+//! steps in transaction k, and its value after it. Transaction k is the
+//! instant `[k]` and its child transactions, `[k, 0]`, `[k, 0, 0]`, `[k, 1]`
+//! and so on, so its events are all those whose time starts with k, in time
+//! order.
+//!
+//! [`compare`] holds one engine run to it. For a cell that is `listen_cell`'s
+//! one call at registration, its calls during transaction k, which are the
+//! steps, a step to an equal value included; `listen_steps`'s calls, the
+//! same steps and nothing at registration; and `graph.sample` after
+//! transaction k and its children, the value after the last of them. For a
+//! stream it is the events of transaction k.
+//!
+//! # What child transactions leave unchecked
+//!
+//! The engine cannot tell I/O code which child instant a listener call came
+//! from: RFD 1's affordances expose no child index. So the times of the
+//! oracle's events are sorted, and then dropped: per observed node and per
+//! external transaction, what is compared is the ordered list of events, or
+//! of steps. Child indices are not compared. That leaves unchecked, for any
+//! one node, which child instant each event or step fell in, as long as
+//! their order is right: a node whose events the oracle puts at `[1, 0]`
+//! and `[1, 1]` agrees with an engine that fired them at `[1, 0]` and
+//! `[1, 0, 0]`, or at two instants the semantics do not have. It also
+//! leaves unchecked whether two nodes' events are simultaneous, except
+//! through a node that combines them, such as a merge, which the
+//! comparison sees.
+//!
+//! One thing about times is checked without child indices: the order of the
+//! calls across nodes. The engine runs each child instant's listeners after
+//! its commit and the child instants in time order, so a listener call for
+//! an event at an earlier time must come before one for an event at a later
+//! time, whatever nodes they are on. [`compare`] reads each call's time
+//! from the oracle's answer, where the per-node lists agree, and reports a
+//! call that comes after a call for a later time. Calls for one time may
+//! come in any order.
 //!
 //! [`check_program`] asks the oracle once and runs the engine every way it
 //! is given. A failure is a [`Report`]: the program as Rust and as the
@@ -19,28 +48,44 @@ use std::fmt::{self, Write as _};
 use std::panic::{self, AssertUnwindSafe};
 
 use crate::answer::{Answer, Datum, Observation};
-use crate::build::{self, BuildError, EngineObservation, EngineRun, RunOptions};
+use crate::build::{self, BuildError, Call, EngineObservation, EngineRun, RunOptions};
 use crate::ghc::Oracle;
 use crate::program::{Program, Time, Value, Window};
 
 /// What the oracle says one observed node shows, transaction k at index
-/// k - 1.
+/// k - 1, each event or step with its time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expected {
     /// A stream's events.
     Stream {
-        /// The events of each transaction.
-        events: Vec<Vec<i64>>,
+        /// The events of each transaction and its children, in time order.
+        events: Vec<Vec<(Time, i64)>>,
     },
     /// A cell.
     Cell {
         /// The value after transaction zero and its child transactions.
         initial: i64,
-        /// The step of each transaction: none or one.
-        steps: Vec<Vec<i64>>,
-        /// The value after each transaction.
+        /// The steps of each transaction and its children, in time order:
+        /// none or one per instant.
+        steps: Vec<Vec<(Time, i64)>>,
+        /// The value after each transaction and its children.
         values: Vec<i64>,
     },
+}
+
+impl Expected {
+    /// The time of a listener call's event or step, if the answer has one
+    /// at that place.
+    fn time(&self, call: &Call) -> Option<&Time> {
+        let lists = match self {
+            Expected::Stream { events } => events,
+            Expected::Cell { steps, .. } => steps,
+        };
+        lists
+            .get(call.transaction)
+            .and_then(|list| list.get(call.index))
+            .map(|(time, _)| time)
+    }
 }
 
 /// A value of the subset: an integer, or a boolean as 0 or 1.
@@ -48,25 +93,39 @@ fn integer(datum: &Datum) -> Result<i64, String> {
     match datum {
         Datum::Integer(value) => Ok(*value),
         Datum::List(values) => Err(format!(
-            "the oracle answered the list {values:?}, which the subset has no node to carry"
+            "the oracle answered the list {values:?}, which the comparison does not observe"
         )),
     }
 }
 
-/// Events by external transaction. The subset has no child transactions,
-/// so every time is `[k]`.
-fn by_transaction(events: &[(Time, Datum)], transactions: usize) -> Result<Vec<Vec<i64>>, String> {
+/// Events by external transaction: an event at `[k]` or at any child time
+/// of it, `[k, …]`, belongs to transaction k. Each transaction's events are
+/// sorted by time; one node has at most one event at a time.
+fn by_transaction(
+    events: &[(Time, Datum)],
+    transactions: usize,
+) -> Result<Vec<Vec<(Time, i64)>>, String> {
     let mut buckets = vec![Vec::new(); transactions];
     for (time, datum) in events {
-        let bucket = match time.as_slice() {
-            [k] if *k >= 1 && (*k as usize) <= transactions => (*k - 1) as usize,
+        let bucket = match time.first() {
+            Some(&k) if k >= 1 && (k as usize) <= transactions => (k - 1) as usize,
             _ => {
                 return Err(format!(
-                    "the oracle answered an event at {time:?}, a time the subset cannot produce"
+                    "the oracle answered an event at {time:?}, which is in no transaction of \
+                     the schedule"
                 ));
             }
         };
-        buckets[bucket].push(integer(datum)?);
+        buckets[bucket].push((time.clone(), integer(datum)?));
+    }
+    for bucket in &mut buckets {
+        bucket.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(pair) = bucket.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(format!(
+                "the oracle answered two events of one node at {:?}",
+                pair[0].0
+            ));
+        }
     }
     Ok(buckets)
 }
@@ -99,8 +158,8 @@ pub fn expected(program: &Program, answer: &Answer) -> Result<Vec<Expected>, Str
                 let mut value = initial;
                 let values = steps
                     .iter()
-                    .map(|step| {
-                        if let Some(last) = step.last() {
+                    .map(|steps| {
+                        if let Some((_, last)) = steps.last() {
                             value = *last;
                         }
                         value
@@ -129,6 +188,25 @@ fn list(values: &[i64]) -> String {
     format!("{values:?}")
 }
 
+/// The values of a list of timed events, what the comparison compares.
+fn values(events: &[(Time, i64)]) -> Vec<i64> {
+    events.iter().map(|(_, value)| *value).collect()
+}
+
+/// The oracle's side of a row: the values, and their times when any is a
+/// child transaction's.
+fn timed(events: &[(Time, i64)]) -> String {
+    let mut text = list(&values(events));
+    if events.iter().any(|(time, _)| time.len() > 1) {
+        let times: Vec<String> = events
+            .iter()
+            .map(|(time, _)| format!("{time:?}").replace(' ', ""))
+            .collect();
+        let _ = write!(text, " at {}", times.join(" "));
+    }
+    text
+}
+
 /// The rows of one observed node: engine beside oracle, per transaction.
 fn rows(engine: &EngineObservation, expected: &Expected) -> Vec<Row> {
     match (engine, expected) {
@@ -139,15 +217,15 @@ fn rows(engine: &EngineObservation, expected: &Expected) -> Vec<Row> {
             .map(|(k, (engine, oracle))| Row {
                 label: format!("[{}]", k + 1),
                 engine: list(engine),
-                oracle: list(oracle),
-                differs: engine != oracle,
+                oracle: timed(oracle),
+                differs: *engine != values(oracle),
             })
             .collect(),
         (
             EngineObservation::Cell {
                 registration,
                 steps_registration,
-                values,
+                values: engine_values,
                 steps,
                 samples,
             },
@@ -168,17 +246,22 @@ fn rows(engine: &EngineObservation, expected: &Expected) -> Vec<Row> {
                 differs: registration.as_slice() != [*initial] || !steps_registration.is_empty(),
             }];
             for k in 0..samples.len() {
+                let oracle = values(&oracle_steps[k]);
                 rows.push(Row {
                     label: format!("[{}]", k + 1),
                     engine: format!(
                         "listen_cell {} listen_steps {} sample {}",
-                        list(&values[k]),
+                        list(&engine_values[k]),
                         list(&steps[k]),
                         samples[k]
                     ),
-                    oracle: format!("step {} value {}", list(&oracle_steps[k]), oracle_values[k]),
-                    differs: values[k] != oracle_steps[k]
-                        || steps[k] != oracle_steps[k]
+                    oracle: format!(
+                        "steps {} value {}",
+                        timed(&oracle_steps[k]),
+                        oracle_values[k]
+                    ),
+                    differs: engine_values[k] != oracle
+                        || steps[k] != oracle
                         || samples[k] != oracle_values[k],
                 });
             }
@@ -193,8 +276,44 @@ fn rows(engine: &EngineObservation, expected: &Expected) -> Vec<Row> {
     }
 }
 
+/// Where the engine's order of listener calls across nodes goes against
+/// the oracle's times: a call that comes after a call for a later time.
+/// Read only where every node's lists agree, so each call has a time.
+fn order(program: &Program, expected: &[Expected], calls: &[Call]) -> Option<String> {
+    let describe = |call: &Call, time: &Time| {
+        let node = program.observe[call.observed];
+        format!(
+            "observed {} (node {node}, {})'s {} for {time:?}",
+            call.observed,
+            build::name(&program.definitions[node]),
+            call.listened
+        )
+    };
+    let mut latest: Option<(&Call, &Time)> = None;
+    for call in calls {
+        let Some(time) = expected.get(call.observed).and_then(|e| e.time(call)) else {
+            continue;
+        };
+        match latest {
+            Some((before, later)) if time < later => {
+                return Some(format!(
+                    "listener order: in transaction [{}] the engine called {} before {}, a \
+                     call for an earlier time\n",
+                    call.transaction + 1,
+                    describe(before, later),
+                    describe(call, time),
+                ));
+            }
+            Some((_, later)) if time == later => {}
+            _ => latest = Some((call, time)),
+        }
+    }
+    None
+}
+
 /// The side-by-side table of every observed node, or `None` when the run
-/// agrees with the oracle everywhere.
+/// agrees with the oracle everywhere: every node's lists, every sample, and
+/// the order of the listener calls across nodes.
 pub fn compare(program: &Program, expected: &[Expected], run: &EngineRun) -> Option<String> {
     let types = build::check(program).ok();
     let mut tables = Vec::new();
@@ -241,6 +360,12 @@ pub fn compare(program: &Program, expected: &[Expected], run: &EngineRun) -> Opt
             expected.len()
         ));
     }
+    if !disagree {
+        if let Some(message) = order(program, expected, &run.calls) {
+            disagree = true;
+            tables.push(message);
+        }
+    }
     disagree.then(|| tables.concat())
 }
 
@@ -266,8 +391,7 @@ pub enum Failure {
     /// The builder refused the program.
     Build(BuildError),
     /// The oracle gave no answer the comparison can use: an error from the
-    /// pool, `ERR`, `TIMEOUT`, or an event at a time the subset cannot
-    /// produce.
+    /// pool, `ERR`, `TIMEOUT`, or an event at a time outside the schedule.
     Oracle(String),
     /// A run panicked.
     Panic {
@@ -283,6 +407,28 @@ pub enum Failure {
         /// Every observed node, engine beside oracle.
         table: String,
     },
+}
+
+impl Failure {
+    /// Whether two failures are of one kind, for a reduction that must keep
+    /// the failure it started with: the same variant, and for a panic the
+    /// same message but for its numbers, which name nodes.
+    pub fn same_kind(&self, other: &Failure) -> bool {
+        let digits = |text: &str| -> String {
+            text.chars()
+                .map(|c| if c.is_ascii_digit() { '#' } else { c })
+                .collect()
+        };
+        match (self, other) {
+            (Failure::Build(_), Failure::Build(_))
+            | (Failure::Oracle(_), Failure::Oracle(_))
+            | (Failure::Disagreement { .. }, Failure::Disagreement { .. }) => true,
+            (Failure::Panic { message: a, .. }, Failure::Panic { message: b, .. }) => {
+                digits(a) == digits(b)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A program and what went wrong with it.
@@ -364,13 +510,13 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 /// Asks the oracle about the program, with the window
 /// `FromFirstTransaction`, and holds every engine run with every option to
-/// its answer. The first failure is the report.
+/// its answer, which it returns. The first failure is the report.
 pub fn check_program(
     oracle: &Oracle,
     program: &Program,
     engines: &[Engine],
     runs: &[RunOptions],
-) -> Result<(), Box<Report>> {
+) -> Result<Vec<Expected>, Box<Report>> {
     let mut program = program.clone();
     program.window = Window::FromFirstTransaction;
     let report = |program: &Program, failure| {
@@ -413,5 +559,5 @@ pub fn check_program(
             }
         }
     }
-    Ok(())
+    Ok(expected)
 }

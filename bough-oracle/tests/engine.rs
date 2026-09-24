@@ -32,8 +32,9 @@ use Expression::{Argument, ArgumentAt, Literal, SecondArgument};
 use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
-    Definition, Engine, Expected, Expression, Input, NodeType, Oracle, Program, Reference,
-    RunOptions, Scalar, Type, Value, Window, check, check_program, expected, programs, reduce, run,
+    Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
+    Program, Reference, RunOptions, Scalar, Type, Value, Window, check, check_program, compare,
+    expected, programs, reduce, run,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -90,11 +91,7 @@ fn runs(seed: u64) -> Vec<RunOptions> {
 /// Holds the program to the oracle in every mode and run, and returns what
 /// the oracle expects, for the test's own assertions.
 fn agree(oracle: &Oracle, program: &Program) -> Vec<Expected> {
-    if let Err(report) = check_program(oracle, program, &ENGINES, &runs(0)) {
-        panic!("{report}");
-    }
-    let answer = oracle.answer(program).unwrap();
-    expected(program, &answer).unwrap()
+    check_program(oracle, program, &ENGINES, &runs(0)).unwrap_or_else(|report| panic!("{report}"))
 }
 
 /// A program over integer inputs, the window the comparison uses. Entry
@@ -126,21 +123,28 @@ fn integers(count: usize) -> Vec<Input> {
     vec![Input::new(Type::Integer); count]
 }
 
+/// A stream's expectation from its events in each transaction, each at the
+/// transaction's own instant `[k]`.
 fn stream(events: &[&[i64]]) -> Expected {
     Expected::Stream {
-        events: events.iter().map(|events| events.to_vec()).collect(),
+        events: events
+            .iter()
+            .enumerate()
+            .map(|(k, events)| events.iter().map(|&v| (vec![k as i64 + 1], v)).collect())
+            .collect(),
     }
 }
 
 /// A cell's expectation from its initial value and its step in each
-/// transaction.
+/// transaction, at the transaction's own instant `[k]`.
 fn cell(initial: i64, steps: &[Option<i64>]) -> Expected {
     let mut value = initial;
     Expected::Cell {
         initial,
         steps: steps
             .iter()
-            .map(|step| step.iter().copied().collect())
+            .enumerate()
+            .map(|(k, step)| step.iter().map(|&v| (vec![k as i64 + 1], v)).collect())
             .collect(),
         values: steps
             .iter()
@@ -150,6 +154,16 @@ fn cell(initial: i64, steps: &[Option<i64>]) -> Expected {
             })
             .collect(),
     }
+}
+
+/// A stream's expectation from its events over `transactions`
+/// transactions, each with its time, `[k]` or a child time `[k, …]`.
+fn timed_stream(transactions: usize, events: &[(&[i64], i64)]) -> Expected {
+    let mut lists = vec![Vec::new(); transactions];
+    for (time, value) in events {
+        lists[time[0] as usize - 1].push((time.to_vec(), *value));
+    }
+    Expected::Stream { events: lists }
 }
 
 // ----- random programs -----
@@ -191,12 +205,14 @@ fn random_programs(shard: u32) {
     let mut runner = TestRunner::new(config);
     let result = runner.run(&(programs(), any::<u64>()), |(program, seed)| {
         tried.set(tried.get() + 1);
-        check_program(oracle, &program, &ENGINES, &runs(seed)).map_err(|report| {
-            if first_failure.get().is_none() {
-                first_failure.set(Some((tried.get(), started.elapsed())));
-            }
-            TestCaseError::fail(report.to_string())
-        })
+        check_program(oracle, &program, &ENGINES, &runs(seed))
+            .map(drop)
+            .map_err(|report| {
+                if first_failure.get().is_none() {
+                    first_failure.set(Some((tried.get(), started.elapsed())));
+                }
+                TestCaseError::fail(report.to_string())
+            })
     });
     match result {
         Ok(()) => eprintln!(
@@ -957,6 +973,107 @@ fn the_builder_refuses_loops_and_children_it_cannot_build() {
         refused(counter(Some(3)), vec![4]),
         "observe: node 4 is a Close, which makes no node; the comparison observes streams and \
          cells of integers and booleans"
+    );
+}
+
+/// The comparison holds the order of listener calls across nodes to the
+/// oracle's times: a call for an event at an earlier time must come before
+/// a call for one at a later time. Here two streams agree event by event,
+/// and the engine's calls come in time order, then out of it.
+#[test]
+fn the_comparison_holds_listener_calls_across_nodes_to_time_order() {
+    let two = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Definition::Defer(TopLevel(0)),
+            Definition::Input(0),
+        ],
+        vec![1, 2],
+        &[&[(0, 1)]],
+    );
+    let expected = [
+        timed_stream(1, &[(&[1, 0], 1)]),
+        timed_stream(1, &[(&[1], 1)]),
+    ];
+    let call = |observed: usize| bough_oracle::Call {
+        observed,
+        listened: bough_oracle::Listened::Stream,
+        transaction: 0,
+        index: 0,
+    };
+    let mut run = bough_oracle::EngineRun {
+        observations: vec![
+            bough_oracle::EngineObservation::Stream {
+                events: vec![vec![1]],
+            },
+            bough_oracle::EngineObservation::Stream {
+                events: vec![vec![1]],
+            },
+        ],
+        calls: vec![call(1), call(0)],
+        live_nodes: 4,
+    };
+    assert_eq!(compare(&two, &expected, &run), None);
+    run.calls.reverse();
+    let table = compare(&two, &expected, &run).expect("the calls are out of time order");
+    assert!(
+        table.contains(
+            "listener order: in transaction [1] the engine called observed 0 (node 1, \
+             Defer)'s listen for [1, 0] before observed 1 (node 2, Input)'s listen for [1], a \
+             call for an earlier time"
+        ),
+        "{table}"
+    );
+}
+
+/// The oracle's events and steps at child times belong to their external
+/// transaction, sorted by time, with their times kept for the order check.
+/// Two events of one node at one time, or an event outside the schedule,
+/// are the oracle's error, not a disagreement.
+#[test]
+fn the_comparison_reads_child_times_into_their_external_transaction() {
+    let two = program(
+        integers(1),
+        vec![
+            Definition::Input(0),
+            Definition::Defer(TopLevel(0)),
+            Hold {
+                initial: Literal(7),
+                source: TopLevel(1),
+            },
+        ],
+        vec![1, 2],
+        &[&[], &[]],
+    );
+    let answer = Answer::Observed(vec![
+        Observation::stream([(vec![2, 0, 0], 3), (vec![1], 1), (vec![2], 2)]),
+        Observation::cell(7, [(vec![1, 1], 8), (vec![1, 0], 9)]),
+    ]);
+    assert_eq!(
+        expected(&two, &answer).unwrap(),
+        [
+            timed_stream(2, &[(&[1], 1), (&[2], 2), (&[2, 0, 0], 3)]),
+            Expected::Cell {
+                initial: 7,
+                steps: vec![vec![(vec![1, 0], 9), (vec![1, 1], 8)], vec![]],
+                values: vec![8, 8],
+            },
+        ]
+    );
+    let quiet = Observation::cell(7, Vec::<(Vec<i64>, i64)>::new());
+    let twice = Answer::Observed(vec![
+        Observation::stream([(vec![1, 0], 1), (vec![1, 0], 2)]),
+        quiet.clone(),
+    ]);
+    assert_eq!(
+        expected(&two, &twice).unwrap_err(),
+        "the oracle answered two events of one node at [1, 0]"
+    );
+    let late = Answer::Observed(vec![Observation::stream([(vec![3, 0], 1)]), quiet]);
+    assert_eq!(
+        expected(&two, &late).unwrap_err(),
+        "the oracle answered an event at [3, 0], which is in no transaction of the schedule"
     );
 }
 
