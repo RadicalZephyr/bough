@@ -29,8 +29,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use bough::{
-    Build, Cell, Graph, Input, Local, PoisonedError, SendError, Source, TokenError, Trace,
-    Transaction,
+    Build, Cell, Graph, Input, Local, PoisonedError, SendError, Shared, Source, Stream, TokenError,
+    Trace, Transaction,
 };
 
 /// The plain order, then seeds for RFD 1's order shuffle.
@@ -690,6 +690,393 @@ fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
             (2, vec![44])
         ]
     );
+}
+
+// ----------------------------------------------------------- switches built at t
+
+/// R6 (Review.hs, with F6): a switch_cell built at [1] over an outer and
+/// an inner both built at [1], the inner's input firing at [1]. The switch
+/// starts from the outer's value before [1], a constant, and its creation
+/// step carries the new inner's value after [1], which its steps view
+/// reads by pulling the inner. Stage6.hs:
+///
+/// ```text
+/// R6: samples h after [1], [2]: [12,15]
+/// R6: steps sw: (0,[([1],12),([2],15)])
+/// ```
+#[test]
+fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
+    let (held, steps) = every_order(|order| {
+        let (mut graph, (go_in, xs_in, made)) = Graph::build(|b| {
+            let (go, go_in) = b.input::<()>();
+            let go = go.share(b);
+            let (xs, xs_in) = b.input::<u32>();
+            let xs = xs.share(b);
+            let made = go.construct(b, move |b, ()| {
+                let c0 = b.constant(0u32);
+                let fresh = xs.map(|v| v * 3).hold(b, 1u32);
+                let outer = go.map(move |_| fresh).hold(b, c0);
+                let sw = outer.switch_cell(b);
+                (sw.steps(b).hold(b, 99u32), log_steps(b, sw))
+            });
+            (go_in, xs_in, made)
+        });
+        let (received, on) = recorder();
+        graph.listen(made, on).keep();
+        let schedule = [vec![send(xs_in, 4), send(go_in, ())], vec![send(xs_in, 5)]];
+        let observed = drive(&mut graph, order, &schedule, |graph| {
+            let (h, log) = received.borrow()[0];
+            (*graph.sample(h), graph.sample(log).clone())
+        });
+        let held: Vec<u32> = observed.iter().map(|(h, _)| *h).collect();
+        let logs: Vec<Vec<u32>> = observed.into_iter().map(|(_, l)| l).collect();
+        (held, by_instant(1, &logs))
+    });
+    assert_eq!(held, [12, 15]);
+    assert_eq!(steps, [(1, 12), (2, 15)]);
+}
+
+/// F6: a switch_cell built at [2] over an outer that switched at [1]
+/// starts from the inner the outer holds at [2], c2, and steps there with
+/// c2's value. The text's SwitchC scans the outer from its initial value:
+/// its steps view would carry the deselected c1's value at [2], and its
+/// steps include one at [1], before the switch exists. Stage6.hs:
+///
+/// ```text
+/// F6: sample inside: 2
+/// F6: samples seen after [2], [3]: [2,30]
+/// F6: steps sw: (2,[([2],2),([3],30)])
+/// F6 (text): samples seen after [2], [3]: [1,30]
+/// F6 (text): steps sw: (2,[([2],1),([1],2),([3],30)])
+/// ```
+#[test]
+fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
+    let got = every_order(|order| {
+        let (mut graph, ((sel_in, go_in, x_in), made)) = Graph::build(|b| {
+            let (sel, sel_in) = b.input::<()>();
+            let (go, go_in) = b.input::<()>();
+            let (x, x_in) = b.input::<u32>();
+            let c1 = b.constant(1u32);
+            let c2 = x.hold(b, 2u32);
+            let outer = sel.map(move |_| c2).hold(b, c1);
+            let made = go.construct(b, move |b, ()| {
+                let sw = outer.switch_cell(b);
+                let inside = *sw.sample(b);
+                (inside, sw.steps(b).hold(b, 99u32), log_steps(b, sw))
+            });
+            ((sel_in, go_in, x_in), made)
+        });
+        let (received, on) = recorder();
+        graph.listen(made, on).keep();
+        let schedule = [
+            vec![send(sel_in, ())],
+            vec![send(go_in, ())],
+            vec![send(x_in, 30)],
+        ];
+        let observed = drive(&mut graph, order, &schedule, |graph| {
+            let received = received.borrow();
+            received
+                .iter()
+                .map(|&(inside, seen, log)| {
+                    (inside, *graph.sample(seen), graph.sample(log).clone())
+                })
+                .collect::<Vec<_>>()
+        });
+        let items = per_item(&observed);
+        let (first, observed) = &items[0];
+        let logs: Vec<Vec<u32>> = observed.iter().map(|o| o.2.clone()).collect();
+        (
+            observed[0].0,
+            observed.iter().map(|o| o.1).collect::<Vec<_>>(),
+            by_instant(*first, &logs),
+        )
+    });
+    assert_eq!(got, (2, vec![2, 30], vec![(2, 2), (3, 30)]));
+}
+
+/// A switch_stream built at [2], the instant its outer steps, forwards at
+/// [2] the event of the inner its outer selected before [2], and the new
+/// one's from [3]; one built at [3], when the outer is quiet, follows the
+/// inner selected then. The text's SwitchS has no creation time and also
+/// has events before [2], which nothing built at [2] can observe (risk 5).
+/// Stage6.hs:
+///
+/// ```text
+/// switch_stream at t: [([2],[([2],'b'),([3],'Z'),([4],'W'),([5],'e')]),([3],[([3],'Z'),([4],'W'),([5],'e')])]
+/// ```
+#[test]
+fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
+    let got = every_order(|order| {
+        let (mut graph, ((a_in, z_in, sel_in, go_in), made)) = Graph::build(|b| {
+            let (a, a_in) = b.input::<char>();
+            let a = a.share(b);
+            let (z, z_in) = b.input::<char>();
+            let z = z.share(b);
+            let (sel, sel_in) = b.input::<bool>();
+            let outer = sel.map(move |p| if p { z } else { a }).hold(b, a);
+            let (go, go_in) = b.input::<()>();
+            let made = go.construct(b, move |b, ()| {
+                let events = outer.switch_stream(b);
+                log_events(b, events)
+            });
+            ((a_in, z_in, sel_in, go_in), made)
+        });
+        let (received, on) = recorder::<Cell<Vec<char>>>();
+        graph.listen(made, on).keep();
+        let schedule = [
+            vec![send(a_in, 'a'), send(z_in, 'X')],
+            vec![
+                send(a_in, 'b'),
+                send(z_in, 'Y'),
+                send(sel_in, true),
+                send(go_in, ()),
+            ],
+            vec![send(a_in, 'c'), send(z_in, 'Z'), send(go_in, ())],
+            vec![send(a_in, 'd'), send(z_in, 'W'), send(sel_in, false)],
+            vec![send(a_in, 'e'), send(z_in, 'V')],
+        ];
+        let observed = drive(&mut graph, order, &schedule, |graph| {
+            let received = received.borrow();
+            received
+                .iter()
+                .map(|l| graph.sample(*l).clone())
+                .collect::<Vec<_>>()
+        });
+        per_item(&observed)
+            .into_iter()
+            .map(|(first, logs)| (first, by_instant(first, &logs)))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        got,
+        [
+            (2, vec![(2, 'b'), (3, 'Z'), (4, 'W'), (5, 'e')]),
+            (3, vec![(3, 'Z'), (4, 'W'), (5, 'e')])
+        ]
+    );
+}
+
+/// Switch cells built in one closure at [2] (risk 1): over an outer that
+/// stepped at [1], one that steps at [2], and one that steps at [3]; over
+/// an outer and an inner both built at [2]; and a switch over a hold of
+/// switches, both built at [2], which moves at [3] to the first switch.
+/// Each starts from its outer's value before [2], which a sample inside
+/// the closure reads, steps at [2] to its outer's value after [2], and
+/// moves after the instant its outer steps. Stage6.hs:
+///
+/// ```text
+/// switch matrix: samples inside: [2,10,10,3,10]
+/// switch matrix: steps: [[([2],200),([3],300)],[([2],200),([3],300)],[([2],20),([3],300)],[([2],21),([3],31)],[([2],200),([3],300)]]
+/// switch matrix: samples after [2], [3]: [[200,300],[200,300],[20,300],[21,31],[200,300]]
+/// ```
+#[test]
+fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t() {
+    let (inside, steps, samples) = every_order(|order| {
+        let (mut graph, (inputs, made)) = Graph::build(|b| {
+            let (x, x_in) = b.input::<u32>();
+            let x = x.share(b);
+            let (y, y_in) = b.input::<u32>();
+            let c1 = x.hold(b, 1u32);
+            let c2 = y.hold(b, 2u32);
+            let c3 = b.constant(3u32);
+            let (sel1, sel1_in) = b.input::<()>();
+            let (sel2, sel2_in) = b.input::<()>();
+            let (sel3, sel3_in) = b.input::<()>();
+            let sel3 = sel3.share(b);
+            let before = sel1.map(move |_| c2).hold(b, c1);
+            let at = sel2.map(move |_| c2).hold(b, c1);
+            let after = sel3.map(move |_| c2).hold(b, c1);
+            let (go, go_in) = b.input::<()>();
+            let go = go.share(b);
+            let made = go.construct(b, move |b, ()| {
+                let sw_before = before.switch_cell(b);
+                let sw_at = at.switch_cell(b);
+                let sw_after = after.switch_cell(b);
+                let fresh = x.map(|v| v + 1).hold(b, 5u32);
+                let via_fresh = go.map(move |_| fresh).hold(b, c3).switch_cell(b);
+                let top = sel3.map(move |_| sw_before).hold(b, sw_at).switch_cell(b);
+                let switches = [sw_before, sw_at, sw_after, via_fresh, top];
+                let inside = switches.map(|sw| *sw.sample(b));
+                let logs = switches.map(|sw| log_steps(b, sw));
+                (inside, switches, logs)
+            });
+            ((x_in, y_in, sel1_in, sel2_in, sel3_in, go_in), made)
+        });
+        let (x_in, y_in, sel1_in, sel2_in, sel3_in, go_in) = inputs;
+        let (received, on) = recorder();
+        graph.listen(made, on).keep();
+        let schedule = [
+            vec![send(x_in, 10), send(sel1_in, ())],
+            vec![
+                send(x_in, 20),
+                send(y_in, 200),
+                send(sel2_in, ()),
+                send(go_in, ()),
+            ],
+            vec![send(x_in, 30), send(y_in, 300), send(sel3_in, ())],
+        ];
+        let observed = drive(&mut graph, order, &schedule, |graph| {
+            let received = received.borrow();
+            received
+                .iter()
+                .map(|(inside, switches, logs)| {
+                    (
+                        *inside,
+                        switches.map(|sw| *graph.sample(sw)),
+                        logs.map(|log| graph.sample(log).clone()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let items = per_item(&observed);
+        let (first, observed) = &items[0];
+        assert_eq!(*first, 2, "built at [2]");
+        let steps: Vec<ByInstant<u32>> = (0..5)
+            .map(|i| {
+                let logs: Vec<Vec<u32>> = observed.iter().map(|o| o.2[i].clone()).collect();
+                by_instant(2, &logs)
+            })
+            .collect();
+        let samples: Vec<[u32; 2]> = (0..5)
+            .map(|i| [observed[0].1[i], observed[1].1[i]])
+            .collect();
+        (observed[0].0, steps, (samples, runs(&graph)))
+    });
+    assert_eq!(inside, [2, 10, 10, 3, 10]);
+    assert_eq!(
+        steps,
+        [
+            vec![(2, 200), (3, 300)],
+            vec![(2, 200), (3, 300)],
+            vec![(2, 20), (3, 300)],
+            vec![(2, 21), (3, 31)],
+            vec![(2, 200), (3, 300)]
+        ]
+    );
+    assert_eq!(
+        samples.0,
+        [[200, 300], [200, 300], [20, 300], [21, 31], [200, 300]]
+    );
+}
+
+// ----------------------------------------------------------- the dynamic pattern
+
+/// A screen's event. It is not `Clone`, so it reaches the switch's consumer
+/// by moves alone.
+struct Event {
+    screen: u32,
+    click: u32,
+    seen: u32,
+}
+
+/// A screen built at the instant n is navigated to: the clicks it sees,
+/// each numbered by a counter built with it, as a linear stream.
+fn screen(b: &mut Build, clicks: Shared<u32>, n: u32) -> Stream<Event> {
+    let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
+    clicks
+        .snapshot(count, move |click, k| Event {
+            screen: n,
+            click,
+            seen: k + 1,
+        })
+        .node(b)
+}
+
+/// RFD 4's main dynamic pattern, closed as RFD 2's navigation loop: every
+/// navigation event builds a screen, a linear stream of events that are
+/// not `Clone`; a hold keeps the current screen, and one switch_stream
+/// takes its events. A click of 0 navigates to the next screen, through a
+/// stream loop, at the instant of the click: the new screen's counter,
+/// built then, counts that click, and the switch forwards the old screen's
+/// event then and the new screen's from the next instant. The selection is
+/// not a dependency, so the loop is legal. Stage6.hs:
+///
+/// ```text
+/// navigation: nav: [([2],1),([4],2),([6],3)]
+/// navigation: out: [([1],(0,5,1)),([2],(0,0,2)),([3],(1,7,2)),([4],(1,0,3)),([5],(2,9,2)),([6],(2,0,3)),([7],(3,4,2))]
+/// ```
+#[test]
+fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
+    let (events, nodes) = every_order(|order| {
+        let (mut graph, (clicks_in, log)) = Graph::build(|b| {
+            let (clicks, clicks_in) = b.input::<u32>();
+            let clicks = clicks.share(b);
+            let (navigate, navigate_loop) = b.stream_loop::<u32>();
+            let first = screen(b, clicks, 0);
+            let screens = navigate.construct(b, move |b, n| screen(b, clicks, n));
+            let current = screens.hold(b, first);
+            let events = current
+                .switch_stream(b)
+                .map(|e: Event| (e.screen, e.click, e.seen))
+                .share(b);
+            navigate_loop.close(
+                b,
+                events.filter_map(|(n, click, _)| (click == 0).then_some(n + 1)),
+            );
+            (clicks_in, log_events(b, events))
+        });
+        let before = graph.live_nodes();
+        let schedule: Vec<Vec<Send>> = [5, 0, 7, 0, 9, 0, 4]
+            .into_iter()
+            .map(|c| vec![send(clicks_in, c)])
+            .collect();
+        let observed = drive(&mut graph, order, &schedule, |graph| {
+            graph.sample(log).clone()
+        });
+        (by_instant(1, &observed), graph.live_nodes() - before)
+    });
+    assert_eq!(
+        events,
+        [
+            (1, (0, 5, 1)),
+            (2, (0, 0, 2)),
+            (3, (1, 7, 2)),
+            (4, (1, 0, 3)),
+            (5, (2, 9, 2)),
+            (6, (2, 0, 3)),
+            (7, (3, 4, 2))
+        ]
+    );
+    assert_eq!(nodes, 3 * 2, "each navigation built a counter and a screen");
+}
+
+/// The loop through a switch_stream's selection (review-fidelity/hs/
+/// SwitchS.hs) in its construct form: every event of the switch builds
+/// the stream it follows from the next instant on, a linear stream, the
+/// `Clone`-free path, or a shared one. Stage6.hs:
+///
+/// ```text
+/// selection loop: ([([1],1),([2],2),([3],3),([4],4)],5)
+/// ```
+#[test]
+fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct() {
+    for linear in [true, false] {
+        let got = every_order(|order| {
+            let (mut graph, (ticks_in, log)) = Graph::build(move |b| {
+                let (ticks, ticks_in) = b.input::<u32>();
+                let ticks = ticks.share(b);
+                let (selected, selected_loop) = b.stream_loop::<u32>();
+                let out = if linear {
+                    let first = ticks.map(|t| t).node(b);
+                    let built =
+                        selected.construct(b, move |b, v| ticks.map(move |t| t + v).node(b));
+                    built.hold(b, first).switch_stream(b).share(b)
+                } else {
+                    let built =
+                        selected.construct(b, move |b, v| ticks.map(move |t| t + v).share(b));
+                    built.hold(b, ticks).switch_stream(b).share(b)
+                };
+                selected_loop.close(b, out);
+                (ticks_in, log_events(b, out))
+            });
+            let schedule: Vec<Vec<Send>> = (0..4).map(|_| vec![send(ticks_in, 1)]).collect();
+            let observed = drive(&mut graph, order, &schedule, |graph| {
+                graph.sample(log).clone()
+            });
+            by_instant(1, &observed)
+        });
+        assert_eq!(got, [(1, 1), (2, 2), (3, 3), (4, 4)], "linear: {linear}");
+    }
 }
 
 // ----------------------------------------------------------- scopes and refusals
