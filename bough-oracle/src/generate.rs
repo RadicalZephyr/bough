@@ -84,6 +84,7 @@
 //! no generated program has one. This is conservative: two switches that
 //! could each select a cell depending on the other, but never both at once,
 //! make a legal program (finding F46), which the generator never makes.
+//! [`with_switch_cycle`] makes a program with such a cycle on purpose.
 //!
 //! The recipe observes a random subset of the nodes that can be observed:
 //! every cell, every shared stream, and every linear stream nothing
@@ -2844,6 +2845,152 @@ pub fn with_same_instant_cycle(program: &Program, which: usize) -> Option<Progra
         definitions,
         observe: program.observe.iter().map(|&node| map(node)).collect(),
         ..program.clone()
+    })
+}
+
+/// The program with a same-instant cycle through one of its switches'
+/// choices, for the test that the engine refuses such a switch, or poisons
+/// the graph, as the switch links or moves into the cycle. A loop's
+/// forward, declared first, becomes a token the switch's outer may select,
+/// a share of it for a `switch_stream`; and the loop closes last with a
+/// node that reads the switch, so the switch selecting the forward would
+/// depend on itself in the same instant. A `switch_stream`'s readers read a
+/// share of it, made for the purpose, so that the loop can read it too.
+/// The token is observed, so that a root reaches the switch and the loop:
+/// a cycle no root reaches is collected before it runs, and never met.
+///
+/// `which` picks the switch and when it meets the cycle. At its first
+/// link, at the end of transaction zero: the forward is the hold's initial
+/// token, the constant's, or the one a `MapPickCell` selects from the
+/// start; a snapshot or a gate that fires in transaction zero may read the
+/// switch's value before it links, and go round the cycle first (finding
+/// F49). Or at the first transaction: the forward is added to the pick's
+/// choices, and the pick reads a new input, sent in transaction 1, and
+/// selects the forward, so the switch moves to it at that commit. `None`
+/// if the program has no switch it can rewire.
+pub fn with_switch_cycle(program: &Program, which: usize) -> Option<Program> {
+    let switches: Vec<(usize, usize)> = program
+        .definitions
+        .iter()
+        .enumerate()
+        .filter_map(|(switch, definition)| match definition {
+            Definition::SwitchCell(Reference::TopLevel(outer))
+            | Definition::SwitchStream(Reference::TopLevel(outer)) => Some((switch, *outer)),
+            _ => None,
+        })
+        .collect();
+    if switches.is_empty() {
+        return None;
+    }
+    let (switch, outer) = switches[which % switches.len()];
+    let cell = matches!(program.definitions[switch], Definition::SwitchCell(_));
+    let hold = matches!(
+        program.definitions[outer],
+        Definition::HoldCell { .. } | Definition::HoldStream { .. }
+    );
+    let moves = hold && (which / switches.len()) % 2 == 1;
+    // The loop's forward first, a share of it for a switch_stream, and for
+    // a move, the input that selects it.
+    let mut definitions = vec![if cell {
+        Definition::CellLoop(Type::Integer)
+    } else {
+        Definition::StreamLoop(Type::Integer)
+    }];
+    if !cell {
+        definitions.push(Definition::Share(top(0)));
+    }
+    let forward = definitions.len() - 1;
+    let token = top(forward);
+    let mut inputs = program.inputs.clone();
+    let mut schedule = program.schedule.clone();
+    let selector = moves.then(|| {
+        inputs.push(Input::new(Type::Integer));
+        definitions.push(Definition::Input(inputs.len() - 1));
+        match schedule.first_mut() {
+            Some(first) => first.push((inputs.len() - 1, Value::Integer(0))),
+            None => schedule.push(vec![(inputs.len() - 1, Value::Integer(0))]),
+        }
+        top(definitions.len() - 1)
+    });
+    let shift = definitions.len();
+    // For a switch_stream, a share of it right after it, which every reader
+    // of the switch reads instead.
+    let share = (!cell).then_some(switch + shift + 1);
+    let map = |node: usize| match share {
+        Some(share) if node + shift >= share => node + shift + 1,
+        Some(share) if node == switch => share,
+        _ => node + shift,
+    };
+    for (node, definition) in program.definitions.iter().enumerate() {
+        definitions.push(rename(definition, &map));
+        if let Some(share) = share.filter(|_| node == switch) {
+            definitions.push(Definition::Share(top(share - 1)));
+        }
+    }
+    let (switch, outer) = (switch + shift, outer + shift);
+    let picked = |index: &mut Expression, listed: &mut Vec<Reference>| {
+        listed.push(token);
+        *index = Expression::Literal(listed.len() as i64 - 1);
+    };
+    match &mut definitions[outer] {
+        Definition::HoldCell { initial, source } | Definition::HoldStream { initial, source } => {
+            match selector {
+                None => *initial = token,
+                Some(selector) => {
+                    let pick = match source {
+                        Reference::TopLevel(pick) => *pick,
+                        Reference::Local(_) => return None,
+                    };
+                    match &mut definitions[pick] {
+                        Definition::PickCell {
+                            index,
+                            cells: listed,
+                            source,
+                        }
+                        | Definition::PickStream {
+                            index,
+                            streams: listed,
+                            source,
+                        } => {
+                            picked(index, listed);
+                            *source = selector;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        Definition::ConstantCell(held) | Definition::ConstantStream(held) => *held = token,
+        Definition::MapPickCell { index, cells, .. } => picked(index, cells),
+        _ => return None,
+    }
+    // The loop closes with a node that reads the switch.
+    let reader = match share {
+        None => Definition::MapCell {
+            function: Argument + literal(1),
+            cell: top(switch),
+        },
+        Some(share) => Definition::Map {
+            function: Argument + literal(1),
+            source: top(share),
+        },
+    };
+    definitions.push(reader);
+    definitions.push(Definition::Close {
+        forward: 0,
+        definition: top(definitions.len() - 1),
+    });
+    Some(Program {
+        window: program.window,
+        inputs,
+        definitions,
+        observe: program
+            .observe
+            .iter()
+            .map(|&node| map(node))
+            .chain([forward])
+            .collect(),
+        schedule,
     })
 }
 

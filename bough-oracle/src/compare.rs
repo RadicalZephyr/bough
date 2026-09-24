@@ -511,17 +511,6 @@ fn write_program(formatter: &mut fmt::Formatter<'_>, program: &Program) -> fmt::
     Ok(())
 }
 
-/// A panic's message.
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    match payload.downcast::<String>() {
-        Ok(message) => *message,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(message) => (*message).to_owned(),
-            Err(_) => "a panic with no message".to_owned(),
-        },
-    }
-}
-
 /// Asks the oracle about the program, with the window
 /// `FromFirstTransaction`, and holds every engine run with every option to
 /// its answer, which it returns. The first failure is the report.
@@ -558,7 +547,7 @@ pub fn check_program(
                         &program,
                         Failure::Panic {
                             run: label,
-                            message: panic_message(payload),
+                            message: build::panic_message(payload),
                         },
                     ));
                 }

@@ -38,7 +38,8 @@
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
 //! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
 //! The tests of the builder, the comparison and the generator alone, and
-//! the test that the engine refuses same-instant loops, need no GHC.
+//! the tests that the engine refuses same-instant cycles through loops and
+//! through switches, need no GHC.
 
 use std::cell::{Cell as StdCell, RefCell};
 use std::collections::hash_map::RandomState;
@@ -58,9 +59,9 @@ use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
     Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
-    Program, Reference, RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window, check,
-    check_program, compare, expected, guard_element, guard_filter, guard_map, programs, reduce,
-    run, watch_switches, with_same_instant_cycle,
+    Program, Reference, Refusal, RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window,
+    check, check_program, compare, expected, guard_element, guard_filter, guard_map, programs,
+    reduce, refusal, run, watch_switches, with_same_instant_cycle, with_switch_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -553,6 +554,120 @@ fn same_instant_cycles_are_refused_at_close() {
         refused.get() > 100,
         "only {} of 256 programs had a loop to rewire",
         refused.get()
+    );
+}
+
+/// The engine's refusals of a switch that would close a same-instant
+/// cycle, by where they come: the path check of a switch's first link or
+/// of its move at commit; a read of a switch's value that goes round the
+/// cycle before the switch's first link (F49) or while relink moves it;
+/// and a read after the instant that meets the switch again (R10).
+const SWITCH_REFUSALS: [&str; 3] = [
+    "switching closes a same-instant cycle",
+    "a same-instant cycle through a switch_cell read before its first link",
+    "a same-instant cycle through a read after the instant",
+];
+
+/// A same-instant cycle through a switch's choices is refused, or poisons
+/// the graph, in any program the generator makes with a switch: one of its
+/// switches is made to select a loop's forward that the loop closes with a
+/// node that reads the switch (`with_switch_cycle`). At its first link the
+/// build must panic, at the link's path check or where a read of the
+/// switch's value goes round the cycle first. At a move, in transaction 1,
+/// the transaction must panic, at the move's path check, at relink's read
+/// of the new selection, or where a read after the instant meets the
+/// switch again, and leave the graph poisoned. Both modes, plainly and
+/// under a shuffle. The oracle is not asked: the semantics do not define
+/// such a program.
+#[test]
+fn same_instant_cycles_through_a_switch_are_refused_or_poison_the_graph() {
+    let base = match Config::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => fresh_seed(),
+    };
+    let mut runner = TestRunner::new(Config {
+        cases: 256,
+        failure_persistence: None,
+        rng_seed: RngSeed::Fixed(base),
+        ..Config::default()
+    });
+    // The programs refused at a first link and at a move, and of each, how
+    // many had each refusal in some run.
+    let counts = RefCell::new([[0_u32; 4]; 2]);
+    let result = runner.run(&(programs(), any::<usize>()), |(program, which)| {
+        let Some(cyclic) = with_switch_cycle(&program, which) else {
+            return Ok(());
+        };
+        // A Sample in the build closure cannot read a switch that may
+        // select the loop's forward, and check refuses the program.
+        if check(&cyclic).is_err() {
+            return Ok(());
+        }
+        let moves = cyclic.inputs.len() > program.inputs.len();
+        let mut seen = [false; 3];
+        let shuffled = RunOptions {
+            shuffle_seed: Some(base ^ which as u64),
+            permute_sends: None,
+        };
+        for options in [RunOptions::default(), shuffled] {
+            for (name, outcome) in [
+                ("Local", refusal::<Local>(&cyclic, options)),
+                ("Threaded", refusal::<Threaded>(&cyclic, options)),
+            ] {
+                let outcome = outcome.map_err(|error| TestCaseError::fail(error.to_string()))?;
+                let kind = |message: &str| {
+                    SWITCH_REFUSALS
+                        .iter()
+                        .position(|refusal| message.contains(refusal))
+                };
+                let refused = match &outcome {
+                    Refusal::Build(message) if !moves => kind(message).filter(|&k| k < 2),
+                    Refusal::Transaction {
+                        transaction: 0,
+                        message,
+                        poisoned: true,
+                    } if moves => kind(message),
+                    _ => None,
+                };
+                prop_assert!(
+                    refused.is_some(),
+                    "{name} mode, {options}: a switch that {} a cycle ended {outcome:?}\n{cyclic:?}",
+                    if moves {
+                        "moves in transaction 1 into"
+                    } else {
+                        "links"
+                    }
+                );
+                if let Some(k) = refused {
+                    seen[k] = true;
+                }
+            }
+        }
+        let mut counts = counts.borrow_mut();
+        let row = &mut counts[usize::from(moves)];
+        row[0] += 1;
+        for (count, seen) in row[1..].iter_mut().zip(seen) {
+            *count += u32::from(seen);
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        panic!("{error}\nPROPTEST_RNG_SEED={base}");
+    }
+    let [linked, moved] = *counts.borrow();
+    eprintln!(
+        "of 256 programs, {} were refused at a switch's first link, {} by the path check and {} \
+         by a read before the link in some run; and {} at a move, {} by the path check, {} by \
+         relink's read of the new selection and {} by a read after the instant in some run; \
+         each in both modes, plainly and under a shuffle",
+        linked[0], linked[1], linked[2], moved[0], moved[1], moved[2], moved[3]
+    );
+    // Most generated programs have a switch.
+    assert!(
+        linked[0] > 40 && moved[0] > 40,
+        "only {} and {} of 256 programs had a switch to rewire",
+        linked[0],
+        moved[0]
     );
 }
 

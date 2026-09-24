@@ -124,7 +124,8 @@ mod program;
 pub use answer::{Answer, Datum, MalformedAnswer, Observation};
 pub use build::{
     BuildError, Call, Chain, EngineMode, EngineObservation, EngineRun, Held, ListFn, Listened,
-    MAX_FUSED, NodeType, PickFn, RunOptions, Scalar, check, evaluate, name, run, switch_candidates,
+    MAX_FUSED, NodeType, PickFn, Refusal, RunOptions, Scalar, check, evaluate, name, refusal, run,
+    switch_candidates,
 };
 pub use compare::{
     Engine, Expected, Failure, Report, SwitchCount, SwitchWatch, Switching, check_program, compare,
@@ -132,7 +133,7 @@ pub use compare::{
 };
 pub use generate::{
     MAX_DEFINITIONS, guard_element, guard_filter, guard_map, programs, reduce, references,
-    well_founded, with_same_instant_cycle,
+    well_founded, with_same_instant_cycle, with_switch_cycle,
 };
 pub use ghc::{
     Error, INSTALL_HINT, Oracle, Plan, build, compile_haskell, for_tests, ghc_command,

@@ -148,6 +148,7 @@
 
 use std::fmt;
 use std::mem;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
@@ -3146,6 +3147,83 @@ fn engine_sends(
         }
     }
     order
+}
+
+/// A panic's message.
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "a panic with no message".to_owned(),
+        },
+    }
+}
+
+/// Where a run of a program that the engine should refuse ended: see
+/// [`refusal`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The build panicked, in the build closure or in transaction zero,
+    /// with this message.
+    Build(String),
+    /// A transaction panicked.
+    Transaction {
+        /// The transaction: k - 1 for transaction k.
+        transaction: usize,
+        /// The panic's message.
+        message: String,
+        /// Whether `graph.try_transaction` then reported the graph
+        /// poisoned, as a panic that escapes a transaction must leave it.
+        poisoned: bool,
+    },
+    /// Every transaction ran.
+    Ran,
+}
+
+/// Builds the program in mode `M` and runs its schedule, as [`run`] does
+/// but with no listener, and says where the engine panicked, if it did:
+/// for a program with a same-instant cycle, which the engine must refuse
+/// where it builds the cycle, or where a switch would move into it, and
+/// which the oracle cannot answer.
+pub fn refusal<M: EngineMode>(
+    program: &Program,
+    options: RunOptions,
+) -> Result<Refusal, BuildError> {
+    let types = check(program)?;
+    let built = panic::catch_unwind(AssertUnwindSafe(|| {
+        M::build(|b| build_program(b, program, &types))
+    }));
+    let (mut graph, edge) = match built {
+        Ok(built) => built,
+        Err(payload) => return Ok(Refusal::Build(panic_message(payload))),
+    };
+    graph.set_shuffle_seed(options.shuffle_seed);
+    for (k, sends) in program.schedule.iter().enumerate() {
+        let order = engine_sends(
+            sends,
+            &edge.inputs,
+            options.permute_sends.map(|seed| (seed, k)),
+        );
+        let ran = panic::catch_unwind(AssertUnwindSafe(|| {
+            graph.transaction(|tx| {
+                for (input, value) in order {
+                    match input {
+                        EngineInput::Integer(input) => M::send(tx, input, value),
+                        EngineInput::Boolean(input) => M::send(tx, input, truthy(value)),
+                    }
+                }
+            })
+        }));
+        if let Err(payload) = ran {
+            return Ok(Refusal::Transaction {
+                transaction: k,
+                message: panic_message(payload),
+                poisoned: graph.try_transaction(|_| ()).is_err(),
+            });
+        }
+    }
+    Ok(Refusal::Ran)
 }
 
 /// Builds the program in mode `M`, listens to its observed nodes, and runs
