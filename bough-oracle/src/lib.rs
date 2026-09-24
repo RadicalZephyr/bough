@@ -115,10 +115,15 @@
 #![warn(missing_docs)]
 
 mod answer;
+mod build;
 mod ghc;
 mod program;
 
 pub use answer::{Answer, Datum, MalformedAnswer, Observation};
+pub use build::{
+    BuildError, Chain, EngineMode, EngineObservation, EngineRun, MAX_FUSED, NodeType, RunOptions,
+    Scalar, check, evaluate, name, run,
+};
 pub use ghc::{
     Error, INSTALL_HINT, Oracle, Plan, build, compile_haskell, for_tests, ghc_command,
     haskell_directory, plan,
