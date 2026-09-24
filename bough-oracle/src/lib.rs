@@ -127,7 +127,10 @@ pub use build::{
     NodeType, RunOptions, Scalar, check, evaluate, name, run,
 };
 pub use compare::{Engine, Expected, Failure, Report, check_program, compare, expected};
-pub use generate::{MAX_DEFINITIONS, programs, reduce, references};
+pub use generate::{
+    MAX_DEFINITIONS, guard_element, guard_filter, guard_map, programs, reduce, references,
+    well_founded, with_same_instant_cycle,
+};
 pub use ghc::{
     Error, INSTALL_HINT, Oracle, Plan, build, compile_haskell, for_tests, ghc_command,
     haskell_directory, plan,

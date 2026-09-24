@@ -4,23 +4,33 @@
 //! Every program runs in both modes, `Local` and `Threaded`: plainly, under
 //! three shuffle seeds, and with the sends of each transaction permuted
 //! under two seeds, a coalescing input's own sends keeping their order.
-//! Every run must match the oracle.
+//! Every run must match the oracle: per observed node and per external
+//! transaction, the ordered list of events or steps, child transactions
+//! included, whose child indices the engine does not show and the
+//! comparison does not compare; the order of the listener calls across
+//! nodes, against the oracle's times; and every sample after a transaction.
 //!
 //! The random programs come from `bough_oracle::programs()`, in four tests
-//! that run in parallel. `PROPTEST_CASES` sets how many programs in all,
-//! 512 unless set; `PROPTEST_RNG_SEED` fixes the seed, which a failure
-//! prints. A failing program is shrunk by proptest, then by
-//! `bough_oracle::reduce`, and reported with its schedule and every
-//! observed node, the engine beside the oracle.
+//! that run in parallel. Most have loops, cell, state and stream loops, and
+//! child transactions, and some loops run through children; one in seven
+//! is a program of stages 1 and 2 alone. Each shard prints what its
+//! programs held and how many observed nodes had events in child
+//! transactions. `PROPTEST_CASES` sets how many programs in all, 1024
+//! unless set; `PROPTEST_RNG_SEED` fixes the seed, which a failure prints.
+//! A failing program is shrunk by proptest, then by `bough_oracle::reduce`
+//! to a program that fails the same way, and reported with its schedule and
+//! every observed node, the engine beside the oracle.
 //!
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
 //! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
-//! The tests of the builder and the generator alone need no GHC.
+//! The tests of the builder, the comparison and the generator alone, and
+//! the test that the engine refuses same-instant loops, need no GHC.
 
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::collections::hash_map::RandomState;
 use std::env;
 use std::hash::{BuildHasher, Hasher};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -34,7 +44,7 @@ use bough::{Local, Threaded};
 use bough_oracle::{
     Answer, Definition, Engine, Expected, Expression, Input, NodeType, Observation, Oracle,
     Program, Reference, RunOptions, Scalar, Type, Value, Window, check, check_program, compare,
-    expected, programs, reduce, run,
+    expected, programs, reduce, run, with_same_instant_cycle,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -168,9 +178,9 @@ fn timed_stream(transactions: usize, events: &[(&[i64], i64)]) -> Expected {
 
 // ----- random programs -----
 
-/// The programs in all when `PROPTEST_CASES` is not set: about five
-/// seconds on four cores.
-const DEFAULT_CASES: u32 = 512;
+/// The programs in all when `PROPTEST_CASES` is not set: about ten seconds
+/// on four cores in a debug build.
+const DEFAULT_CASES: u32 = 1024;
 
 /// The random tests split the programs between them and run in parallel.
 const SHARDS: u32 = 4;
@@ -178,6 +188,87 @@ const SHARDS: u32 = 4;
 /// A seed nobody chose, for a run without `PROPTEST_RNG_SEED`.
 fn fresh_seed() -> u64 {
     RandomState::new().build_hasher().finish()
+}
+
+/// What one shard's random programs held and did: how many had each kind
+/// of loop and child transaction; how many observed nodes had events or
+/// steps, in child transactions among them, and how deep; and how many
+/// observed loop forwards stepped or fired, which a loop does only when its
+/// feedback runs.
+#[derive(Default)]
+struct Tally {
+    programs: u32,
+    loops: u32,
+    stream_loops: u32,
+    state_loops: u32,
+    splits: u32,
+    defers: u32,
+    children_in_loops: u32,
+    observed: u64,
+    active: u64,
+    in_children: u64,
+    deepest: usize,
+    /// Observed loop forwards, and those that stepped or fired.
+    forwards: u64,
+    active_forwards: u64,
+}
+
+impl Tally {
+    fn add(&mut self, program: &Program, expected: &[Expected]) {
+        let c = census(program);
+        self.programs += 1;
+        self.loops += u32::from(c.loops);
+        self.stream_loops += u32::from(c.stream_loops);
+        self.state_loops += u32::from(c.state_loops);
+        self.splits += u32::from(c.splits);
+        self.defers += u32::from(c.defers);
+        self.children_in_loops += u32::from(c.children_in_loops);
+        for (node, observed) in program.observe.iter().zip(expected) {
+            let lists = match observed {
+                Expected::Stream { events } => events,
+                Expected::Cell { steps, .. } => steps,
+            };
+            let times: Vec<&Vec<i64>> = lists.iter().flatten().map(|(time, _)| time).collect();
+            self.observed += 1;
+            self.active += u64::from(!times.is_empty());
+            if matches!(program.definitions[*node], CellLoop(_) | StreamLoop(_)) {
+                self.forwards += 1;
+                self.active_forwards += u64::from(!times.is_empty());
+            }
+            self.in_children += u64::from(times.iter().any(|time| time.len() > 1));
+            self.deepest = self
+                .deepest
+                .max(times.iter().map(|time| time.len() - 1).max().unwrap_or(0));
+        }
+    }
+
+    fn percent(&self, count: u32) -> f64 {
+        100.0 * f64::from(count) / f64::from(self.programs.max(1))
+    }
+}
+
+impl std::fmt::Display for Tally {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "with loops {:.0}% (stream loops {:.0}%, state loops {:.0}%), splits {:.0}%, \
+             defers {:.0}%, a loop through children {:.0}%; of {} observed nodes {:.0}% had \
+             events or steps and {:.0}% had them in child transactions, down to depth {}; of \
+             {} observed loop forwards {:.0}% stepped or fired",
+            self.percent(self.loops),
+            self.percent(self.stream_loops),
+            self.percent(self.state_loops),
+            self.percent(self.splits),
+            self.percent(self.defers),
+            self.percent(self.children_in_loops),
+            self.observed,
+            100.0 * self.active as f64 / self.observed.max(1) as f64,
+            100.0 * self.in_children as f64 / self.observed.max(1) as f64,
+            self.deepest,
+            self.forwards,
+            100.0 * self.active_forwards as f64 / self.forwards.max(1) as f64,
+        )
+    }
 }
 
 /// Runs this shard's share of the random programs.
@@ -202,30 +293,43 @@ fn random_programs(shard: u32) {
     // How many programs ran, and when the first failure came.
     let tried = StdCell::new(0_u32);
     let first_failure = StdCell::new(None);
+    let tally = RefCell::new(Tally::default());
     let mut runner = TestRunner::new(config);
     let result = runner.run(&(programs(), any::<u64>()), |(program, seed)| {
         tried.set(tried.get() + 1);
-        check_program(oracle, &program, &ENGINES, &runs(seed))
-            .map(drop)
-            .map_err(|report| {
+        match check_program(oracle, &program, &ENGINES, &runs(seed)) {
+            Ok(expected) => {
+                tally.borrow_mut().add(&program, &expected);
+                Ok(())
+            }
+            Err(report) => {
                 if first_failure.get().is_none() {
                     first_failure.set(Some((tried.get(), started.elapsed())));
                 }
-                TestCaseError::fail(report.to_string())
-            })
+                Err(TestCaseError::fail(report.to_string()))
+            }
+        }
     });
     match result {
         Ok(()) => eprintln!(
             "shard {shard}: {cases} random programs agree with the oracle, each in two modes \
-             and six runs, in {:.1?} (PROPTEST_RNG_SEED={base})",
-            started.elapsed()
+             and six runs, in {:.1?} (PROPTEST_RNG_SEED={base}); {}",
+            started.elapsed(),
+            tally.borrow()
         ),
         Err(TestError::Fail(_, (program, seed))) => {
             let (found, after) = first_failure.get().unwrap_or((0, started.elapsed()));
             let shrunk = started.elapsed();
             let runs = runs(seed);
+            let failure = check_program(oracle, &program, &ENGINES, &runs)
+                .expect_err("proptest's smallest program fails")
+                .failure;
+            // Only a failure of the same kind counts: a cut that makes the
+            // engine refuse a loop, say, is not the disagreement it started
+            // from.
             let reduced = reduce(&program, |p| {
-                check_program(oracle, p, &ENGINES, &runs).is_err()
+                check_program(oracle, p, &ENGINES, &runs)
+                    .is_err_and(|report| report.failure.same_kind(&failure))
             });
             let report = check_program(oracle, &reduced, &ENGINES, &runs)
                 .expect_err("the reduced program still fails");
@@ -259,6 +363,75 @@ fn random_programs_agree_with_the_oracle_shard_2() {
 #[test]
 fn random_programs_agree_with_the_oracle_shard_3() {
     random_programs(3);
+}
+
+/// The message of the panic `f` raises, or `None` if it returns.
+fn panic_message<R>(f: impl FnOnce() -> R) -> Option<String> {
+    let payload = panic::catch_unwind(AssertUnwindSafe(f)).err()?;
+    Some(if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else {
+        String::new()
+    })
+}
+
+/// A loop whose definition depends on its own forward in the same instant
+/// is refused at its close, in any program the generator makes: one of its
+/// cell loops of integers is closed instead with a lift of the definition
+/// and the forward, of the definition and a `map_cell` of the forward, or
+/// of the definition and a hold of the forward's steps view, F3's shape,
+/// which RFD 2's path rule accepts because the path passes through a hold.
+/// The build panics with the engine's refusal in both modes. The oracle is
+/// not asked: the semantics do not define such a loop, and the fixed-point
+/// iteration may settle anyway (F3).
+#[test]
+fn same_instant_cycles_are_refused_at_close() {
+    let base = match Config::default().rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => fresh_seed(),
+    };
+    let mut runner = TestRunner::new(Config {
+        cases: 256,
+        failure_persistence: None,
+        rng_seed: RngSeed::Fixed(base),
+        ..Config::default()
+    });
+    let refused = StdCell::new(0);
+    let result = runner.run(&(programs(), any::<usize>()), |(program, which)| {
+        let Some(cyclic) = with_same_instant_cycle(&program, which) else {
+            return Ok(());
+        };
+        // A Sample in the build closure cannot read a loop closed through
+        // itself, and check refuses that before the engine sees it.
+        if check(&cyclic).is_err() {
+            return Ok(());
+        }
+        for engine in ENGINES {
+            let message = panic_message(|| (engine.run)(&cyclic, RunOptions::default()));
+            prop_assert!(
+                message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("closing this loop makes a same-instant cycle")),
+                "{} mode built a same-instant cycle without refusing it at its close: \
+                 {message:?}\n{cyclic:?}",
+                engine.name
+            );
+        }
+        refused.set(refused.get() + 1);
+        Ok(())
+    });
+    if let Err(error) = result {
+        panic!("{error}\nPROPTEST_RNG_SEED={base}");
+    }
+    // About three programs in five have a cell loop of integers that is not
+    // a State and that no Sample reads.
+    assert!(
+        refused.get() > 100,
+        "only {} of 256 programs had a loop to rewire",
+        refused.get()
+    );
 }
 
 // ----- fixed programs -----
@@ -1077,9 +1250,51 @@ fn the_comparison_reads_child_times_into_their_external_transaction() {
     );
 }
 
-/// Every generated program passes the builder's check, and across a few
-/// hundred of them every definition kind of the subset occurs and every
-/// materialized kind is observed.
+/// What kinds of loop and child transaction a program has.
+#[derive(Clone, Copy, Debug, Default)]
+struct Census {
+    loops: bool,
+    cell_loops: bool,
+    state_loops: bool,
+    stream_loops: bool,
+    splits: bool,
+    defers: bool,
+    /// A split or a defer on a loop's cycle: a guarded one.
+    children_in_loops: bool,
+    /// A split or a defer, or a loop.
+    loops_or_children: bool,
+}
+
+fn census(program: &Program) -> Census {
+    let types = check(program).expect("a generated program passes check");
+    let mut census = Census::default();
+    for (node, definition) in program.definitions.iter().enumerate() {
+        match definition {
+            Definition::CellLoop(_) => {
+                census.cell_loops = true;
+                census.state_loops |= matches!(
+                    types[node],
+                    bough_oracle::NodeType::Cell { state: true, .. }
+                );
+            }
+            Definition::StreamLoop(_) => census.stream_loops = true,
+            Definition::Split(_) => census.splits = true,
+            Definition::Defer(_) => census.defers = true,
+            Definition::Filter { predicate, .. } if *predicate == bough_oracle::guard_filter() => {
+                census.children_in_loops = true;
+            }
+            _ => {}
+        }
+    }
+    census.loops = census.cell_loops || census.stream_loops;
+    census.loops_or_children = census.loops || census.splits || census.defers;
+    census
+}
+
+/// Every generated program passes the builder's check and is well founded,
+/// and across a few hundred of them every definition kind of the subset
+/// occurs and every materialized kind is observed. Loops and child
+/// transactions are in most programs.
 #[test]
 fn the_generator_makes_well_formed_programs_with_every_kind() {
     let mut runner = TestRunner::new(Config {
@@ -1089,13 +1304,20 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
     let strategy = programs();
     let mut defined = std::collections::BTreeSet::new();
     let mut observed = std::collections::BTreeSet::new();
-    let (mut shared_diamonds, mut lifts, mut sizes) = (0, 0, Vec::new());
-    for _ in 0..400 {
+    let (mut shared_diamonds, mut lifts, mut sizes, mut watched) = (0, 0, Vec::new(), 0);
+    let mut counts = [0_usize; 8];
+    const PROGRAMS: usize = 400;
+    for _ in 0..PROGRAMS {
         let program = strategy.new_tree(&mut runner).unwrap().current();
-        let types = check(&program).unwrap_or_else(|error| panic!("{error}\n{program:?}"));
+        check(&program).unwrap_or_else(|error| panic!("{error}\n{program:?}"));
+        assert!(
+            bough_oracle::well_founded(&program),
+            "a generated program is not well founded: {program:?}"
+        );
         assert!((5..=bough_oracle::MAX_DEFINITIONS).contains(&program.definitions.len()));
         assert!((1..=10).contains(&program.schedule.len()));
         sizes.push(program.definitions.len());
+        watched += program.observe.len();
         for definition in &program.definitions {
             defined.insert(bough_oracle::name(definition));
             if let Lift { cells, .. } = definition {
@@ -1116,7 +1338,19 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
                 shared_diamonds += 1;
             }
         }
-        let _ = types;
+        let c = census(&program);
+        for (count, has) in counts.iter_mut().zip([
+            c.loops,
+            c.cell_loops,
+            c.state_loops,
+            c.stream_loops,
+            c.splits,
+            c.defers,
+            c.children_in_loops,
+            c.loops_or_children,
+        ]) {
+            *count += usize::from(has);
+        }
     }
     let every = [
         "Input",
@@ -1143,9 +1377,15 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "Lift",
         "Steps",
         "StepsWithCurrent",
+        "CellLoop",
+        "StreamLoop",
+        "Close",
+        "MapList",
+        "Split",
+        "Defer",
     ];
     for kind in every {
-        assert!(defined.contains(kind), "no {kind} in 400 programs");
+        assert!(defined.contains(kind), "no {kind} in {PROGRAMS} programs");
     }
     for kind in [
         "Input",
@@ -1165,10 +1405,14 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         "Lift",
         "Steps",
         "StepsWithCurrent",
+        "CellLoop",
+        "StreamLoop",
+        "Split",
+        "Defer",
     ] {
         assert!(
             observed.contains(kind),
-            "no {kind} observed in 400 programs"
+            "no {kind} observed in {PROGRAMS} programs"
         );
     }
     // Lifts of two to six cells.
@@ -1177,15 +1421,51 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         shared_diamonds > 100,
         "{shared_diamonds} shared streams read twice"
     );
+    let percent = |count: usize| 100.0 * count as f64 / PROGRAMS as f64;
+    let [
+        loops,
+        cell_loops,
+        state_loops,
+        stream_loops,
+        splits,
+        defers,
+        guarded,
+        either,
+    ] = counts;
     let mean = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
     eprintln!(
-        "400 programs, {mean:.1} definitions on average, {shared_diamonds} shares read twice or more"
+        "{PROGRAMS} programs, {mean:.1} definitions and {:.1} observed nodes on average, \
+         {shared_diamonds} shares read twice or more; with loops {:.0}% (cell {:.0}%, state \
+         {:.0}%, stream {:.0}%), splits {:.0}%, defers {:.0}%, a loop through children {:.0}%, \
+         a loop or children {:.0}%",
+        watched as f64 / PROGRAMS as f64,
+        percent(loops),
+        percent(cell_loops),
+        percent(state_loops),
+        percent(stream_loops),
+        percent(splits),
+        percent(defers),
+        percent(guarded),
+        percent(either),
     );
+    // Loops and children are in most programs, and the first-order and
+    // cell programs of stages 1 and 2 stay in the mix.
+    assert!(
+        percent(loops) > 60.0 && percent(loops) < 97.0,
+        "loops in {loops}"
+    );
+    assert!(
+        percent(splits) + percent(defers) > 60.0,
+        "children: {splits} and {defers}"
+    );
+    assert!(percent(stream_loops) > 25.0 && percent(guarded) > 25.0);
+    assert!(either < PROGRAMS, "every program has a loop or children");
 }
 
 /// The reducer keeps what a failure needs and drops the rest, and every
-/// program it keeps passes the builder's check. The failure here is made
-/// up: an observed merge.
+/// program it keeps passes the builder's check and, as the one it started
+/// from is, is well founded. The failure here is made up: an observed
+/// merge. The program found has loops, which the reducer cuts open.
 #[test]
 fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
     let mut runner = TestRunner::new(Config {
@@ -1203,8 +1483,16 @@ fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
         .map(|_| strategy.new_tree(&mut runner).unwrap().current())
         .find(|program| observes_a_merge(program) && program.definitions.len() > 20)
         .expect("a big program that observes a merge");
+    assert!(
+        program
+            .definitions
+            .iter()
+            .any(|definition| matches!(definition, CellLoop(_) | StreamLoop(_))),
+        "{program:?}"
+    );
     let reduced = reduce(&program, |candidate| {
         assert!(check(candidate).is_ok(), "{candidate:?}");
+        assert!(bough_oracle::well_founded(candidate), "{candidate:?}");
         observes_a_merge(candidate)
     });
     // Two streams and their merge, observed; no transactions; the merge's
