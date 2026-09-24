@@ -16,6 +16,13 @@
 //! compiler from the field types, with no `unsafe impl`, and a materializer
 //! that forgets an `Accepts` bound fails to compile inside the engine.
 //!
+//! A `Local` graph is not `Send`, and nothing in the crate says so by hand:
+//!
+//! ```compile_fail,E0277
+//! fn assert_send<T: Send>() {}
+//! assert_send::<bough::Graph<bough::Local>>(); // error: dyn Any cannot be sent between threads
+//! ```
+//!
 //! A `Threaded` graph refuses a closure that captures something that is not
 //! `Send`, at the materializer that stores it:
 //!

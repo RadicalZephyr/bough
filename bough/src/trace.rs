@@ -20,13 +20,19 @@ use crate::token::{Cell, Input, Shared, Stream, TokenRef};
 
 /// Visits the tokens a value holds.
 pub struct Tracer {
-    visited: Vec<crate::token::Token>,
+    pub(crate) visited: Vec<crate::token::Token>,
 }
 
 impl Tracer {
+    pub(crate) fn new() -> Self {
+        Tracer {
+            visited: Vec::new(),
+        }
+    }
+
     /// Records that the value being traced holds this token.
     pub fn visit(&mut self, token: &impl TokenRef) {
-        todo!()
+        self.visited.push(token.token());
     }
 }
 

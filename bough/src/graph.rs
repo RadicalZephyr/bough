@@ -4,12 +4,13 @@
 use alloc::boxed::Box;
 #[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
-#[cfg(target_has_atomic = "ptr")]
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use core::task::Waker;
 
 use crate::Build;
+#[cfg(feature = "statistics")]
+use crate::engine::Statistics;
+use crate::engine::TokenFault;
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(target_has_atomic = "ptr")]
 use crate::error::{RemoteSendError, RemoteTransactionError};
@@ -17,8 +18,8 @@ use crate::error::{RemoteSendError, RemoteTransactionError};
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Local, Mode};
 use crate::source::Node;
-use crate::token::{Cell, Input, TokenRef};
-use crate::trace::Trace;
+use crate::token::{Cell, Input, Token, TokenRef};
+use crate::trace::{Trace, Tracer};
 
 /// A built graph: the only place transactions run, and the only holder of
 /// the I/O API.
@@ -30,8 +31,39 @@ use crate::trace::Trace;
 /// finishes clears it, so an entry that finds it set outside a transaction
 /// reports `Poisoned`. That holds where a panic unwinds and where a panic is
 /// a trap alike, since neither needs code to run on the way out (RFD 5).
+///
+/// `Graph<Threaded>` is `Send` because every field is: the engine stores
+/// each value, closure and chain in the mode's carrier, which is
+/// `Box<dyn Any + Send>` there. No `unsafe impl` says so.
 pub struct Graph<M: Mode = Local> {
-    mode: PhantomData<M>,
+    build: Build<M>,
+    /// The build closure's return value, traced once: the permanent roots.
+    roots: Vec<Token>,
+}
+
+/// Transaction zero: nothing is started, so the new-node phase runs every
+/// node the closure built, dependencies first.
+fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Graph<M>, R) {
+    let mut build = Build::<M>::new();
+    let id = build.graph_id;
+    build.begin();
+    build.push_scope();
+    let r = f(&mut build);
+    // A `mem::swap` with another graph's build context is safe code; with
+    // no `unsafe` in the engine it is a wrong-graph error, caught here.
+    assert_eq!(
+        build.graph_id, id,
+        "bough: the build context was swapped for another graph's"
+    );
+    build.pop_scope();
+    build.finish();
+    let mut tracer = Tracer::new();
+    r.trace(&mut tracer);
+    let graph = Graph {
+        build,
+        roots: tracer.visited,
+    };
+    (graph, r)
 }
 
 impl Graph<Local> {
@@ -41,7 +73,7 @@ impl Graph<Local> {
     ///
     /// The build closure runs as transaction zero.
     pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Graph<Local>, R) {
-        todo!()
+        build_graph(f)
     }
 }
 
@@ -56,11 +88,23 @@ impl Graph<Threaded> {
     pub fn build_threaded<R: Trace + Send>(
         f: impl FnOnce(&mut Build<Threaded>) -> R,
     ) -> (Graph<Threaded>, R) {
-        todo!()
+        build_graph(f)
     }
 }
 
+const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
+
 impl<M: Mode> Graph<M> {
+    /// Whether a transaction never finished. Every entry checks this.
+    fn poisoned(&self) -> bool {
+        self.build.in_tx
+    }
+
+    /// The check every panicking entry makes first.
+    fn enter(&self) {
+        assert!(!self.poisoned(), "{POISONED}");
+    }
+
     /// Sends one value in a transaction of its own, then runs its child
     /// transactions and its listeners before returning.
     ///
@@ -71,7 +115,15 @@ impl<M: Mode> Graph<M> {
     where
         M: Accepts<A>,
     {
-        todo!()
+        self.enter();
+        // The token is checked before the transaction opens, so a foreign
+        // token is a panic that leaves the graph usable.
+        let i = self.build.check(input.token);
+        self.build.begin();
+        self.build
+            .fire_start(i, value)
+            .expect("bough engine: the only send of a transaction is not a double send");
+        self.build.finish();
     }
 
     /// [`send`](Graph::send), returning the error instead of panicking.
@@ -79,12 +131,36 @@ impl<M: Mode> Graph<M> {
     where
         M: Accepts<A>,
     {
-        todo!()
+        if self.poisoned() {
+            return Err(SendError::Poisoned);
+        }
+        let i = self
+            .build
+            .lookup(input.token)
+            .map_err(|fault| match fault {
+                TokenFault::Foreign => SendError::ForeignGraph,
+                TokenFault::Stale => SendError::Stale,
+            })?;
+        self.build.begin();
+        self.build
+            .fire_start(i, value)
+            .expect("bough engine: the only send of a transaction is not a double send");
+        self.build.finish();
+        Ok(())
     }
 
     /// Several sends in one instant.
+    ///
+    /// The sends are simultaneous: nothing runs until `f` returns, so their
+    /// order inside `f` does not matter. A panic inside `f`, including one
+    /// from [`Transaction::send`], escapes the transaction and poisons the
+    /// graph.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
-        todo!()
+        self.enter();
+        self.build.begin();
+        let r = f(&mut Transaction { graph: self });
+        self.build.finish();
+        r
     }
 
     /// [`transaction`](Graph::transaction), returning the error instead of
@@ -93,7 +169,10 @@ impl<M: Mode> Graph<M> {
         &mut self,
         f: impl FnOnce(&mut Transaction<'_, M>) -> R,
     ) -> Result<R, PoisonedError> {
-        todo!()
+        if self.poisoned() {
+            return Err(PoisonedError);
+        }
+        Ok(self.transaction(f))
     }
 
     /// Listens to a materialized node. A linear stream is moved in, so it can
@@ -230,8 +309,29 @@ impl<M: Mode> Graph<M> {
     }
 
     /// The number of live nodes: how the no-leak requirement is asserted.
+    ///
+    /// Every materializer creates one node, however long its chain;
+    /// `input_cell` creates two, the input and the hold over it.
     pub fn live_nodes(&self) -> usize {
-        todo!()
+        self.build.store.live
+    }
+
+    /// RFD 1's order shuffle: with a seed, each transaction evaluates
+    /// independent nodes and dispatches listeners in an order drawn from
+    /// the seed, so a test can show that nothing depends on either. `None`,
+    /// the default, restores the plain order, which costs nothing.
+    ///
+    /// Values and each node's events are the same under every seed; only
+    /// the interleaving of different nodes' listeners moves.
+    pub fn set_shuffle_seed(&mut self, seed: Option<u64>) {
+        self.build.s.shuffle = seed;
+    }
+
+    /// The per-phase counters since the graph was built: instants,
+    /// evaluations, out-of-order pulls, commits, listener calls.
+    #[cfg(feature = "statistics")]
+    pub fn statistics(&self) -> Statistics {
+        self.build.s.statistics
     }
 
     /// How many operations on collected nodes were dropped in release builds.
@@ -297,14 +397,27 @@ pub struct Transaction<'g, M: Mode> {
 
 impl<M: Mode> Transaction<'_, M> {
     /// Sends one value in this transaction.
+    ///
+    /// Panics on a foreign token and on a second send to a non-coalescing
+    /// input. The panic escapes the transaction, so it poisons the graph.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A)
     where
         M: Accepts<A>,
     {
-        todo!()
+        match self.try_send(input, value) {
+            Ok(()) => {}
+            Err(TransactionSendError::DoubleSend) => {
+                panic!("bough: a second send to a non-coalescing input in one transaction")
+            }
+            Err(TransactionSendError::ForeignGraph) => panic!("bough: a token from another graph"),
+            Err(TransactionSendError::Stale) => {
+                panic!("bough: a stale token: its node was collected")
+            }
+        }
     }
 
     /// [`send`](Transaction::send), returning the error instead of panicking.
+    /// After an error the transaction goes on without the refused value.
     pub fn try_send<A: 'static>(
         &mut self,
         input: Input<A>,
@@ -313,7 +426,14 @@ impl<M: Mode> Transaction<'_, M> {
     where
         M: Accepts<A>,
     {
-        todo!()
+        let build = &mut self.graph.build;
+        let i = build.lookup(input.token).map_err(|fault| match fault {
+            TokenFault::Foreign => TransactionSendError::ForeignGraph,
+            TokenFault::Stale => TransactionSendError::Stale,
+        })?;
+        build
+            .fire_start(i, value)
+            .map_err(|_| TransactionSendError::DoubleSend)
     }
 }
 

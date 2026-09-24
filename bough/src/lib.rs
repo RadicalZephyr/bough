@@ -68,6 +68,8 @@ mod token;
 mod trace;
 
 pub use build::{Build, CellLoop, StreamLoop};
+#[cfg(feature = "statistics")]
+pub use engine::Statistics;
 pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(target_has_atomic = "ptr")]
 pub use error::{RemoteSendError, RemoteTransactionError};

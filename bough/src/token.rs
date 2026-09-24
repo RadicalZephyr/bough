@@ -39,7 +39,7 @@ pub trait TokenRef: sealed::Sealed {}
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
 /// token `Send` and `Sync` whatever `A` is; a token is three integers.
 pub struct Stream<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -47,7 +47,7 @@ pub struct Stream<A> {
 ///
 /// Produced by [`share`](crate::Source::share), which requires `A: Clone`.
 pub struct Shared<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -57,7 +57,7 @@ pub struct Shared<A> {
 /// cell is either a hold, which moves its event into its committed value
 /// at commit, or a read-through cell computed from other cells on demand.
 pub struct Cell<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -69,7 +69,7 @@ pub struct Cell<A> {
 /// transaction are an error, and that is a rule about one instant that no
 /// token discipline could make static.
 pub struct Input<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 

@@ -26,7 +26,8 @@ impl<A: 'static> Cell<A> {
     /// });
     /// ```
     pub fn sample<M: Mode>(self, build: &Build<M>) -> &A {
-        todo!()
+        let i = build.check(self.token);
+        build.value::<A>(i)
     }
 
     /// A read-through cell: `f` of this cell's value, computed on read and

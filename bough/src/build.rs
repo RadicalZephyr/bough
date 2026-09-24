@@ -1,26 +1,94 @@
 //! The build context (RFD 2).
 
+use alloc::boxed::Box;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::mode::{Accepts, Local, Mode};
+use crate::engine::nodes::stream::CoalescingInput;
+use crate::engine::{Data, Kind, NodeOps, Ops, Sched, Store, Tx};
+use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::slot::InputSlot;
 use crate::source::Source;
 use crate::token::{Cell, Input, Stream, Token, TokenRef};
 use crate::trace::Trace;
+
+/// The next graph id. Ids start at 1, so a token that names no graph never
+/// validates.
+static NEXT_GRAPH: AtomicU32 = AtomicU32::new(1);
+
+#[cfg(target_has_atomic = "32")]
+fn next_graph_id() -> u32 {
+    NEXT_GRAPH.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A Cortex-M0 has 32-bit atomic loads and stores and no read-modify-write,
+/// so the id is a load and a store. Two graphs built at once, one of them
+/// from an interrupt handler, could share an id there.
+#[cfg(not(target_has_atomic = "32"))]
+fn next_graph_id() -> u32 {
+    let id = NEXT_GRAPH.load(Ordering::Relaxed);
+    NEXT_GRAPH.store(id.wrapping_add(1), Ordering::Relaxed);
+    id
+}
 
 /// The context every node-creating operation requires.
 ///
 /// It exists inside [`Graph::build`](crate::Graph::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
 /// `listen`; I/O lives on [`Graph`](crate::Graph).
+///
+/// It is the engine's core itself: a `Graph` owns one, and the build closure
+/// borrows it. So it has no lifetime parameter and no public constructor.
 pub struct Build<M: Mode = Local> {
-    mode: PhantomData<M>,
+    pub(crate) graph_id: u32,
+    pub(crate) store: Store<M>,
+    /// The serial of the running instant.
+    pub(crate) tx: Tx,
+    /// The transaction-in-progress flag, which is also the poison.
+    pub(crate) in_tx: bool,
+    pub(crate) s: Sched,
+}
+
+impl<M: Mode> Build<M> {
+    pub(crate) fn new() -> Self {
+        Build {
+            graph_id: next_graph_id(),
+            store: Store::new(),
+            tx: 0,
+            in_tx: false,
+            s: Sched::default(),
+        }
+    }
+
+    /// Opens a scope: the build closure, or one run of a construct closure.
+    pub(crate) fn push_scope(&mut self) {
+        self.s.scopes.push(self.s.open_loops.len());
+    }
+
+    /// Closes a scope. A loop declared in it and still open is a build-time
+    /// panic (stage 3 declares loops).
+    pub(crate) fn pop_scope(&mut self) {
+        let start = self.s.scopes.pop().expect("bough engine: a scope is open");
+        assert!(
+            self.s.open_loops.len() == start,
+            "bough: a loop declared in this scope was never closed"
+        );
+    }
 }
 
 impl<M: Mode> Build<M> {
     /// A stream driven from I/O code, and the token that drives it.
-    pub fn input<A: 'static>(&mut self) -> (Stream<A>, Input<A>) {
-        todo!()
+    ///
+    /// The input's slot is created here and keeps an event nobody consumed
+    /// until the next send, so the mode must accept the event type.
+    pub fn input<A: 'static>(&mut self) -> (Stream<A>, Input<A>)
+    where
+        M: Accepts<A>,
+    {
+        let data = Data::Slot(<M as Accepts<A>>::erase(Erase::Slot));
+        let n = self.materialize(Kind::Input, data, Box::new([]), &Ops::<M>::DEFAULT, &[], 0);
+        let t = self.token(n);
+        (Stream::from_token(t), Input::from_token(t))
     }
 
     /// An input that may be sent more than once in a transaction; `f`
@@ -29,9 +97,14 @@ impl<M: Mode> Build<M> {
     where
         A: 'static,
         F: Fn(A, A) -> A + 'static,
-        M: Accepts<F>,
+        M: Accepts<A> + Accepts<F>,
     {
-        todo!()
+        let data = Data::Slot(<M as Accepts<A>>::erase(Erase::Slot));
+        let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<F>>::erase(Erase::Value(f))]);
+        let ops = &<CoalescingInput<A, F> as NodeOps<M>>::OPS;
+        let n = self.materialize(Kind::Input, data, parts, ops, &[], 0);
+        let t = self.token(n);
+        (Stream::from_token(t), Input::from_token(t))
     }
 
     /// A cell driven from I/O code: a hold over an input.
@@ -59,12 +132,32 @@ impl<M: Mode> Build<M> {
         A: Trace + 'static,
         M: Accepts<A>,
     {
-        todo!()
+        let data = Data::Cell(<M as Accepts<A>>::erase(Erase::Cell(value)));
+        let n = self.materialize(
+            Kind::Constant,
+            data,
+            Box::new([]),
+            &Ops::<M>::DEFAULT,
+            &[],
+            0,
+        );
+        Cell::from_token(self.token(n))
     }
 
     /// A stream that never fires.
+    ///
+    /// Its node stores nothing: a reader checks the stamp before the slot,
+    /// and this node's stamp never matches.
     pub fn never<A: 'static>(&mut self) -> Stream<A> {
-        todo!()
+        let n = self.materialize(
+            Kind::Never,
+            Data::Empty,
+            Box::new([]),
+            &Ops::<M>::DEFAULT,
+            &[],
+            0,
+        );
+        Stream::from_token(self.token(n))
     }
 
     /// Declares a cell loop: a forward token usable anywhere, and the closer
