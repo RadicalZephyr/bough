@@ -1,26 +1,55 @@
 //! The I/O edge's engine side (RFD 6, RFD 7): the lock the edge's shared
-//! state lives behind, the input slots connected to the graph, and the
-//! waker the driver registered.
+//! state lives behind, the input slots connected to the graph, the inbox of
+//! remote units, and the waker the driver registered.
 //!
-//! A slot is shared between the code that writes it, an interrupt handler
-//! or another thread, and the driver, so its state needs a lock. With no
-//! `unsafe` in the crate there is no lock to build from atomics: `core` and
-//! `alloc` have no interior mutability that is `Sync`, and a spin lock
-//! would need an `UnsafeCell` and would deadlock against an interrupt that
-//! preempts the driver while it holds it. So the lock is the standard
-//! mutex under `std`, a critical section with the `critical-section`
-//! feature, and nothing otherwise: a `no_std` build without that feature
-//! has no input slots.
+//! A slot and the inbox are shared between the code that writes them, an
+//! interrupt handler or another thread, and the driver, so their state
+//! needs a lock. With no `unsafe` in the crate there is no lock to build
+//! from atomics: `core` and `alloc` have no interior mutability that is
+//! `Sync`, and a spin lock would need an `UnsafeCell` and would deadlock
+//! against an interrupt that preempts the driver while it holds it. So the
+//! lock is the standard mutex under `std`, a critical section with the
+//! `critical-section` feature, and nothing otherwise: a `no_std` build
+//! without that feature has no input slots and no `Remote`.
 
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use alloc::boxed::Box;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use alloc::collections::VecDeque;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use alloc::sync::Arc;
+#[cfg(any(feature = "std", feature = "critical-section"))]
+use alloc::vec::Vec;
 use core::any::Any;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use core::task::Waker;
 
-#[cfg(any(feature = "std", feature = "critical-section"))]
-use alloc::vec::Vec;
-
 use super::DoubleSend;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use super::{TokenFault, clear_slot_of};
 use crate::build::Build;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::graph::RemoteTransaction;
 use crate::mode::Mode;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::token::Token;
@@ -103,28 +132,212 @@ pub(crate) struct Edge {
     /// The connected slots, in connection order.
     #[cfg(any(feature = "std", feature = "critical-section"))]
     pub(crate) slots: Vec<Connection>,
+    /// The queue every `Remote` of this graph shares. Made with the graph,
+    /// so `Graph::remote` takes `&self`.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    pub(crate) inbox: Arc<Inbox>,
 }
 
 impl Edge {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(graph: u32) -> Self {
+        let _ = graph;
         Edge {
             #[cfg(any(feature = "std", feature = "critical-section"))]
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
             slots: Vec::new(),
+            #[cfg(all(
+                target_has_atomic = "ptr",
+                any(feature = "std", feature = "critical-section")
+            ))]
+            inbox: Arc::new(Inbox::new(graph)),
         }
     }
 }
 
 /// A graph that goes away, dropped or unwound out of a panicking build,
 /// disconnects its slots, so that each can be connected again and no event
-/// written for this graph reaches another.
+/// written for this graph reaches another, and closes its inbox, so that
+/// no remote keeps filling a queue that no pump will drain.
 impl Drop for Edge {
     fn drop(&mut self) {
         #[cfg(any(feature = "std", feature = "critical-section"))]
         for connection in self.slots.drain(..) {
             connection.slot.disconnect();
         }
+        #[cfg(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        ))]
+        self.inbox.close();
+    }
+}
+
+/// What the inbox queues: one remote send, or one remote transaction's
+/// closure, each run by the driver as one transaction. A remote send is a
+/// closure of one send, so the driver has one path for both.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) type Unit = Box<dyn FnOnce(&mut RemoteTransaction<'_>) + Send>;
+
+/// The queue of units every `Remote` of one graph shares (RFD 6).
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct Inbox {
+    /// The graph's id, for a remote send's foreign-token check.
+    pub(crate) graph: u32,
+    /// The graph's poison, mirrored by the first entry that finds it, so
+    /// that remote sends fail from then on.
+    poisoned: AtomicBool,
+    state: Lock<Queue>,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+struct Queue {
+    /// Units in arrival order: the total order the semantics need.
+    units: VecDeque<Unit>,
+    /// What a push wakes.
+    waker: Option<Waker>,
+    /// The graph was dropped: nothing will drain the queue.
+    closed: bool,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl Inbox {
+    fn new(graph: u32) -> Self {
+        Inbox {
+            graph,
+            poisoned: AtomicBool::new(false),
+            state: Lock::new(Queue {
+                units: VecDeque::new(),
+                waker: None,
+                closed: false,
+            }),
+        }
+    }
+
+    /// Queues a unit and wakes the driver, after the lock is released.
+    /// Gives the unit back if the graph was dropped, to be dropped outside
+    /// the lock, since its captures' `Drop` is user code.
+    pub(crate) fn push(&self, unit: Unit) -> Result<(), Unit> {
+        let waker = self.state.with(|q| {
+            if q.closed {
+                return Err(unit);
+            }
+            q.units.push_back(unit);
+            Ok(q.waker.clone())
+        })?;
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// The oldest unit. The lock is released before it runs, so a
+    /// transaction never runs under it.
+    pub(crate) fn pop(&self) -> Option<Unit> {
+        self.state.with(|q| q.units.pop_front())
+    }
+
+    /// The units queued now.
+    pub(crate) fn len(&self) -> usize {
+        self.state.with(|q| q.units.len())
+    }
+
+    /// Replaces the waker a push wakes.
+    pub(crate) fn set_waker(&self, waker: Waker) {
+        let old = self.state.with(|q| q.waker.replace(waker));
+        drop(old);
+    }
+
+    /// The graph is gone: refuses every later push, and drops what is
+    /// queued and the waker outside the lock.
+    fn close(&self) {
+        let (units, waker) = self.state.with(|q| {
+            q.closed = true;
+            (core::mem::take(&mut q.units), q.waker.take())
+        });
+        drop((units, waker));
+    }
+
+    /// Mirrors the graph's poison.
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+}
+
+/// Why a send inside a unit failed, found by the driver at `pump`.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fault {
+    Stale,
+    ForeignGraph,
+    DoubleSend,
+}
+
+/// The build context as a unit's sends see it: with no mode, since a
+/// `Remote` has none, and with the event's type behind `dyn Any`.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) trait Start {
+    /// Starts `input` with the event in `event`, an `&mut Option<A>`, in
+    /// the transaction the driver opened for the unit.
+    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault>;
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M: Mode> Start for Build<M> {
+    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault> {
+        let i = self.lookup(input).map_err(|fault| match fault {
+            TokenFault::Foreign => Fault::ForeignGraph,
+            TokenFault::Stale => Fault::Stale,
+        })?;
+        let fire = self.store.ops[i as usize].fire;
+        fire(self, i, event).map_err(|DoubleSend| Fault::DoubleSend)
+    }
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M: Mode> Build<M> {
+    /// Drops a unit that failed after the driver opened its transaction:
+    /// empties the slots its sends filled and closes the transaction
+    /// without running it. Nothing ran, so there is nothing to undo, and
+    /// the graph is not poisoned; the serial goes unused.
+    pub(crate) fn cancel(&mut self) {
+        let Build { store, s, .. } = self;
+        for &n in &s.starts {
+            clear_slot_of(store, n);
+        }
+        s.starts.clear();
+        self.in_tx = false;
     }
 }
 

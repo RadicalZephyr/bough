@@ -53,23 +53,33 @@ pub enum TokenError {
 }
 
 /// Failure modes of [`Graph::try_pump`](crate::Graph::try_pump).
+///
+/// Whether an input is collected or coalesces is graph knowledge, so a
+/// send inside a queued unit, or a slot connected to an input since
+/// collected, can only fail when the driver pumps. The offending unit or
+/// slot is dropped whole and the error returned; the rest stay pending for
+/// the next pump. Where the target has no `Remote` only `Poisoned` and
+/// `Stale` can occur; the variants stay, so that a match is portable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PumpError {
     /// A previous transaction never finished: a panic escaped it.
     Poisoned,
     /// A queued unit sends to an input that was collected before the driver
-    /// pumped. Whether an input is collected is graph knowledge, so this is
-    /// only discoverable here. The offending unit is dropped and the rest
-    /// stay queued.
+    /// pumped, or a slot with a pending event is connected to one.
     Stale,
-    /// A queued unit sent twice to a non-coalescing input. Whether an input
-    /// coalesces is graph knowledge, so this is only discoverable here. The
-    /// offending unit is dropped and the rest stay queued.
+    /// A queued unit sent twice to a non-coalescing input.
     DoubleSend,
+    /// A remote transaction sent with a token from another graph. Its
+    /// closure runs on the driver, so this is found there; a single remote
+    /// send is checked when it is queued.
+    ForeignGraph,
 }
 
 /// Failure modes of [`Remote::try_send`](crate::Remote::try_send).
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteSendError {
     /// The token belongs to another graph.
@@ -80,11 +90,17 @@ pub enum RemoteSendError {
     /// The graph is poisoned; the inbox mirrors the bit, so no thread keeps
     /// filling an inbox that no pump will drain.
     Poisoned,
+    /// The graph was dropped, so nothing will drain the inbox and every
+    /// input is gone.
+    GraphDropped,
 }
 
 /// Failure modes of
 /// [`Remote::try_transaction`](crate::Remote::try_transaction).
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteTransactionError {
     /// Called on the driver thread while a transaction runs. Checked under
@@ -92,6 +108,8 @@ pub enum RemoteTransactionError {
     InsideTransaction,
     /// The graph is poisoned.
     Poisoned,
+    /// The graph was dropped.
+    GraphDropped,
 }
 
 macro_rules! display_error {
@@ -112,7 +130,13 @@ display_error!(
     "the token is stale, foreign, or the graph is poisoned"
 );
 display_error!(PumpError, "pump failed");
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 display_error!(RemoteSendError, "remote send failed");
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 display_error!(RemoteTransactionError, "remote transaction failed");

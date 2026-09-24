@@ -40,10 +40,12 @@
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Graph::pump) runs each pending slot as a transaction of its
-//! own, in connection order; a write wakes the waker the driver registered
-//! with [`set_waker`](Graph::set_waker). `Remote` still has `todo!()`
-//! bodies. The examples in the documentation that call only working
-//! operations run, the rest compile, and the guarantees the RFDs make are
+//! own, in connection order; a [`Remote`] queues a send, or a remote
+//! transaction's sends, as one unit from any thread, and `pump` then runs
+//! each unit as one transaction, in arrival order; a write or a remote
+//! send wakes the waker the driver registered with
+//! [`set_waker`](Graph::set_waker). No body is `todo!()` any more. The
+//! examples in the documentation run, and the guarantees the RFDs make are
 //! fixed by `compile_fail` doc tests.
 //!
 //! # Targets
@@ -54,10 +56,11 @@
 //! no pointer atomics, on a Cortex-M0, `Threaded`, `Remote` and the unit queue
 //! do not exist, and the path from an interrupt handler into the graph is an
 //! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
-//! a web build keeps `std` (RFD 7). A slot needs one of the two locks: with
-//! no `unsafe` in the crate there is none to build from atomics, so a
-//! `no_std` build without `critical-section` has no slots, and keeps
-//! [`pump`](Graph::pump) and [`set_waker`](Graph::set_waker).
+//! a web build keeps `std` (RFD 7). A slot and a remote's inbox need one of
+//! the two locks: with no `unsafe` in the crate there is none to build from
+//! atomics, so a `no_std` build without `critical-section` has neither
+//! slots nor `Remote`, and keeps [`pump`](Graph::pump) and
+//! [`set_waker`](Graph::set_waker).
 //!
 //! RFD 2's example: a click counter and its label, a listener that fires
 //! now and on every step, one send, and a transaction.
@@ -126,10 +129,16 @@ pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
 pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 pub use error::{RemoteSendError, RemoteTransactionError};
 pub use graph::{Anchor, CollectionPolicy, Graph, Listener, Transaction};
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
 pub use graph::{Remote, RemoteTransaction};
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]

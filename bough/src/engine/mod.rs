@@ -59,6 +59,11 @@ pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
 pub use sched::Statistics;
 pub(crate) use store::{Store, TokenFault};
+
+/// Empties node `n`'s slot through its own `clear_slot`.
+pub(crate) fn clear_slot_of<M: Mode>(store: &mut Store<M>, n: u32) {
+    (store.ops[n as usize].clear_slot)(&mut store.data[n as usize]);
+}
 pub(crate) use tx::DoubleSend;
 
 /// A transaction serial: one per instant, child instants included, so a

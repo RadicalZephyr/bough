@@ -53,19 +53,20 @@ pub struct Build<M: Mode = Local> {
     /// The transaction-in-progress flag, which is also the poison.
     pub(crate) in_tx: bool,
     pub(crate) s: Sched,
-    /// The I/O edge: connected slots and the driver's waker.
+    /// The I/O edge: connected slots, the inbox and the driver's waker.
     pub(crate) edge: Edge,
 }
 
 impl<M: Mode> Build<M> {
     pub(crate) fn new() -> Self {
+        let graph_id = next_graph_id();
         Build {
-            graph_id: next_graph_id(),
+            graph_id,
             store: Store::new(),
             tx: 0,
             in_tx: false,
             s: Sched::default(),
-            edge: Edge::new(),
+            edge: Edge::new(graph_id),
         }
     }
 
