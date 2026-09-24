@@ -1,10 +1,12 @@
 //! The transaction: begin, the sends, mark, evaluate, the new-node phase,
-//! commit, dispatch, finish (RFD 5).
+//! commit, dispatch, the child transactions, finish (RFD 5).
 //!
 //! The poison is the transaction-in-progress flag itself: `begin` sets it
-//! and only `finish` clears it, so any panic in between, in user code, in a
-//! check or in a listener, leaves it set, and every later entry reports
-//! `Poisoned`. There is no drop guard, which is what the abort targets need.
+//! and only `finish` clears it, after the last child transaction, so any
+//! panic in between, in user code, in a check or in a listener, in the
+//! instant or in any of its children, leaves it set, and every later entry
+//! reports `Poisoned`. There is no drop guard, which is what the abort
+//! targets need.
 
 use core::mem;
 
@@ -104,9 +106,10 @@ impl<M: Mode> Build<M> {
         self.begin_instant();
     }
 
-    /// A fresh serial and empty buffers. Nothing in the arena is cleared:
-    /// stale stamps and slots are ignored by stamp.
-    fn begin_instant(&mut self) {
+    /// A fresh serial and empty buffers, for a transaction or a child
+    /// transaction. Nothing in the arena is cleared: stale stamps and slots
+    /// are ignored by stamp.
+    pub(super) fn begin_instant(&mut self) {
         self.tx += 1;
         let s = &mut self.s;
         s.starts.clear();
@@ -118,7 +121,6 @@ impl<M: Mode> Build<M> {
         s.dispatch.clear();
         s.cursor = 0;
         s.order_done = false;
-        count!(s, transactions);
     }
 
     /// An input, or a split output, starts the instant with an event.
@@ -150,15 +152,22 @@ impl<M: Mode> Build<M> {
         Ok(())
     }
 
-    /// Everything after the sends; clears the poison last.
+    /// Everything after the sends: the instant, then its child
+    /// transactions, depth first, each a whole instant with its own commit
+    /// and listeners. Clears the poison last, so `send` returns after the
+    /// last child and a sample then reads what that child committed.
     pub(crate) fn finish(&mut self) {
         self.instant();
-        // Stage 4 runs the child transactions here, depth first, before the
-        // flag is cleared.
+        if self.s.levels.first().is_some_and(|l| !l.is_empty()) {
+            self.children();
+        }
         self.in_tx = false;
     }
 
-    fn instant(&mut self) {
+    /// The phases of one instant, a transaction or a child transaction,
+    /// after its started nodes fired.
+    pub(super) fn instant(&mut self) {
+        count!(self.s, transactions);
         self.mark();
         self.evaluate();
         self.new_nodes();

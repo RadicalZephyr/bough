@@ -72,7 +72,9 @@ impl Graph<Local> {
     /// whatever it returns is the edge of the graph and its permanent root
     /// set, which is why `R: Trace`.
     ///
-    /// The build closure runs as transaction zero.
+    /// The build closure runs as transaction zero. Its child transactions,
+    /// which a [`split`](crate::Source::split) that fires in it starts, run
+    /// before `build` returns.
     pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Graph<Local>, R) {
         build_graph(f)
     }
@@ -143,8 +145,10 @@ impl<M: Mode> Graph<M> {
         })
     }
 
-    /// Sends one value in a transaction of its own, then runs its child
-    /// transactions and its listeners before returning.
+    /// Sends one value in a transaction of its own. Returns after the
+    /// transaction's listeners have run, and after its child transactions,
+    /// which a [`split`](crate::Source::split) that fires starts, have run
+    /// with theirs.
     ///
     /// Panics on a foreign token or a poisoned graph. Sending to a collected
     /// input is unobservable by the semantics: a panic in debug builds and a
@@ -190,9 +194,10 @@ impl<M: Mode> Graph<M> {
     /// Several sends in one instant.
     ///
     /// The sends are simultaneous: nothing runs until `f` returns, so their
-    /// order inside `f` does not matter. A panic inside `f`, including one
-    /// from [`Transaction::send`], escapes the transaction and poisons the
-    /// graph.
+    /// order inside `f` does not matter. As with [`send`](Graph::send), the
+    /// transaction's listeners and its child transactions run before it
+    /// returns. A panic inside `f`, including one from
+    /// [`Transaction::send`], escapes the transaction and poisons the graph.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
         self.build.begin();
@@ -412,10 +417,12 @@ impl<M: Mode> Graph<M> {
     /// The number of live nodes: how the no-leak requirement is asserted.
     ///
     /// Every materializer creates one node, however long its chain;
-    /// `input_cell` creates two, the input and the hold over it. A cell or
-    /// state loop's forward is a node of its own besides its definition; a
-    /// stream loop's forward is the one node its definition's chain is
-    /// fused into.
+    /// `input_cell` creates two, the input and the hold over it, and so
+    /// does [`split`](crate::Source::split): the node that takes each event,
+    /// and the one that emits its elements in the child transactions. A
+    /// cell or state loop's forward is a node of its own besides its
+    /// definition; a stream loop's forward is the one node its definition's
+    /// chain is fused into.
     pub fn live_nodes(&self) -> usize {
         self.build.store.live
     }

@@ -33,6 +33,7 @@ macro_rules! count {
     };
 }
 
+mod children;
 mod loops;
 pub(crate) mod nodes;
 mod pull;
@@ -72,8 +73,9 @@ pub(crate) const START: u32 = u32::MAX;
 
 /// What a node is, which decides how the evaluation loop, `value`,
 /// `prepare`, `post` and commit treat it. Stage 1 creates the first six,
-/// stage 2 the next two and stage 3 `Loop`; the rest are here so that the
-/// evaluation loop and the data plane need no rewrite later.
+/// stage 2 the next two, stage 3 `Loop` and stage 4 the split pair; the
+/// switches are here so that the evaluation loop and the data plane need no
+/// rewrite later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Index 0.
@@ -98,10 +100,11 @@ pub(crate) enum Kind {
     /// its definition, which it settles after like a read-through cell and
     /// reads through to.
     Loop,
-    /// The capture side of `split` and `defer`: takes the event at t.
+    /// The capture side of `split`: takes the event at t and keeps it for
+    /// the child scheduler. No dependents.
     SplitCapture,
-    /// The output side of `split` and `defer`: started by the child
-    /// scheduler.
+    /// The output side of `split`: no dependencies; started by the child
+    /// scheduler in each child instant, like an input by a send.
     SplitOutput,
     /// `switch_cell`: settled in order, relinked at commit.
     SwitchCell,
@@ -252,10 +255,11 @@ pub(crate) struct Ops<M: Mode> {
     /// A switch: the token inside the outer's value, before (`false`) or
     /// after (`true`) the instant.
     pub(crate) inner: fn(&Build<M>, u32, bool) -> Token,
-    /// A split capture: starts its output with the next item of its top
-    /// iterator.
+    /// A split capture: starts its output with the next element of its top
+    /// entry, and says whether there was one.
     pub(crate) emit_child: fn(&mut [M::Carrier], &mut Build<M>, u32) -> bool,
-    /// A split capture: the frame that pushed its top iterator is finished.
+    /// A split capture: the level that pushed its top entry is done, so it
+    /// pops it.
     pub(crate) end_children: fn(&mut [M::Carrier]),
     /// A coalescing input: folds the new value, an `Option<A>` it takes,
     /// into the slot, first send on the left. The default leaves the value

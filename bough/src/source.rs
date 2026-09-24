@@ -52,6 +52,7 @@ use alloc::vec::Vec;
 use crate::Build;
 use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
+use crate::engine::nodes::split::SplitNode;
 use crate::engine::nodes::stream::{ChainNode, MergeNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
@@ -360,15 +361,85 @@ pub trait Source: Sized + 'static + sealed::Sealed {
         )
     }
 
-    /// Emits each element of an event in its own child transaction,
-    /// which runs after this one and before the next external one.
+    /// Emits the elements of each event in child transactions: element n
+    /// of an event at transaction t in the child transaction `t ++ [n]`.
+    ///
+    /// The child transactions of t run after t's listeners, one after
+    /// another, and before anything the I/O side sends next. Each is a
+    /// whole transaction: cells step in it, a snapshot in a later child
+    /// reads what an earlier one committed, and listeners run after each
+    /// child's commit. [`Graph::send`](crate::Graph::send) and
+    /// [`Graph::transaction`](crate::Graph::transaction) return after the
+    /// last of them, so a sample then reads what it committed. The build
+    /// closure's transaction has children too: a split of a
+    /// [`steps_with_current`](Cell::steps_with_current) built there runs
+    /// them before [`Graph::build`](crate::Graph::build) returns.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Graph, Source};
+    ///
+    /// let (mut graph, (words_in, letters, count)) = Graph::build(|b| {
+    ///     let (words, words_in) = b.input::<Vec<char>>();
+    ///     let letters = words.split(b).share(b);
+    ///     let count = letters.accumulate(b, 0u32, |_, n| n + 1);
+    ///     (words_in, letters, count)
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen(letters, move |c| log.borrow_mut().push(c)).keep();
+    /// graph.send(words_in, vec!['a', 'b', 'c']); // three child transactions
+    /// assert_eq!(*seen.borrow(), ['a', 'b', 'c']);
+    /// assert_eq!(*graph.sample(count), 3); // what the last child committed
+    /// ```
+    ///
+    /// Every split that fires at t shares t's children: child n carries
+    /// element n of each, so those elements are simultaneous, and a
+    /// [`merge`](Source::merge) of two splits combines them. An empty event
+    /// emits nothing. A split that fires inside a child, over another
+    /// split's elements or through a loop, has children of that child,
+    /// which run before the next child of t: depth first, which is time
+    /// order.
+    ///
+    /// The output does not depend on the input, since it fires in a later
+    /// instant, so a loop through a split is legal (the rule is
+    /// [`Build::cell_loop`]'s), and each round of it runs one level of
+    /// child transactions deeper.
+    ///
+    /// A split is two nodes: one takes the event, the other emits the
+    /// elements. The iterator waits in the first between child
+    /// transactions and each element in the second's slot, so the mode
+    /// must accept both types; a `Threaded` graph refuses `Rc` elements:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
+    /// });
+    /// ```
     fn split<M>(self, build: &mut Build<M>) -> Stream<<Self::Event as IntoIterator>::Item>
     where
-        M: Mode + Accepts<Self>,
+        M: Mode
+            + Accepts<Self>
+            + Accepts<<Self::Event as IntoIterator>::IntoIter>
+            + Accepts<<Self::Event as IntoIterator>::Item>,
         Self::Event: IntoIterator + 'static,
         <Self::Event as IntoIterator>::Item: 'static,
     {
-        todo!()
+        let (dependency, cells) = build.chain_reach(&self);
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<<Self::Event as IntoIterator>::IntoIter>>::erase(Erase::Stack),
+        ]);
+        let slot = <M as Accepts<<Self::Event as IntoIterator>::Item>>::erase(Erase::Slot);
+        let ops = &<SplitNode<Self> as NodeOps<M>>::OPS;
+        let output = build.capture_pair(dependency, cells, parts, ops, slot);
+        Stream::from_token(build.token(output))
     }
 
     /// Emits each event in a child transaction of its own.

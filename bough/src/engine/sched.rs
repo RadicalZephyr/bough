@@ -28,12 +28,13 @@ pub(crate) struct Sched {
     pub(crate) relinks: Vec<u32>,
     /// Nodes with listeners that fired, in evaluation order.
     pub(crate) dispatch: Vec<u32>,
-    /// `levels[d]`: the split captures that fired in the instant at child
-    /// depth `d` (stage 4).
+    /// `levels[d]`: the split captures that fired in the running instant
+    /// at child depth `d`, or in the one whose children are running there.
+    /// The child scheduler's stack: the levels in progress are always 0 to
+    /// the innermost.
     pub(crate) levels: Vec<Vec<u32>>,
-    /// The child scheduler's explicit stack of depths (stage 4).
-    pub(crate) frames: Vec<usize>,
-    /// The child depth of the running instant; 0 for a top-level one.
+    /// The child depth of the running instant: 0 for a transaction, d + 1
+    /// for a child of an instant at depth d.
     pub(crate) depth: usize,
     /// The path checks' stack (stages 3 and 5).
     pub(crate) search: Vec<(u32, u32)>,
