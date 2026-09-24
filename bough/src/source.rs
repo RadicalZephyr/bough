@@ -245,7 +245,7 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     ///
     /// let (_graph, _) = Graph::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
-    ///     let _shared = numbers.map(Rc::new).node(b); // error: Rc is not Send
+    ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
     /// });
     /// ```
     fn node<M>(self, build: &mut Build<M>) -> Stream<Self::Event>

@@ -149,3 +149,62 @@ fn a_seed_reproduces_its_order() {
     assert_eq!(run(Some(7)), run(Some(7)));
     assert_eq!(run(None), run(None));
 }
+
+#[test]
+fn a_merge_of_simultaneous_sends_calls_its_function_once_under_every_seed() {
+    for seed in [None, Some(0), Some(1), Some(2), Some(3), Some(99)] {
+        let calls = Rc::new(std::cell::Cell::new(0u32));
+        let counter = calls.clone();
+        let (mut graph, (left_in, right_in, merged)) = Graph::build(move |b| {
+            let (left, left_in) = b.input::<u32>();
+            let (right, right_in) = b.input::<u32>();
+            let left = left.share(b);
+            let merged = left
+                .map(|l| l + 1)
+                .merge(b, right, move |l, r| {
+                    counter.set(counter.get() + 1);
+                    l * 100 + r
+                })
+                .merge(b, left.filter(|l| l % 2 == 0), |m, l| m * 10 + l)
+                .hold(b, 0u32);
+            (left_in, right_in, merged)
+        });
+        graph.set_shuffle_seed(seed);
+        graph.transaction(|tx| {
+            tx.send(right_in, 7);
+            tx.send(left_in, 2);
+        });
+        assert_eq!(
+            *graph.sample(merged),
+            (3 * 100 + 7) * 10 + 2,
+            "seed {seed:?}"
+        );
+        assert_eq!(calls.get(), 1, "seed {seed:?}");
+    }
+}
+
+#[test]
+fn snapshots_and_gates_read_the_value_before_the_instant_under_every_seed() {
+    for seed in [None, Some(0), Some(5), Some(17), Some(1 << 40)] {
+        let (mut graph, (numbers_in, limit_in, open_in, clipped, gated)) = Graph::build(|b| {
+            let (numbers, numbers_in) = b.input::<u32>();
+            let numbers = numbers.share(b);
+            let (limit, limit_in) = b.input_cell(10u32);
+            let (open, open_in) = b.input_cell(false);
+            let clipped = numbers.snapshot(limit, |n, l| n.min(*l)).hold(b, 0u32);
+            let gated = numbers.gate(open).hold(b, 0u32);
+            (numbers_in, limit_in, open_in, clipped, gated)
+        });
+        graph.set_shuffle_seed(seed);
+        graph.transaction(|tx| {
+            tx.send(open_in, true);
+            tx.send(numbers_in, 50);
+            tx.send(limit_in, 20);
+        });
+        assert_eq!(*graph.sample(clipped), 10, "seed {seed:?}");
+        assert_eq!(*graph.sample(gated), 0, "seed {seed:?}");
+        graph.send(numbers_in, 50);
+        assert_eq!(*graph.sample(clipped), 20, "seed {seed:?}");
+        assert_eq!(*graph.sample(gated), 50, "seed {seed:?}");
+    }
+}
