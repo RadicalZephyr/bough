@@ -1,12 +1,14 @@
 //! A [`Program`] built with the Bough API, and its schedule run on it.
 //!
-//! [`run`] checks that a program is in the subset stages 1 and 2 of the
+//! [`run`] checks that a program is in the subset stages 1 to 4 of the
 //! engine implement, builds it in one build closure the way a user would
 //! write it, registers listeners on the observed nodes, and runs the
 //! schedule: one `graph.transaction` per external transaction, with the
 //! sends in the schedule's order unless [`RunOptions`] permutes them. It
-//! records what each listener saw in each transaction, and what
-//! `graph.sample` gives each observed cell after it.
+//! records what each listener saw in each transaction, child transactions
+//! included, the order of every listener call across the observed nodes,
+//! and what `graph.sample` gives each observed cell after the transaction
+//! and its children.
 //!
 //! # The subset
 //!
@@ -15,11 +17,39 @@
 //! `Filter`, `FilterMap`, `MapTo`, `Snapshot`, `Gate` and `Once`; the stream
 //! materializers `Node`, `Share`, `Merge`, `OrElse`, `Scan`, `Steps` and
 //! `StepsWithCurrent`; the cells `Hold`, `Accumulate`, `AccumulateMut`,
-//! `MapCell`, `ToBoolean` and `Lift`. An expression may `Sample` a cell
-//! defined before it, which reads the cell in the build closure, before
-//! transaction zero, as the oracle's top level does. Anything else, and
+//! `MapCell`, `ToBoolean` and `Lift` (stages 1 and 2). The loops `CellLoop`
+//! and `StreamLoop` of integers or booleans, and `Close` (stage 3). `Split`
+//! and `Defer`, and `MapList`, the one node that carries lists, which only a
+//! `Split` may read (stage 4). An expression may `Sample` a cell defined
+//! before it, which reads the cell in the build closure, before transaction
+//! zero, as the oracle's top level does; the engine has no value for a
+//! loop's forward before its `Close`, so a `Sample` may not read one that is
+//! still open, directly or through a read-through cell. Anything else, and
 //! anything the oracle would refuse, is a [`BuildError`] naming the node,
 //! from [`check`], before any node is built.
+//!
+//! [`check`] does not refuse a loop the engine refuses at its close, one
+//! whose definition depends on its own forward in the same instant: that
+//! refusal is the engine's to make, and a test holds it to it.
+//!
+//! # Loops
+//!
+//! A `CellLoop` is declared with `b.cell_loop()` where the definition its
+//! `Close` names is a `Cell`, and with `b.state_loop()` where it is a
+//! `State`: an in-place accumulator, or a read-through cell over one. The
+//! definition decides the forward's kind, so [`check`] looks ahead at each
+//! loop's `Close`, and the loop's own node type is a `State` exactly when
+//! its definition's is. A `StreamLoop` is `b.stream_loop()`, and its close
+//! fuses the definition's chain into the forward's node, as a user's close
+//! does. A `Close` makes no node.
+//!
+//! # Child transactions
+//!
+//! A `Defer` fuses the chain it consumes into its capture. A `MapList` is a
+//! list-producing map, and it is not an adapter: a tenth adapter kind would
+//! multiply the chain types (finding F36), so the builder materializes it
+//! with `node` at once, fusing the chain before it, and the `Split` that
+//! reads it takes that one stream of lists.
 //!
 //! Expressions evaluate as the protocol says ([`evaluate`]): 64-bit
 //! wrapping arithmetic, `Modulo` as `rem_euclid`, a boolean read as 0 or 1,
@@ -80,8 +110,8 @@ use std::mem;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
-    Build, Cell, CellRef, Graph, Lift, Listener, Local, Node, Shared, Source, State, Stream, Trace,
-    Tracer, Transaction,
+    Build, Cell, CellLoop, CellRef, Graph, Lift, Listener, Local, Node, Shared, Source, State,
+    StateLoop, Stream, StreamLoop, Trace, Tracer, Transaction,
 };
 
 use crate::program::{Definition, Expression, Input, Program, Reference, Type, Value};
@@ -106,6 +136,8 @@ pub type CombineFn = Box<dyn Fn(i64, i64) -> i64 + Send>;
 pub type FoldFn<A> = Box<dyn Fn(A, A) -> A + Send>;
 /// `map_cell`'s function.
 pub type CellFn<A, B> = Box<dyn Fn(&A) -> B + Send>;
+/// A `MapList`'s function: an event to a list, which a split reads.
+pub type ListFn = Box<dyn Fn(i64) -> Vec<i64> + Send>;
 /// A stream listener.
 pub type StreamSink = Box<dyn FnMut(i64) + Send>;
 /// A cell listener.
@@ -171,6 +203,14 @@ pub trait EngineMode: bough::Mode {
     ) -> Stream<i64>;
     /// `left.or_else(b, right)`.
     fn or_else<S: Chain, T: Chain>(b: &mut Build<Self>, left: S, right: T) -> Stream<i64>;
+    /// `chain.defer(b)`.
+    fn defer<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64>;
+    /// `chain.map(f).node(b)`: a stream of lists, for a split to read.
+    fn map_list<S: Chain>(b: &mut Build<Self>, chain: S, f: ListFn) -> Stream<Vec<i64>>;
+    /// `lists.split(b)`.
+    fn split(b: &mut Build<Self>, lists: Stream<Vec<i64>>) -> Stream<i64>;
+    /// `closer.close(b, chain)`: the chain fused into the forward's node.
+    fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>);
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut Build<Self>,
@@ -300,6 +340,18 @@ macro_rules! engine_mode {
             }
             fn or_else<S: Chain, T: Chain>(b: &mut Build<Self>, left: S, right: T) -> Stream<i64> {
                 left.or_else(b, right)
+            }
+            fn defer<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64> {
+                chain.defer(b)
+            }
+            fn map_list<S: Chain>(b: &mut Build<Self>, chain: S, f: ListFn) -> Stream<Vec<i64>> {
+                chain.map(f).node(b)
+            }
+            fn split(b: &mut Build<Self>, lists: Stream<Vec<i64>>) -> Stream<i64> {
+                lists.split(b)
+            }
+            fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>) {
+                closer.close(b, chain)
             }
             fn map_cell<A: 'static, B: Send + 'static>(
                 b: &mut Build<Self>,
@@ -440,6 +492,14 @@ impl Scalar {
             Value::List(_) => None,
         }
     }
+
+    /// The scalar's plural, for messages: "integers" or "booleans".
+    pub fn plural(self) -> &'static str {
+        match self {
+            Scalar::Integer => "integers",
+            Scalar::Boolean => "booleans",
+        }
+    }
 }
 
 /// What a node of the subset makes.
@@ -447,13 +507,36 @@ impl Scalar {
 pub enum NodeType {
     /// A stream.
     Stream(Scalar),
+    /// A stream of lists of integers: a `MapList`, which only a `Split`
+    /// reads.
+    Lists,
     /// A cell; `state` when it is a `State`, which has no stream view.
     Cell {
         /// What it holds.
         value: Scalar,
-        /// An in-place accumulator, or a read-through cell over one.
+        /// An in-place accumulator, a read-through cell over one, or a
+        /// loop's forward whose definition is one of those.
         state: bool,
     },
+    /// A `Close`, which makes no node.
+    Closed,
+}
+
+impl fmt::Display for NodeType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeType::Stream(scalar) => write!(formatter, "a stream of {}", scalar.plural()),
+            NodeType::Lists => formatter.write_str("a stream of lists"),
+            NodeType::Cell {
+                value,
+                state: false,
+            } => write!(formatter, "a cell of {}", value.plural()),
+            NodeType::Cell { value, state: true } => {
+                write!(formatter, "a State of {}", value.plural())
+            }
+            NodeType::Closed => formatter.write_str("a Close, which makes no node"),
+        }
+    }
 }
 
 /// A program the builder cannot build: outside the subset, or malformed.
@@ -514,8 +597,10 @@ fn earlier(reference: &Reference, index: usize) -> Result<usize, String> {
     }
 }
 
-/// The streams a definition consumes: what linearity counts.
-fn consumed_streams(definition: &Definition) -> Vec<Reference> {
+/// The streams a definition consumes: what linearity counts. A `Close`
+/// names a stream for a stream loop and a cell for a cell loop, and
+/// [`check_linearity`] counts only the streams.
+pub(crate) fn consumed_streams(definition: &Definition) -> Vec<Reference> {
     match definition {
         Definition::Map { source, .. }
         | Definition::Filter { source, .. }
@@ -526,43 +611,126 @@ fn consumed_streams(definition: &Definition) -> Vec<Reference> {
         | Definition::Scan { source, .. }
         | Definition::Hold { source, .. }
         | Definition::Accumulate { source, .. }
-        | Definition::AccumulateMut { source, .. } => vec![*source],
-        Definition::Once(source) | Definition::Node(source) | Definition::Share(source) => {
-            vec![*source]
-        }
+        | Definition::AccumulateMut { source, .. }
+        | Definition::MapList { source, .. } => vec![*source],
+        Definition::Once(source)
+        | Definition::Node(source)
+        | Definition::Share(source)
+        | Definition::Split(source)
+        | Definition::Defer(source) => vec![*source],
         Definition::Merge { left, right, .. } | Definition::OrElse { left, right } => {
             vec![*left, *right]
         }
+        Definition::Close { definition, .. } => vec![*definition],
         _ => Vec::new(),
     }
 }
 
 /// Checks that a program is in the subset and well formed, and returns what
 /// each node makes. Every error names the node at fault where there is one.
+///
+/// A cell loop is a `State` when the definition its `Close` names is one,
+/// and the `Close` comes later: the definitions are checked with every
+/// loop a `Cell`, then again with each loop whose definition was a `State`
+/// made a `State`, until no loop changes. A loop only ever changes from a
+/// `Cell` to a `State`, so this ends after at most one pass per loop.
 pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
     let mut inputs = Vec::with_capacity(program.inputs.len());
     for (index, input) in program.inputs.iter().enumerate() {
         inputs.push(check_input(index, input)?);
     }
-    let mut types: Vec<NodeType> = Vec::with_capacity(program.definitions.len());
-    for (index, definition) in program.definitions.iter().enumerate() {
-        let made = check_definition(&inputs, &types, index, definition)
-            .map_err(|message| BuildError::node(index, definition, message))?;
-        types.push(made);
-    }
+    let mut states = vec![false; program.definitions.len()];
+    let types = loop {
+        let types = check_definitions(program, &inputs, &states)?;
+        let mut changed = false;
+        for definition in &program.definitions {
+            if let Definition::Close {
+                forward,
+                definition: Reference::TopLevel(node),
+            } = definition
+            {
+                if matches!(types[*node], NodeType::Cell { state: true, .. }) && !states[*forward] {
+                    states[*forward] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break types;
+        }
+    };
     if program.observe.is_empty() {
         return Err(BuildError::program("observe: the program observes no node"));
     }
     for &node in &program.observe {
-        if node >= types.len() {
-            return Err(BuildError::program(format!(
-                "observe: there is no node {node}"
-            )));
+        match types.get(node) {
+            None => {
+                return Err(BuildError::program(format!(
+                    "observe: there is no node {node}"
+                )));
+            }
+            Some(made @ (NodeType::Lists | NodeType::Closed)) => {
+                return Err(BuildError::program(format!(
+                    "observe: node {node} is {made}; the comparison observes streams and cells \
+                     of integers and booleans"
+                )));
+            }
+            Some(_) => {}
         }
     }
     check_linearity(program, &types)?;
     check_schedule(program, &inputs)?;
     Ok(types)
+}
+
+/// Checks every definition in order, the cell loops `states` marks taken
+/// as `State`s, and then that every loop is closed.
+fn check_definitions(
+    program: &Program,
+    inputs: &[Scalar],
+    states: &[bool],
+) -> Result<Vec<NodeType>, BuildError> {
+    let mut types: Vec<NodeType> = Vec::with_capacity(program.definitions.len());
+    let mut closes: Vec<Option<usize>> = vec![None; program.definitions.len()];
+    for (index, definition) in program.definitions.iter().enumerate() {
+        let scope = Scope {
+            program,
+            inputs,
+            states,
+            types: &types,
+            closes: &closes,
+            index,
+        };
+        let made = scope
+            .definition(definition)
+            .map_err(|message| BuildError::node(index, definition, message))?;
+        if let Definition::Close {
+            forward,
+            definition: Reference::TopLevel(node),
+        } = definition
+        {
+            closes[*forward] = Some(*node);
+        }
+        types.push(made);
+    }
+    for (index, definition) in program.definitions.iter().enumerate() {
+        if is_loop(definition) && closes[index].is_none() {
+            return Err(BuildError::node(
+                index,
+                definition,
+                "the loop is never closed",
+            ));
+        }
+    }
+    Ok(types)
+}
+
+/// A `CellLoop` or a `StreamLoop`.
+pub(crate) fn is_loop(definition: &Definition) -> bool {
+    matches!(
+        definition,
+        Definition::CellLoop(_) | Definition::StreamLoop(_)
+    )
 }
 
 fn check_input(index: usize, input: &Input) -> Result<Scalar, BuildError> {
@@ -579,14 +747,354 @@ fn check_input(index: usize, input: &Input) -> Result<Scalar, BuildError> {
     Ok(scalar)
 }
 
-/// Checks an expression taking `arguments` arguments. `cells` are the nodes
-/// a `Sample` may read, `None` where it may read none.
+/// Where a definition is checked: the program, what the nodes before it
+/// make, and the loops closed before it.
+struct Scope<'a> {
+    program: &'a Program,
+    inputs: &'a [Scalar],
+    /// The cell loops taken as `State`s.
+    states: &'a [bool],
+    /// What each node before this one makes.
+    types: &'a [NodeType],
+    /// For each loop closed before this node, the node its `Close` names.
+    closes: &'a [Option<usize>],
+    /// This node.
+    index: usize,
+}
+
+impl Scope<'_> {
+    fn node(&self, reference: &Reference) -> Result<usize, String> {
+        earlier(reference, self.index)
+    }
+
+    fn input(&self, k: usize) -> Result<Scalar, String> {
+        self.inputs
+            .get(k)
+            .copied()
+            .ok_or_else(|| format!("there is no input {k}"))
+    }
+
+    fn stream(&self, reference: &Reference) -> Result<Scalar, String> {
+        let node = self.node(reference)?;
+        match self.types[node] {
+            NodeType::Stream(scalar) => Ok(scalar),
+            NodeType::Cell { .. } => Err(format!("{reference} is a cell, not a stream")),
+            NodeType::Lists => Err(format!(
+                "{reference} is a stream of lists, which only a Split reads"
+            )),
+            NodeType::Closed => Err(format!("{reference} is a Close, which makes no node")),
+        }
+    }
+
+    fn cell(&self, reference: &Reference) -> Result<(Scalar, bool), String> {
+        let node = self.node(reference)?;
+        match self.types[node] {
+            NodeType::Cell { value, state } => Ok((value, state)),
+            NodeType::Stream(_) | NodeType::Lists => {
+                Err(format!("{reference} is a stream, not a cell"))
+            }
+            NodeType::Closed => Err(format!("{reference} is a Close, which makes no node")),
+        }
+    }
+
+    fn expression(&self, expression: &Expression, arguments: usize) -> Result<(), String> {
+        check_expression(expression, arguments, Some(self))
+    }
+
+    /// Whether the build closure can read cell `node` here. A loop's
+    /// forward has no value before its `Close`, so it can be read once
+    /// closed, if its definition can be; a read-through cell can be read if
+    /// every cell it reads can be. `depth` ends the walk on a loop closed
+    /// through itself, which the engine refuses at its close.
+    fn readable(&self, node: usize, depth: usize) -> Result<(), String> {
+        if depth > self.types.len() {
+            return Err(format!(
+                "a Sample reads N {node} through a loop closed with itself"
+            ));
+        }
+        let read = |reference: &Reference| match reference {
+            Reference::TopLevel(cell) => self.readable(*cell, depth + 1),
+            Reference::Local(_) => Ok(()),
+        };
+        match &self.program.definitions[node] {
+            Definition::CellLoop(_) => match self.closes[node] {
+                Some(definition) => self.readable(definition, depth + 1),
+                None => Err(format!(
+                    "a Sample reads N {node}, a loop's forward that is not closed here; \
+                     the engine has no value for it before its Close"
+                )),
+            },
+            Definition::MapCell { cell, .. } | Definition::ToBoolean(cell) => read(cell),
+            Definition::Lift { cells, .. } => cells.iter().try_for_each(read),
+            _ => Ok(()),
+        }
+    }
+
+    fn definition(&self, definition: &Definition) -> Result<NodeType, String> {
+        let made = match definition {
+            Definition::Input(k) => NodeType::Stream(self.input(*k)?),
+            Definition::InputCell { input: k, initial } => {
+                let value = self.input(*k)?;
+                self.expression(initial, 0)?;
+                NodeType::Cell {
+                    value,
+                    state: false,
+                }
+            }
+            Definition::Never(event_type) => {
+                NodeType::Stream(Scalar::of(event_type).ok_or_else(|| {
+                    format!(
+                        "a stream of {event_type} is outside the subset, which has integers \
+                         and booleans"
+                    )
+                })?)
+            }
+            Definition::Constant(value) => {
+                self.expression(value, 0)?;
+                NodeType::Cell {
+                    value: Scalar::Integer,
+                    state: false,
+                }
+            }
+            Definition::Map { function, source } => {
+                self.stream(source)?;
+                self.expression(function, 1)?;
+                NodeType::Stream(Scalar::Integer)
+            }
+            Definition::Filter { predicate, source } => {
+                let scalar = self.stream(source)?;
+                self.expression(predicate, 1)?;
+                NodeType::Stream(scalar)
+            }
+            Definition::FilterMap {
+                keep,
+                function,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(keep, 1)?;
+                self.expression(function, 1)?;
+                NodeType::Stream(Scalar::Integer)
+            }
+            Definition::MapTo { value, source } => {
+                self.stream(source)?;
+                NodeType::Stream(Scalar::of_value(value).ok_or_else(|| {
+                    format!("{value} is outside the subset, which has integers and booleans")
+                })?)
+            }
+            Definition::Snapshot {
+                function,
+                source,
+                cell,
+            } => {
+                self.stream(source)?;
+                self.cell(cell)?;
+                self.expression(function, 2)?;
+                NodeType::Stream(Scalar::Integer)
+            }
+            Definition::Gate { source, cell } => {
+                let scalar = self.stream(source)?;
+                let (value, _) = self.cell(cell)?;
+                if value != Scalar::Boolean {
+                    return Err(format!(
+                        "{cell} is a cell of integers; a gate reads a cell of booleans"
+                    ));
+                }
+                NodeType::Stream(scalar)
+            }
+            Definition::Once(source)
+            | Definition::Node(source)
+            | Definition::Share(source)
+            | Definition::Defer(source) => NodeType::Stream(self.stream(source)?),
+            Definition::Merge {
+                function,
+                left,
+                right,
+            } => {
+                let scalar = self.stream(left)?;
+                if self.stream(right)? != scalar {
+                    return Err("a merge needs two streams of one type".into());
+                }
+                self.expression(function, 2)?;
+                NodeType::Stream(scalar)
+            }
+            Definition::OrElse { left, right } => {
+                let scalar = self.stream(left)?;
+                if self.stream(right)? != scalar {
+                    return Err("or_else needs two streams of one type".into());
+                }
+                NodeType::Stream(scalar)
+            }
+            Definition::Scan {
+                initial,
+                output,
+                state,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(initial, 0)?;
+                self.expression(output, 2)?;
+                self.expression(state, 2)?;
+                NodeType::Stream(Scalar::Integer)
+            }
+            Definition::Steps(cell) | Definition::StepsWithCurrent(cell) => {
+                let (value, state) = self.cell(cell)?;
+                if state {
+                    return Err(format!(
+                        "{cell} is a State, an in-place accumulator, a cell read through one, \
+                         or a loop closed with one, which has no stream view"
+                    ));
+                }
+                NodeType::Stream(value)
+            }
+            Definition::Hold { initial, source } => {
+                let value = self.stream(source)?;
+                self.expression(initial, 0)?;
+                NodeType::Cell {
+                    value,
+                    state: false,
+                }
+            }
+            Definition::Accumulate {
+                initial,
+                function,
+                source,
+            }
+            | Definition::AccumulateMut {
+                initial,
+                function,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(initial, 0)?;
+                self.expression(function, 2)?;
+                NodeType::Cell {
+                    value: Scalar::Integer,
+                    state: matches!(definition, Definition::AccumulateMut { .. }),
+                }
+            }
+            Definition::MapCell { function, cell } => {
+                let (_, state) = self.cell(cell)?;
+                self.expression(function, 1)?;
+                NodeType::Cell {
+                    value: Scalar::Integer,
+                    state,
+                }
+            }
+            Definition::ToBoolean(cell) => {
+                let (_, state) = self.cell(cell)?;
+                NodeType::Cell {
+                    value: Scalar::Boolean,
+                    state,
+                }
+            }
+            Definition::Lift { function, cells } => {
+                if !(2..=6).contains(&cells.len()) {
+                    return Err(format!("lift takes two to six cells, not {}", cells.len()));
+                }
+                let mut state = false;
+                for cell in cells {
+                    state |= self.cell(cell)?.1;
+                }
+                self.expression(function, cells.len())?;
+                NodeType::Cell {
+                    value: Scalar::Integer,
+                    state,
+                }
+            }
+            Definition::MapList {
+                length,
+                element,
+                source,
+            } => {
+                self.stream(source)?;
+                self.expression(length, 1)?;
+                self.expression(element, 2)?;
+                NodeType::Lists
+            }
+            Definition::Split(source) => {
+                let node = self.node(source)?;
+                if self.types[node] != NodeType::Lists {
+                    return Err(format!(
+                        "{source} is {}; a split reads the lists of a MapList",
+                        self.types[node]
+                    ));
+                }
+                NodeType::Stream(Scalar::Integer)
+            }
+            Definition::CellLoop(value_type) => NodeType::Cell {
+                value: loop_scalar(value_type)?,
+                state: self.states[self.index],
+            },
+            Definition::StreamLoop(event_type) => NodeType::Stream(loop_scalar(event_type)?),
+            Definition::Close {
+                forward,
+                definition: reference,
+            } => {
+                let declared = match self.program.definitions.get(*forward) {
+                    Some(declaration) if *forward < self.index && is_loop(declaration) => {
+                        self.types[*forward]
+                    }
+                    _ => {
+                        return Err(format!(
+                            "node {forward} is not a loop declared before this Close"
+                        ));
+                    }
+                };
+                if self.closes[*forward].is_some() {
+                    return Err(format!(
+                        "the loop at node {forward} is closed more than once"
+                    ));
+                }
+                let actual = self.types[self.node(reference)?];
+                let fits = match (declared, actual) {
+                    (NodeType::Cell { value: a, .. }, NodeType::Cell { value: b, .. })
+                    | (NodeType::Stream(a), NodeType::Stream(b)) => a == b,
+                    _ => false,
+                };
+                if !fits {
+                    return Err(format!(
+                        "the loop at node {forward} is {declared}, and {reference} is {actual}"
+                    ));
+                }
+                NodeType::Closed
+            }
+            Definition::Literal { .. }
+            | Definition::PickStream { .. }
+            | Definition::PickCell { .. }
+            | Definition::SwitchStream(_)
+            | Definition::Construct { .. }
+            | Definition::HoldStream { .. }
+            | Definition::HoldCell { .. }
+            | Definition::ConstantStream(_)
+            | Definition::ConstantCell(_)
+            | Definition::MapPickCell { .. }
+            | Definition::SwitchCell(_) => {
+                return Err(format!(
+                    "{} is outside the subset of stages 1 to 4",
+                    name(definition)
+                ));
+            }
+        };
+        Ok(made)
+    }
+}
+
+/// The scalar a loop carries.
+fn loop_scalar(value_type: &Type) -> Result<Scalar, String> {
+    Scalar::of(value_type).ok_or_else(|| {
+        format!("a loop of {value_type} is outside the subset, which has integers and booleans")
+    })
+}
+
+/// Checks an expression taking `arguments` arguments. `scope` says what a
+/// `Sample` may read, and is `None` where it may read nothing.
 fn check_expression(
     expression: &Expression,
     arguments: usize,
-    cells: Option<&[NodeType]>,
+    scope: Option<&Scope<'_>>,
 ) -> Result<(), String> {
-    let go = |e: &Expression| check_expression(e, arguments, cells);
+    let go = |e: &Expression| check_expression(e, arguments, scope);
     let argument = |label: String, index: usize| {
         if index < arguments {
             Ok(())
@@ -604,13 +1112,13 @@ fn check_expression(
             Err("CArg is used outside a construct body, and the subset has no construct".into())
         }
         Expression::Sample(reference) => {
-            let Some(cells) = cells else {
+            let Some(scope) = scope else {
                 return Err("an input's coalescing function cannot sample a cell".into());
             };
-            let node = earlier(reference, cells.len())?;
-            match cells[node] {
-                NodeType::Cell { .. } => Ok(()),
-                NodeType::Stream(_) => Err(format!("Sample {reference}: node {node} is a stream")),
+            let node = scope.node(reference)?;
+            match scope.types[node] {
+                NodeType::Cell { .. } => scope.readable(node, 0),
+                made => Err(format!("Sample {reference}: node {node} is {made}")),
             }
         }
         Expression::Literal(_) => Ok(()),
@@ -639,239 +1147,16 @@ fn check_expression(
     }
 }
 
-fn check_definition(
-    inputs: &[Scalar],
-    types: &[NodeType],
-    index: usize,
-    definition: &Definition,
-) -> Result<NodeType, String> {
-    let expression = |e: &Expression, arguments: usize| check_expression(e, arguments, Some(types));
-    let stream = |r: &Reference| -> Result<Scalar, String> {
-        let node = earlier(r, index)?;
-        match types[node] {
-            NodeType::Stream(scalar) => Ok(scalar),
-            NodeType::Cell { .. } => Err(format!("{r} is a cell, not a stream")),
-        }
-    };
-    let cell = |r: &Reference| -> Result<(Scalar, bool), String> {
-        let node = earlier(r, index)?;
-        match types[node] {
-            NodeType::Cell { value, state } => Ok((value, state)),
-            NodeType::Stream(_) => Err(format!("{r} is a stream, not a cell")),
-        }
-    };
-    let input = |k: usize| {
-        inputs
-            .get(k)
-            .copied()
-            .ok_or_else(|| format!("there is no input {k}"))
-    };
-    let made = match definition {
-        Definition::Input(k) => NodeType::Stream(input(*k)?),
-        Definition::InputCell { input: k, initial } => {
-            let value = input(*k)?;
-            expression(initial, 0)?;
-            NodeType::Cell {
-                value,
-                state: false,
-            }
-        }
-        Definition::Never(event_type) => NodeType::Stream(Scalar::of(event_type).ok_or_else(|| {
-            format!("a stream of {event_type} is outside the subset, which has integers and booleans")
-        })?),
-        Definition::Constant(value) => {
-            expression(value, 0)?;
-            NodeType::Cell {
-                value: Scalar::Integer,
-                state: false,
-            }
-        }
-        Definition::Map { function, source } => {
-            stream(source)?;
-            expression(function, 1)?;
-            NodeType::Stream(Scalar::Integer)
-        }
-        Definition::Filter { predicate, source } => {
-            let scalar = stream(source)?;
-            expression(predicate, 1)?;
-            NodeType::Stream(scalar)
-        }
-        Definition::FilterMap {
-            keep,
-            function,
-            source,
-        } => {
-            stream(source)?;
-            expression(keep, 1)?;
-            expression(function, 1)?;
-            NodeType::Stream(Scalar::Integer)
-        }
-        Definition::MapTo { value, source } => {
-            stream(source)?;
-            NodeType::Stream(Scalar::of_value(value).ok_or_else(|| {
-                format!("{value} is outside the subset, which has integers and booleans")
-            })?)
-        }
-        Definition::Snapshot {
-            function,
-            source,
-            cell: read,
-        } => {
-            stream(source)?;
-            cell(read)?;
-            expression(function, 2)?;
-            NodeType::Stream(Scalar::Integer)
-        }
-        Definition::Gate {
-            source,
-            cell: read,
-        } => {
-            let scalar = stream(source)?;
-            let (value, _) = cell(read)?;
-            if value != Scalar::Integer {
-                NodeType::Stream(scalar)
-            } else {
-                return Err(format!(
-                    "{read} is a cell of integers; a gate reads a cell of booleans"
-                ));
-            }
-        }
-        Definition::Once(source) | Definition::Node(source) | Definition::Share(source) => {
-            NodeType::Stream(stream(source)?)
-        }
-        Definition::Merge {
-            function,
-            left,
-            right,
-        } => {
-            let scalar = stream(left)?;
-            if stream(right)? != scalar {
-                return Err("a merge needs two streams of one type".into());
-            }
-            expression(function, 2)?;
-            NodeType::Stream(scalar)
-        }
-        Definition::OrElse { left, right } => {
-            let scalar = stream(left)?;
-            if stream(right)? != scalar {
-                return Err("or_else needs two streams of one type".into());
-            }
-            NodeType::Stream(scalar)
-        }
-        Definition::Scan {
-            initial,
-            output,
-            state,
-            source,
-        } => {
-            stream(source)?;
-            expression(initial, 0)?;
-            expression(output, 2)?;
-            expression(state, 2)?;
-            NodeType::Stream(Scalar::Integer)
-        }
-        Definition::Steps(read) | Definition::StepsWithCurrent(read) => {
-            let (value, state) = cell(read)?;
-            if state {
-                return Err(format!(
-                    "{read} is a State, an in-place accumulator or a cell read through one, \
-                     which has no stream view"
-                ));
-            }
-            NodeType::Stream(value)
-        }
-        Definition::Hold { initial, source } => {
-            let value = stream(source)?;
-            expression(initial, 0)?;
-            NodeType::Cell {
-                value,
-                state: false,
-            }
-        }
-        Definition::Accumulate {
-            initial,
-            function,
-            source,
-        }
-        | Definition::AccumulateMut {
-            initial,
-            function,
-            source,
-        } => {
-            stream(source)?;
-            expression(initial, 0)?;
-            expression(function, 2)?;
-            NodeType::Cell {
-                value: Scalar::Integer,
-                state: matches!(definition, Definition::AccumulateMut { .. }),
-            }
-        }
-        Definition::MapCell {
-            function,
-            cell: read,
-        } => {
-            let (_, state) = cell(read)?;
-            expression(function, 1)?;
-            NodeType::Cell {
-                value: Scalar::Integer,
-                state,
-            }
-        }
-        Definition::ToBoolean(read) => {
-            let (_, state) = cell(read)?;
-            NodeType::Cell {
-                value: Scalar::Boolean,
-                state,
-            }
-        }
-        Definition::Lift { function, cells } => {
-            if !(2..=6).contains(&cells.len()) {
-                return Err(format!("lift takes two to six cells, not {}", cells.len()));
-            }
-            let mut state = false;
-            for read in cells {
-                state |= cell(read)?.1;
-            }
-            expression(function, cells.len())?;
-            NodeType::Cell {
-                value: Scalar::Integer,
-                state,
-            }
-        }
-        Definition::Literal { .. }
-        | Definition::MapList { .. }
-        | Definition::PickStream { .. }
-        | Definition::PickCell { .. }
-        | Definition::Split(_)
-        | Definition::Defer(_)
-        | Definition::SwitchStream(_)
-        | Definition::Construct { .. }
-        | Definition::HoldStream { .. }
-        | Definition::HoldCell { .. }
-        | Definition::ConstantStream(_)
-        | Definition::ConstantCell(_)
-        | Definition::MapPickCell { .. }
-        | Definition::SwitchCell(_)
-        | Definition::CellLoop(_)
-        | Definition::StreamLoop(_)
-        | Definition::Close { .. } => {
-            return Err(format!(
-                "{} is outside the subset of stages 1 and 2",
-                name(definition)
-            ));
-        }
-    };
-    Ok(made)
-}
-
 /// A stream node other than a `Share` has at most one consumer, the
-/// observation included.
+/// observation included; so has a stream of lists.
 fn check_linearity(program: &Program, types: &[NodeType]) -> Result<(), BuildError> {
     let mut consumers: Vec<Vec<String>> = vec![Vec::new(); types.len()];
     for (index, definition) in program.definitions.iter().enumerate() {
         for reference in consumed_streams(definition) {
             if let Reference::TopLevel(node) = reference {
-                consumers[node].push(format!("node {index}"));
+                if matches!(types[node], NodeType::Stream(_) | NodeType::Lists) {
+                    consumers[node].push(format!("node {index}"));
+                }
             }
         }
     }
@@ -994,6 +1279,9 @@ trait Materialize<M: EngineMode> {
     fn scan(self: Box<Self>, b: &mut Build<M>, initial: i64, f: ScanFn) -> Stream<i64>;
     fn node(self: Box<Self>, b: &mut Build<M>) -> Stream<i64>;
     fn share(self: Box<Self>, b: &mut Build<M>) -> Shared<i64>;
+    fn defer(self: Box<Self>, b: &mut Build<M>) -> Stream<i64>;
+    fn map_list(self: Box<Self>, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>>;
+    fn close_stream_loop(self: Box<Self>, b: &mut Build<M>, closer: StreamLoop<i64>);
     /// A merge or an `or_else` with a materialized stream on the other side.
     fn join(
         self: Box<Self>,
@@ -1025,6 +1313,15 @@ impl<M: EngineMode, S: Chain> Materialize<M> for S {
     }
     fn share(self: Box<Self>, b: &mut Build<M>) -> Shared<i64> {
         M::share(b, *self)
+    }
+    fn defer(self: Box<Self>, b: &mut Build<M>) -> Stream<i64> {
+        M::defer(b, *self)
+    }
+    fn map_list(self: Box<Self>, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>> {
+        M::map_list(b, *self, f)
+    }
+    fn close_stream_loop(self: Box<Self>, b: &mut Build<M>, closer: StreamLoop<i64>) {
+        M::close_stream_loop(b, *self, closer)
     }
     fn join(
         self: Box<Self>,
@@ -1126,6 +1423,18 @@ impl<M: EngineMode> Chained<M> {
 
     fn share(self, b: &mut Build<M>) -> Shared<i64> {
         materialize!(self, M, b, share())
+    }
+
+    fn defer(self, b: &mut Build<M>) -> Stream<i64> {
+        materialize!(self, M, b, defer())
+    }
+
+    fn map_list(self, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>> {
+        materialize!(self, M, b, map_list(f))
+    }
+
+    fn close_stream_loop(self, b: &mut Build<M>, closer: StreamLoop<i64>) {
+        materialize!(self, M, b, close_stream_loop(closer))
     }
 
     /// The materialized stream itself, or a node for a chain.
@@ -1321,9 +1630,22 @@ fn lift<M: EngineMode>(b: &mut Build<M>, cells: &[IntegerCell], e: Expression) -
 /// A node of the program while the build closure runs.
 enum Built<M: EngineMode> {
     Stream(Chained<M>),
+    /// A `MapList`'s node, moved into the split that reads it.
+    Lists(Stream<Vec<i64>>),
     /// A linear stream, moved into its one consumer.
     Consumed,
     Cell(CellToken),
+    /// A `Close`, which makes no node.
+    Closed,
+}
+
+/// The closer of a loop, waiting in the builder for the loop's `Close`.
+enum Closer {
+    Integer(CellLoop<i64>),
+    IntegerState(StateLoop<i64>),
+    Boolean(CellLoop<bool>),
+    BooleanState(StateLoop<bool>),
+    Stream(StreamLoop<i64>),
 }
 
 /// An engine input a program input drives. A program input has one for
@@ -1371,6 +1693,8 @@ struct Builder<'p, M: EngineMode> {
     types: &'p [NodeType],
     nodes: Vec<Built<M>>,
     inputs: Vec<Vec<EngineInput>>,
+    /// Each loop's closer, from its declaration to its `Close`.
+    closers: Vec<Option<Closer>>,
 }
 
 impl<M: EngineMode> Builder<'_, M> {
@@ -1386,7 +1710,18 @@ impl<M: EngineMode> Builder<'_, M> {
             Built::Consumed => {
                 unreachable!("bough-oracle: check refuses a second consumer of node {node}")
             }
-            Built::Cell(_) => unreachable!("bough-oracle: check refuses a cell as a stream"),
+            Built::Lists(_) | Built::Cell(_) | Built::Closed => {
+                unreachable!("bough-oracle: check refuses node {node} as a stream of the subset")
+            }
+        }
+    }
+
+    /// The lists a split reads, moved out of the `MapList`'s node.
+    fn take_lists(&mut self, reference: &Reference) -> Stream<Vec<i64>> {
+        let node = top(reference);
+        match mem::replace(&mut self.nodes[node], Built::Consumed) {
+            Built::Lists(lists) => lists,
+            _ => unreachable!("bough-oracle: check lets a split read only a MapList, once"),
         }
     }
 
@@ -1400,6 +1735,9 @@ impl<M: EngineMode> Builder<'_, M> {
     fn scalar(&self, reference: &Reference) -> Scalar {
         match self.types[top(reference)] {
             NodeType::Stream(scalar) | NodeType::Cell { value: scalar, .. } => scalar,
+            NodeType::Lists | NodeType::Closed => {
+                unreachable!("bough-oracle: check refuses {reference} where a scalar is read")
+            }
         }
     }
 
@@ -1679,6 +2017,100 @@ impl<M: EngineMode> Builder<'_, M> {
                     tokens.into_iter().map(|cell| cell.integers(b)).collect();
                 Built::Cell(lift(b, &cells, e).token())
             }
+            Definition::MapList {
+                length,
+                element,
+                source,
+            } => {
+                let length = self.resolve(b, length);
+                let element = self.resolve(b, element);
+                let f: ListFn = Box::new(move |x| {
+                    let items = evaluate(&length, &[x]).rem_euclid(4);
+                    (0..items).map(|i| evaluate(&element, &[x, i])).collect()
+                });
+                let chain = self.take(source);
+                Built::Lists(chain.map_list(b, f))
+            }
+            Definition::Split(source) => {
+                let lists = self.take_lists(source);
+                Built::Stream(Chained::Stream(M::split(b, lists)))
+            }
+            Definition::Defer(source) => {
+                let chain = self.take(source);
+                Built::Stream(Chained::Stream(chain.defer(b)))
+            }
+            Definition::CellLoop(_) => {
+                let index = self.nodes.len();
+                let NodeType::Cell { value, state } = self.types[index] else {
+                    unreachable!("bough-oracle: check makes a cell loop a cell")
+                };
+                let (cell, closer) = match (value, state) {
+                    (Scalar::Integer, false) => {
+                        let (cell, closer) = b.cell_loop::<i64>();
+                        (CellToken::Integer(cell), Closer::Integer(closer))
+                    }
+                    (Scalar::Integer, true) => {
+                        let (state, closer) = b.state_loop::<i64>();
+                        (CellToken::IntegerState(state), Closer::IntegerState(closer))
+                    }
+                    (Scalar::Boolean, false) => {
+                        let (cell, closer) = b.cell_loop::<bool>();
+                        (CellToken::Boolean(cell), Closer::Boolean(closer))
+                    }
+                    (Scalar::Boolean, true) => {
+                        let (state, closer) = b.state_loop::<bool>();
+                        (CellToken::BooleanState(state), Closer::BooleanState(closer))
+                    }
+                };
+                self.closers[index] = Some(closer);
+                Built::Cell(cell)
+            }
+            Definition::StreamLoop(_) => {
+                let index = self.nodes.len();
+                let (stream, closer) = b.stream_loop::<i64>();
+                self.closers[index] = Some(Closer::Stream(closer));
+                Built::Stream(Chained::Stream(stream))
+            }
+            Definition::Close {
+                forward,
+                definition,
+            } => {
+                let closer = self.closers[*forward]
+                    .take()
+                    .expect("bough-oracle: check closes a loop once");
+                // check makes a cell loop a State exactly when its definition
+                // is one, and a state loop may close with either.
+                match (closer, self.nodes.get(top(definition))) {
+                    (Closer::Stream(closer), _) => {
+                        let chain = self.take(definition);
+                        chain.close_stream_loop(b, closer);
+                    }
+                    (Closer::Integer(closer), Some(Built::Cell(CellToken::Integer(cell)))) => {
+                        closer.close(b, *cell);
+                    }
+                    (
+                        Closer::IntegerState(closer),
+                        Some(Built::Cell(CellToken::IntegerState(state))),
+                    ) => closer.close(b, *state),
+                    (Closer::IntegerState(closer), Some(Built::Cell(CellToken::Integer(cell)))) => {
+                        closer.close(b, *cell);
+                    }
+                    (Closer::Boolean(closer), Some(Built::Cell(CellToken::Boolean(cell)))) => {
+                        closer.close(b, *cell);
+                    }
+                    (
+                        Closer::BooleanState(closer),
+                        Some(Built::Cell(CellToken::BooleanState(state))),
+                    ) => closer.close(b, *state),
+                    (Closer::BooleanState(closer), Some(Built::Cell(CellToken::Boolean(cell)))) => {
+                        closer.close(b, *cell);
+                    }
+                    _ => unreachable!(
+                        "bough-oracle: check closes a loop with a node of its type and kind"
+                    ),
+                }
+                Built::Closed
+            }
             _ => unreachable!(
                 "bough-oracle: check refuses {}, outside the subset",
                 name(definition)
@@ -1695,8 +2127,8 @@ impl<M: EngineMode> Builder<'_, M> {
                 Base::Stream(stream) => Observed::Stream(stream),
                 Base::Shared(shared) => Observed::Shared(shared),
             },
-            Built::Consumed => {
-                unreachable!("bough-oracle: check refuses observing a consumed stream")
+            Built::Consumed | Built::Lists(_) | Built::Closed => {
+                unreachable!("bough-oracle: check refuses observing node {node}")
             }
         }
     }
@@ -1717,6 +2149,7 @@ fn build_program<M: EngineMode>(b: &mut Build<M>, program: &Program, types: &[No
         types,
         nodes: Vec::with_capacity(program.definitions.len()),
         inputs: program.inputs.iter().map(|_| Vec::new()).collect(),
+        closers: program.definitions.iter().map(|_| None).collect(),
     };
     for definition in &program.definitions {
         let built = builder.define(b, definition);
@@ -1761,7 +2194,8 @@ impl fmt::Display for RunOptions {
     }
 }
 
-/// What the engine showed for one observed node.
+/// What the engine showed for one observed node. A transaction's calls
+/// include those of its child transactions, in the order they came.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineObservation {
     /// A stream's listener: the events of transaction k at index k - 1.
@@ -1772,7 +2206,7 @@ pub enum EngineObservation {
     /// A cell's listeners and samples.
     Cell {
         /// `listen_cell`'s calls at registration: one, the value after
-        /// transaction zero.
+        /// transaction zero and its children.
         registration: Vec<i64>,
         /// `listen_steps`'s calls at registration: none.
         steps_registration: Vec<i64>,
@@ -1780,9 +2214,44 @@ pub enum EngineObservation {
         values: Vec<Vec<i64>>,
         /// `listen_steps`'s calls in transaction k, at index k - 1.
         steps: Vec<Vec<i64>>,
-        /// `graph.sample` after transaction k, at index k - 1.
+        /// `graph.sample` after transaction k and its children, at index
+        /// k - 1.
         samples: Vec<i64>,
     },
+}
+
+/// Which listener of an observed node a call went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listened {
+    /// `graph.listen` on a stream.
+    Stream,
+    /// `graph.listen_cell`.
+    Cell,
+    /// `graph.listen_steps`.
+    Steps,
+}
+
+impl fmt::Display for Listened {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Listened::Stream => "listen",
+            Listened::Cell => "listen_cell",
+            Listened::Steps => "listen_steps",
+        })
+    }
+}
+
+/// One listener call in a transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Call {
+    /// The observed node's position in the program's `observe`.
+    pub observed: usize,
+    /// Which of its listeners.
+    pub listened: Listened,
+    /// The transaction: k - 1 for transaction k.
+    pub transaction: usize,
+    /// The call's place among that listener's calls in that transaction.
+    pub index: usize,
 }
 
 /// Everything one run showed, one observation per observed node, in the
@@ -1791,146 +2260,209 @@ pub enum EngineObservation {
 pub struct EngineRun {
     /// The observations.
     pub observations: Vec<EngineObservation>,
+    /// Every listener call made in a transaction, over every observed node,
+    /// in the order the engine made them.
+    pub calls: Vec<Call>,
     /// `graph.live_nodes()` after the build: how many nodes the chains
     /// fused into.
     pub live_nodes: usize,
 }
 
-/// A listener's log, shared with its closure.
-type Log = Arc<Mutex<Vec<i64>>>;
+/// Every listener's calls, in the order they came: the observed node's
+/// position, the listener, and the value.
+type Log = Arc<Mutex<Vec<(usize, Listened, i64)>>>;
 
-fn drain(log: &Log) -> Vec<i64> {
+fn drain(log: &Log) -> Vec<(usize, Listened, i64)> {
     mem::take(&mut *log.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-fn stream_sink(log: &Log) -> StreamSink {
+fn stream_sink(log: &Log, observed: usize) -> StreamSink {
     let log = log.clone();
     Box::new(move |value| {
         log.lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(value)
+            .push((observed, Listened::Stream, value))
     })
 }
 
-fn integer_sink(log: &Log) -> CellSink<i64> {
+fn integer_sink(log: &Log, observed: usize, listened: Listened) -> CellSink<i64> {
     let log = log.clone();
     Box::new(move |value: &i64| {
         log.lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(*value)
+            .push((observed, listened, *value))
     })
 }
 
-fn boolean_sink(log: &Log) -> CellSink<bool> {
+fn boolean_sink(log: &Log, observed: usize, listened: Listened) -> CellSink<bool> {
     let log = log.clone();
     Box::new(move |value: &bool| {
-        log.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(i64::from(*value))
+        log.lock().unwrap_or_else(PoisonError::into_inner).push((
+            observed,
+            listened,
+            i64::from(*value),
+        ))
     })
 }
 
-/// The listeners of one observed node, and what they saw so far.
+/// What one observed node's listeners saw so far.
 enum Recorder {
     Stream {
-        log: Log,
         events: Vec<Vec<i64>>,
     },
     Cell {
         cell: CellToken,
-        values_log: Log,
-        steps_log: Log,
         observation: EngineObservation,
     },
 }
 
 impl Recorder {
+    /// Listens to observed node `position`, and files the calls a cell's
+    /// listeners make at registration.
     fn attach<M: EngineMode>(
         graph: &mut Graph<M>,
+        position: usize,
         observed: Observed,
+        log: &Log,
         listeners: &mut Vec<Listener<M>>,
     ) -> Recorder {
-        let log = Log::default();
         match observed {
             Observed::Stream(stream) => {
-                listeners.push(M::listen(graph, stream, stream_sink(&log)));
-                Recorder::Stream {
-                    log,
-                    events: Vec::new(),
-                }
+                listeners.push(M::listen(graph, stream, stream_sink(log, position)));
+                Recorder::Stream { events: Vec::new() }
             }
             Observed::Shared(shared) => {
-                listeners.push(M::listen(graph, shared, stream_sink(&log)));
-                Recorder::Stream {
-                    log,
-                    events: Vec::new(),
-                }
+                listeners.push(M::listen(graph, shared, stream_sink(log, position)));
+                Recorder::Stream { events: Vec::new() }
             }
             Observed::Cell(cell) => {
-                let steps_log = Log::default();
+                let (values, steps) = (Listened::Cell, Listened::Steps);
                 match cell {
                     CellToken::Integer(c) => {
-                        listeners.push(M::listen_cell(graph, c, integer_sink(&log)));
-                        listeners.push(M::listen_steps(graph, c, integer_sink(&steps_log)));
+                        listeners.push(M::listen_cell(
+                            graph,
+                            c,
+                            integer_sink(log, position, values),
+                        ));
+                        listeners.push(M::listen_steps(
+                            graph,
+                            c,
+                            integer_sink(log, position, steps),
+                        ));
                     }
                     CellToken::IntegerState(c) => {
-                        listeners.push(M::listen_cell(graph, c, integer_sink(&log)));
-                        listeners.push(M::listen_steps(graph, c, integer_sink(&steps_log)));
+                        listeners.push(M::listen_cell(
+                            graph,
+                            c,
+                            integer_sink(log, position, values),
+                        ));
+                        listeners.push(M::listen_steps(
+                            graph,
+                            c,
+                            integer_sink(log, position, steps),
+                        ));
                     }
                     CellToken::Boolean(c) => {
-                        listeners.push(M::listen_cell(graph, c, boolean_sink(&log)));
-                        listeners.push(M::listen_steps(graph, c, boolean_sink(&steps_log)));
+                        listeners.push(M::listen_cell(
+                            graph,
+                            c,
+                            boolean_sink(log, position, values),
+                        ));
+                        listeners.push(M::listen_steps(
+                            graph,
+                            c,
+                            boolean_sink(log, position, steps),
+                        ));
                     }
                     CellToken::BooleanState(c) => {
-                        listeners.push(M::listen_cell(graph, c, boolean_sink(&log)));
-                        listeners.push(M::listen_steps(graph, c, boolean_sink(&steps_log)));
+                        listeners.push(M::listen_cell(
+                            graph,
+                            c,
+                            boolean_sink(log, position, values),
+                        ));
+                        listeners.push(M::listen_steps(
+                            graph,
+                            c,
+                            boolean_sink(log, position, steps),
+                        ));
                     }
                 }
-                let observation = EngineObservation::Cell {
-                    registration: drain(&log),
-                    steps_registration: drain(&steps_log),
-                    values: Vec::new(),
-                    steps: Vec::new(),
-                    samples: Vec::new(),
-                };
+                let (mut registration, mut steps_registration) = (Vec::new(), Vec::new());
+                for (_, listened, value) in drain(log) {
+                    match listened {
+                        Listened::Steps => steps_registration.push(value),
+                        _ => registration.push(value),
+                    }
+                }
                 Recorder::Cell {
                     cell,
-                    values_log: log,
-                    steps_log,
-                    observation,
+                    observation: EngineObservation::Cell {
+                        registration,
+                        steps_registration,
+                        values: Vec::new(),
+                        steps: Vec::new(),
+                        samples: Vec::new(),
+                    },
                 }
             }
         }
     }
 
-    /// Files what the listeners saw in the transaction that just ended, and
-    /// samples a cell.
-    fn end_transaction<M: EngineMode>(&mut self, graph: &Graph<M>) {
+    /// Opens the lists of a new transaction.
+    fn begin_transaction(&mut self) {
         match self {
-            Recorder::Stream { log, events } => events.push(drain(log)),
+            Recorder::Stream { events } => events.push(Vec::new()),
             Recorder::Cell {
-                cell,
-                values_log,
-                steps_log,
-                observation:
-                    EngineObservation::Cell {
-                        values,
-                        steps,
-                        samples,
-                        ..
-                    },
+                observation: EngineObservation::Cell { values, steps, .. },
+                ..
             } => {
-                values.push(drain(values_log));
-                steps.push(drain(steps_log));
-                samples.push(cell.sample_graph(graph));
+                values.push(Vec::new());
+                steps.push(Vec::new());
             }
             Recorder::Cell { .. } => unreachable!("bough-oracle: a cell records a cell"),
         }
     }
 
+    /// Files a call of this transaction, and returns its place among that
+    /// listener's calls in it.
+    fn file(&mut self, listened: Listened, value: i64) -> usize {
+        let list = match (self, listened) {
+            (Recorder::Stream { events }, Listened::Stream) => events.last_mut(),
+            (
+                Recorder::Cell {
+                    observation: EngineObservation::Cell { values, .. },
+                    ..
+                },
+                Listened::Cell,
+            ) => values.last_mut(),
+            (
+                Recorder::Cell {
+                    observation: EngineObservation::Cell { steps, .. },
+                    ..
+                },
+                Listened::Steps,
+            ) => steps.last_mut(),
+            _ => None,
+        }
+        .expect("bough-oracle: a call goes to a listener of its node, in a transaction");
+        list.push(value);
+        list.len() - 1
+    }
+
+    /// Samples a cell after the transaction and its children.
+    fn end_transaction<M: EngineMode>(&mut self, graph: &Graph<M>) {
+        if let Recorder::Cell {
+            cell,
+            observation: EngineObservation::Cell { samples, .. },
+        } = self
+        {
+            samples.push(cell.sample_graph(graph));
+        }
+    }
+
     fn finish(self) -> EngineObservation {
         match self {
-            Recorder::Stream { events, .. } => EngineObservation::Stream { events },
+            Recorder::Stream { events } => EngineObservation::Stream { events },
             Recorder::Cell { observation, .. } => observation,
         }
     }
@@ -2025,12 +2557,17 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
     let (mut graph, edge) = M::build(|b| build_program(b, program, &types));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
+    let log = Log::default();
     let mut listeners = Vec::new();
     let mut recorders: Vec<Recorder> = edge
         .observed
         .into_iter()
-        .map(|observed| Recorder::attach(&mut graph, observed, &mut listeners))
+        .enumerate()
+        .map(|(position, observed)| {
+            Recorder::attach(&mut graph, position, observed, &log, &mut listeners)
+        })
         .collect();
+    let mut calls = Vec::new();
     for (k, sends) in program.schedule.iter().enumerate() {
         let order = engine_sends(
             sends,
@@ -2046,12 +2583,25 @@ pub fn run<M: EngineMode>(program: &Program, options: RunOptions) -> Result<Engi
             }
         });
         for recorder in &mut recorders {
+            recorder.begin_transaction();
+        }
+        for (observed, listened, value) in drain(&log) {
+            let index = recorders[observed].file(listened, value);
+            calls.push(Call {
+                observed,
+                listened,
+                transaction: k,
+                index,
+            });
+        }
+        for recorder in &mut recorders {
             recorder.end_transaction(&graph);
         }
     }
     drop(listeners);
     Ok(EngineRun {
         observations: recorders.into_iter().map(Recorder::finish).collect(),
+        calls,
         live_nodes,
     })
 }

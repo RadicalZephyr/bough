@@ -19,7 +19,7 @@ use std::fmt::{self, Write as _};
 use std::panic::{self, AssertUnwindSafe};
 
 use crate::answer::{Answer, Datum, Observation};
-use crate::build::{self, BuildError, EngineObservation, EngineRun, NodeType, RunOptions, Scalar};
+use crate::build::{self, BuildError, EngineObservation, EngineRun, RunOptions};
 use crate::ghc::Oracle;
 use crate::program::{Program, Time, Value, Window};
 
@@ -208,14 +208,7 @@ pub fn compare(program: &Program, expected: &[Expected], run: &EngineRun) -> Opt
         let rows = rows(engine, oracle);
         disagree |= rows.iter().any(|row| row.differs);
         let what = match types.as_ref().map(|types| types[*node]) {
-            Some(NodeType::Stream(scalar)) => format!("a stream of {}", scalar_name(scalar)),
-            Some(NodeType::Cell {
-                value,
-                state: false,
-            }) => format!("a cell of {}", scalar_name(value)),
-            Some(NodeType::Cell { value, state: true }) => {
-                format!("a State of {}", scalar_name(value))
-            }
+            Some(made) => made.to_string(),
             None => "a node".to_owned(),
         };
         let mut table = format!(
@@ -249,13 +242,6 @@ pub fn compare(program: &Program, expected: &[Expected], run: &EngineRun) -> Opt
         ));
     }
     disagree.then(|| tables.concat())
-}
-
-fn scalar_name(scalar: Scalar) -> &'static str {
-    match scalar {
-        Scalar::Integer => "integers",
-        Scalar::Boolean => "booleans",
-    }
 }
 
 /// One way to run the engine: a mode's [`run`](build::run), named for

@@ -25,15 +25,15 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use Definition::{
-    Accumulate, AccumulateMut, Filter, Hold, InputCell, Lift, Map, MapCell, Merge, Once, Share,
-    Snapshot, Steps, StepsWithCurrent,
+    Accumulate, AccumulateMut, CellLoop, Close, Constant, Filter, Hold, InputCell, Lift, Map,
+    MapCell, MapList, Merge, Once, Share, Snapshot, Steps, StepsWithCurrent, StreamLoop,
 };
 use Expression::{Argument, ArgumentAt, Literal, SecondArgument};
 use Reference::TopLevel;
 use bough::{Local, Threaded};
 use bough_oracle::{
-    Definition, Engine, Expected, Expression, Input, Oracle, Program, Reference, RunOptions, Type,
-    Value, Window, check, check_program, expected, programs, reduce, run,
+    Definition, Engine, Expected, Expression, Input, NodeType, Oracle, Program, Reference,
+    RunOptions, Scalar, Type, Value, Window, check, check_program, expected, programs, reduce, run,
 };
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -653,10 +653,17 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
     };
     assert_eq!(
         refused(
-            vec![Definition::Input(0), Definition::Defer(TopLevel(0))],
+            vec![
+                Definition::Input(0),
+                Definition::Hold {
+                    initial: Literal(0),
+                    source: TopLevel(0),
+                },
+                Definition::SwitchCell(TopLevel(1)),
+            ],
             vec![1]
         ),
-        "node 1 (Defer): Defer is outside the subset of stages 1 and 2"
+        "node 2 (SwitchCell): SwitchCell is outside the subset of stages 1 to 4"
     );
     assert_eq!(
         refused(
@@ -675,8 +682,8 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
             ],
             vec![3]
         ),
-        "node 3 (StepsWithCurrent): N 2 is a State, an in-place accumulator or a cell read \
-         through one, which has no stream view"
+        "node 3 (StepsWithCurrent): N 2 is a State, an in-place accumulator, a cell read \
+         through one, or a loop closed with one, which has no stream view"
     );
     assert_eq!(
         refused(
@@ -713,6 +720,243 @@ fn the_builder_refuses_what_is_outside_the_subset_before_building() {
     assert_eq!(
         check(&double).unwrap_err().to_string(),
         "transaction 1: input 0 is sent more than once and does not coalesce"
+    );
+}
+
+/// The builder declares each loop by its definition, as a user must: a
+/// cell loop closed with a Cell is `cell_loop`, closed with an in-place
+/// accumulator or a read-through cell over one is `state_loop`, whose
+/// forward is a State, so a map_cell of it is a State and a steps view of
+/// it is refused. A stream loop's definition is fused into the forward's
+/// node, a defer and a split are two nodes each, and a MapList is a node of
+/// its own.
+#[test]
+fn the_builder_declares_each_loop_by_its_definition() {
+    let state = NodeType::Cell {
+        value: Scalar::Integer,
+        state: true,
+    };
+    let loops = program(
+        integers(1),
+        vec![
+            CellLoop(Type::Integer),
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Share(TopLevel(2)),
+            Snapshot {
+                function: Argument + SecondArgument,
+                source: TopLevel(3),
+                cell: TopLevel(0),
+            },
+            AccumulateMut {
+                initial: Literal(0),
+                function: SecondArgument + Argument,
+                source: TopLevel(4),
+            },
+            MapCell {
+                function: Argument * Literal(2),
+                cell: TopLevel(5),
+            },
+            // Loop 1 closes with a read-through cell over loop 0's
+            // definition, and loop 0 with that definition: both are States.
+            Close {
+                forward: 1,
+                definition: TopLevel(6),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(5),
+            },
+            MapCell {
+                function: Argument + Literal(1),
+                cell: TopLevel(1),
+            },
+        ],
+        vec![0, 1, 9],
+        &[&[(0, 3)], &[(0, 4)]],
+    );
+    let types = check(&loops).unwrap();
+    assert_eq!([types[0], types[1], types[9]], [state; 3]);
+    assert_eq!(types[7], NodeType::Closed);
+    let run = run_local(&loops);
+    assert_eq!(
+        run.observations[0],
+        bough_oracle::EngineObservation::Cell {
+            registration: vec![0],
+            steps_registration: vec![],
+            values: vec![vec![3], vec![10]],
+            steps: vec![vec![3], vec![10]],
+            samples: vec![3, 10],
+        }
+    );
+    let mut stepped = loops.clone();
+    stepped.definitions.push(Steps(TopLevel(1)));
+    stepped.observe = vec![10];
+    assert_eq!(
+        check(&stepped).unwrap_err().to_string(),
+        "node 10 (Steps): N 1 is a State, an in-place accumulator, a cell read through one, or \
+         a loop closed with one, which has no stream view"
+    );
+
+    // A stream loop, a defer and a split with its MapList.
+    let children = program(
+        integers(1),
+        vec![
+            StreamLoop(Type::Integer),
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(0),
+            },
+            Definition::Input(0),
+            Snapshot {
+                function: Argument + SecondArgument,
+                source: TopLevel(2),
+                cell: TopLevel(1),
+            },
+            Close {
+                forward: 0,
+                definition: TopLevel(3),
+            },
+            Definition::Input(0),
+            Definition::Defer(TopLevel(5)),
+            MapList {
+                length: Literal(2),
+                element: Argument + SecondArgument,
+                source: TopLevel(6),
+            },
+            Definition::Split(TopLevel(7)),
+        ],
+        vec![1, 8],
+        &[&[(0, 5)]],
+    );
+    let run = run_local(&children);
+    // The loop's node with its definition fused in, the hold, the loop's
+    // input; the second input, the defer's two, the MapList's node and the
+    // split's two.
+    assert_eq!(run.live_nodes, 3 + 1 + 2 + 1 + 2);
+    assert_eq!(
+        run.observations[1],
+        bough_oracle::EngineObservation::Stream {
+            events: vec![vec![5, 6]]
+        }
+    );
+}
+
+/// What the engine cannot build, or the oracle would refuse, about loops
+/// and children, the builder refuses before building, naming the node.
+#[test]
+fn the_builder_refuses_loops_and_children_it_cannot_build() {
+    let refused = |definitions: Vec<Definition>, observe: Vec<usize>| {
+        let program = program(integers(1), definitions, observe, &[]);
+        let error = run::<Local>(&program, RunOptions::default()).unwrap_err();
+        assert_eq!(check(&program).unwrap_err(), error);
+        error.to_string()
+    };
+    let counter = |close: Option<usize>| {
+        let mut definitions = vec![
+            CellLoop(Type::Integer),
+            Definition::Input(0),
+            Snapshot {
+                function: SecondArgument + Literal(1),
+                source: TopLevel(1),
+                cell: TopLevel(0),
+            },
+            Hold {
+                initial: Literal(0),
+                source: TopLevel(2),
+            },
+        ];
+        definitions.extend(close.map(|definition| Close {
+            forward: 0,
+            definition: TopLevel(definition),
+        }));
+        definitions
+    };
+    assert_eq!(
+        refused(counter(None), vec![3]),
+        "node 0 (CellLoop): the loop is never closed"
+    );
+    let mut twice = counter(Some(3));
+    twice.push(Close {
+        forward: 0,
+        definition: TopLevel(3),
+    });
+    assert_eq!(
+        refused(twice, vec![3]),
+        "node 5 (Close): the loop at node 0 is closed more than once"
+    );
+    assert_eq!(
+        refused(counter(Some(2)), vec![3]),
+        "node 4 (Close): the loop at node 0 is a cell of integers, and N 2 is a stream of \
+         integers"
+    );
+    let mut not_a_loop = counter(Some(3));
+    not_a_loop.push(Close {
+        forward: 3,
+        definition: TopLevel(3),
+    });
+    assert_eq!(
+        refused(not_a_loop, vec![3]),
+        "node 5 (Close): node 3 is not a loop declared before this Close"
+    );
+    // The engine has no value for a forward before its Close, directly or
+    // through a read-through cell.
+    let mut sampled = counter(None);
+    sampled.insert(
+        3,
+        MapCell {
+            function: Argument,
+            cell: TopLevel(0),
+        },
+    );
+    sampled[4] = Hold {
+        initial: Expression::Sample(TopLevel(3)),
+        source: TopLevel(2),
+    };
+    sampled.push(Close {
+        forward: 0,
+        definition: TopLevel(4),
+    });
+    assert_eq!(
+        refused(sampled, vec![4]),
+        "node 4 (Hold): a Sample reads N 0, a loop's forward that is not closed here; the \
+         engine has no value for it before its Close"
+    );
+    let mut after = counter(Some(3));
+    after.push(Constant(Expression::Sample(TopLevel(0))));
+    assert!(check(&program(integers(1), after, vec![5], &[])).is_ok());
+    // Lists: only a split reads them, and nothing observes them.
+    let lists = |reader: Definition, observe: usize| {
+        refused(
+            vec![
+                Definition::Input(0),
+                MapList {
+                    length: Literal(1),
+                    element: Argument,
+                    source: TopLevel(0),
+                },
+                reader,
+            ],
+            vec![observe],
+        )
+    };
+    assert_eq!(
+        lists(Definition::Defer(TopLevel(1)), 2),
+        "node 2 (Defer): N 1 is a stream of lists, which only a Split reads"
+    );
+    assert_eq!(
+        lists(Definition::Split(TopLevel(0)), 2),
+        "node 2 (Split): N 0 is a stream of integers; a split reads the lists of a MapList"
+    );
+    assert_eq!(
+        lists(Definition::Split(TopLevel(1)), 1),
+        "observe: node 1 is a stream of lists; the comparison observes streams and cells of \
+         integers and booleans"
+    );
+    assert_eq!(
+        refused(counter(Some(3)), vec![4]),
+        "observe: node 4 is a Close, which makes no node; the comparison observes streams and \
+         cells of integers and booleans"
     );
 }
 
