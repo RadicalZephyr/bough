@@ -220,7 +220,20 @@ pub trait Source: Sized + 'static + sealed::Sealed {
     /// `Vec` accumulator becomes a push. The result is a [`State`], which
     /// every cell reader accepts and which has no stream view, since the new
     /// state does not exist until commit. The event waits for commit in the
-    /// node, so the mode must accept its type.
+    /// node, so the mode must accept its type; a `Threaded` graph refuses an
+    /// `Rc` event here:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _count = numbers
+    ///         .map(Rc::new)
+    ///         .accumulate_mut(b, 0u32, |_, n: &mut u32| *n += 1); // error: Rc is not Send
+    /// });
+    /// ```
     fn accumulate_mut<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> State<S>
     where
         M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<Self::Event>,
@@ -245,7 +258,17 @@ pub trait Source: Sized + 'static + sealed::Sealed {
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output
     /// per event. The output goes in the node's slot, so the mode must
-    /// accept its type.
+    /// accept its type; a `Threaded` graph refuses an `Rc` output here:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, _) = Graph::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
+    /// });
+    /// ```
     ///
     /// The state is private to the node and is updated when the node runs,
     /// at most once per transaction, so `f` always reads the state from

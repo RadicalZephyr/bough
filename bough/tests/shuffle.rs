@@ -3,10 +3,10 @@
 //! Only the interleaving of different nodes' listeners may move, and the
 //! test checks that it does, so the affordance is known to shuffle.
 
-use std::cell::RefCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::{Graph, Input, Source};
+use bough::{Graph, Input, Lift, Source, State};
 
 /// Everything one run observed: each listener's events in order, the
 /// cells' final values, and the global interleaving of listener calls.
@@ -207,4 +207,144 @@ fn snapshots_and_gates_read_the_value_before_the_instant_under_every_seed() {
         assert_eq!(*graph.sample(clipped), 20, "seed {seed:?}");
         assert_eq!(*graph.sample(gated), 50, "seed {seed:?}");
     }
+}
+
+/// The stage 2 cell operations under one seed: read-through cells, lifts
+/// with inputs that step together, accumulators, an in-place accumulator
+/// read by a map_cell, a lift, a snapshot and a gate, a scan, and steps
+/// views, with listeners on all of them. Besides the events and values,
+/// the run counts the calls of each read-through function, which a
+/// promotion that depended on evaluation order would change.
+fn run_cells(seed: Option<u64>) -> (Run, [u32; 5]) {
+    let calls: Rc<[StdCell<u32>; 5]> = Rc::new(Default::default());
+    let counted = |k: usize| {
+        let calls = calls.clone();
+        move || calls[k].set(calls[k].get() + 1)
+    };
+    let (c0, c1, c2, c3, c4) = (counted(0), counted(1), counted(2), counted(3), counted(4));
+    let (mut graph, (inputs, streams, cells, states)) = Graph::build(move |b| {
+        let (a, a_in) = b.input::<u64>();
+        let (c, c_in) = b.input::<u64>();
+        let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
+        let a = a.share(b);
+        let c = c.share(b);
+        let d = d.share(b);
+        let held_a = a.hold(b, 1u64);
+        let held_c = c.filter(|x| x % 3 != 0).hold(b, 2u64);
+        let held_d = d.hold(b, 3u64);
+        let doubled = held_a.map_cell(b, move |x| {
+            c0();
+            x * 2
+        });
+        let sum = (doubled, held_c).lift(b, move |x, y| {
+            c1();
+            x + y
+        });
+        let three = (held_a, held_c, held_d).lift(b, move |x, y, z| {
+            c2();
+            x * 100 + y * 10 + z
+        });
+        let chained = (sum, three).lift(b, move |s, t| {
+            c3();
+            s + t
+        });
+        let total = a.accumulate(b, 0u64, |x, t| t + x);
+        let recent = c.accumulate_mut(b, [0u64; 3], |x, r: &mut [u64; 3]| {
+            r.rotate_left(1);
+            r[2] = x;
+        });
+        let odd = a.accumulate_mut(b, false, |x, odd: &mut bool| *odd = x % 2 == 1);
+        let recent_sum: State<u64> = recent.map_cell(b, move |r| {
+            c4();
+            r.iter().sum()
+        });
+        let mixed: State<u64> = (recent_sum, total).lift(b, |r, t| r * 1000 + t);
+        let scanned = a.scan(b, 0u64, |x, n| (x * 10 + n, n + 1)).share(b);
+        let sum_steps = sum.steps(b).share(b);
+        let chained_steps = chained.steps(b).share(b);
+        let three_current = three.steps_with_current(b).share(b);
+        let read = d
+            .snapshot(sum, |x, s| x + s)
+            .snapshot(mixed, |x, m| x + m)
+            .gate(odd)
+            .share(b);
+        let inputs: [Input<u64>; 3] = [a_in, c_in, d_in];
+        (
+            inputs,
+            [scanned, sum_steps, chained_steps, three_current, read],
+            [doubled, sum, three, chained, total],
+            [recent_sum, mixed],
+        )
+    });
+    graph.set_shuffle_seed(seed);
+
+    let log: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+    let order: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+    let add = |log: &Rc<RefCell<Vec<Vec<String>>>>| {
+        log.borrow_mut().push(Vec::new());
+        log.borrow().len() - 1
+    };
+    let listener = |id: usize, tag: &'static str| {
+        let (log, order) = (log.clone(), order.clone());
+        move |v: &u64| {
+            log.borrow_mut()[id].push(format!("{tag} {v}"));
+            order.borrow_mut().push(id);
+        }
+    };
+    for stream in streams {
+        for _ in 0..2 {
+            let on = listener(add(&log), "event");
+            graph.listen(stream, move |v| on(&v)).keep();
+        }
+    }
+    for cell in cells {
+        graph.listen_cell(cell, listener(add(&log), "cell")).keep();
+        graph.listen_steps(cell, listener(add(&log), "step")).keep();
+    }
+    for state in states {
+        graph.listen_cell(state, listener(add(&log), "cell")).keep();
+        graph
+            .listen_steps(state, listener(add(&log), "step"))
+            .keep();
+    }
+    for sends in schedule() {
+        graph.transaction(|tx| {
+            for (input, value) in sends {
+                tx.send(inputs[input], value);
+            }
+        });
+    }
+    let mut samples: Vec<u64> = cells.iter().map(|c| *graph.sample(*c)).collect();
+    samples.extend(states.iter().map(|s| *graph.sample(*s)));
+    let per_listener = log.borrow().clone();
+    let interleaving = order.borrow().clone();
+    let counts = [0, 1, 2, 3, 4].map(|k| calls[k].get());
+    (
+        Run {
+            per_listener,
+            samples,
+            interleaving,
+        },
+        counts,
+    )
+}
+
+#[test]
+fn every_shuffle_seed_gives_the_same_cells_steps_and_function_calls() {
+    let (plain, plain_calls) = run_cells(None);
+    assert!(plain.per_listener.iter().all(|events| !events.is_empty()));
+    let mut interleavings = std::collections::BTreeSet::new();
+    interleavings.insert(plain.interleaving.clone());
+    for seed in 0..24 {
+        let (shuffled, calls) = run_cells(Some(seed));
+        assert_eq!(shuffled.per_listener, plain.per_listener, "seed {seed}");
+        assert_eq!(shuffled.samples, plain.samples, "seed {seed}");
+        assert_eq!(calls, plain_calls, "seed {seed}");
+        interleavings.insert(shuffled.interleaving);
+    }
+    assert!(
+        interleavings.len() >= 20,
+        "the shuffle moved dispatch order ({} distinct interleavings of 25)",
+        interleavings.len()
+    );
 }
