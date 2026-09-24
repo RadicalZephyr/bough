@@ -30,3 +30,6 @@ smoke = []
 [dependencies]
 bough-derive = { workspace = true, optional = true }
 critical-section = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
