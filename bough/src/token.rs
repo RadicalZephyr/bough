@@ -27,8 +27,10 @@ pub(crate) mod sealed {
 
 /// Anything that names a node: the five token types.
 ///
-/// Used by [`Build::depends`](crate::Build::depends) and
-/// [`Graph::anchor`](crate::Graph::anchor), which take any token.
+/// Used by [`Build::depends`](crate::Build::depends), which takes a slice of
+/// any tokens. Every token type is also [`Trace`](crate::Trace), visiting
+/// itself, so [`Graph::anchor`](crate::Graph::anchor), which takes any
+/// value that holds tokens, takes a single token too.
 pub trait TokenRef: sealed::Sealed {}
 
 /// A linear stream of events.

@@ -126,7 +126,7 @@ fn build_drive_drop<L: 'static>(
     build: impl FnOnce(&mut Build) -> (Vec<Input<u32>>, L) + 'static,
     listen: impl FnOnce(&mut Graph, &L) -> Vec<Listener>,
     drive: impl Fn(&mut Graph, &[Input<u32>], u32),
-    stale: impl FnOnce(&Graph, &L) -> bool,
+    stale: impl FnOnce(&mut Graph, &L) -> bool,
 ) -> Counts {
     let (logic_out, logic_in) = side_channel::<L>();
     let (mut graph, inputs) = Graph::build(move |b| {
@@ -145,7 +145,10 @@ fn build_drive_drop<L: 'static>(
     drop(handles);
     graph.collect_garbage();
     assert_eq!(graph.live_nodes(), inputs.len(), "only the inputs are left");
-    assert!(stale(&graph, &logic), "the freed nodes' tokens are stale");
+    assert!(
+        stale(&mut graph, &logic),
+        "the freed nodes' tokens are stale"
+    );
     Counts {
         built,
         listened,
@@ -377,6 +380,50 @@ fn navigation() -> (Graph, Input<u32>, Cell<Vec<Shown>>) {
         (clicks_in, log_events(b, events))
     });
     (graph, clicks_in, log)
+}
+
+/// Build, drive, drop, collect, compare for the navigation loop, rooted by
+/// a listener on its events rather than by the build's return value:
+/// once the listener is dropped, the loop, the construct, the switch and
+/// the current screen go, and only the clicks' input is left.
+#[test]
+fn the_navigation_loop_is_collected_once_its_listener_is_dropped() {
+    let (heard, on) = recorder::<Shown>();
+    let on = Rc::new(RefCell::new(on));
+    let counts = build_drive_drop(
+        |b| {
+            let (clicks, clicks_in) = b.input::<u32>();
+            let clicks = clicks.share(b);
+            let (navigate, navigate_loop) = b.stream_loop::<u32>();
+            let first = screen(b, clicks, 0);
+            let screens = navigate.construct(b, move |b, n| screen(b, clicks, n));
+            let current = screens.hold(b, first);
+            let events = current.switch_stream(b).share(b);
+            navigate_loop.close(
+                b,
+                events.filter_map(|(n, click, _)| (click == 0).then_some(n + 1)),
+            );
+            (vec![clicks_in], events)
+        },
+        |graph, events| {
+            let on = on.clone();
+            vec![graph.listen(*events, move |e| (on.borrow_mut())(e))]
+        },
+        |graph, inputs, k| graph.send(inputs[0], if k % 3 == 0 { 0 } else { k }),
+        |graph, events| graph.try_listen(*events, |_| ()).err() == Some(TokenError::Stale),
+    );
+    // Built: the input and its share, the loop, the first screen's two
+    // nodes, the construct, the hold, the switch and its share. After six
+    // navigations and a collection, the current screen replaces the first.
+    assert_eq!(
+        counts,
+        Counts {
+            built: 9,
+            listened: 9,
+            dropped: 1
+        }
+    );
+    assert_eq!(heard.borrow().len(), 20);
 }
 
 /// The navigation loop grows by two nodes a screen without collection
@@ -1102,4 +1149,67 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
     assert_eq!(graph.live_nodes(), 7);
     graph.send(n_in, 2);
     assert_eq!(*graph.sample(held), 2);
+}
+
+/// RFD 3 asks a declaration of a closure that captures a token. `map_to`
+/// takes no closure but keeps its value in the chain, where the collector
+/// does not look either: a token given to `map_to` needs a declaration
+/// too, or the node it names is collected while only the chain names it.
+#[test]
+fn a_token_given_to_map_to_needs_a_declaration_too() {
+    for declare in [false, true] {
+        let (mut graph, (go_in, shown)) = Graph::build(move |b| {
+            let (go, go_in) = b.input::<()>();
+            let home = b.constant("home");
+            let away = b.constant("away");
+            let chosen = go.map_to(away).hold(b, home);
+            if declare {
+                b.depends(&chosen, &[&away]);
+            }
+            (go_in, chosen.switch_cell(b))
+        });
+        graph.set_collect_after_every_transaction(true);
+        if declare {
+            graph.send(go_in, ());
+            assert_eq!(*graph.sample(shown), "away");
+        } else {
+            let message = panic_message(|| graph.send(go_in, ()));
+            assert!(message.contains("a stale token"), "{message}");
+        }
+    }
+}
+
+/// A leak the model allows: a declaration has no inverse. A construct
+/// closure that declares, on a node that lives as long as the graph, that
+/// it keeps the screen the closure built, keeps every screen ever built:
+/// the node's reach grows by one entry a run, and no collection frees a
+/// screen. Declared on the closure's own node, as RFD 3 asks, the old
+/// screens go.
+#[test]
+fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
+    for on_long_lived in [true, false] {
+        let (mut graph, (open_in, _cells)) = Graph::build(move |b| {
+            let (open, open_in) = b.input::<u32>();
+            let open = open.share(b);
+            let registry = open.hold(b, 0u32);
+            let screens = open.construct(b, move |b, n| {
+                let screen = b.constant(n);
+                if on_long_lived {
+                    b.depends(&registry, &[&screen]);
+                }
+                screen
+            });
+            let current = screens.hold(b, registry).switch_cell(b);
+            (open_in, (registry, current))
+        });
+        graph.set_collection_policy(CollectionPolicy::Manual);
+        graph.collect_garbage();
+        let before = graph.live_nodes();
+        for n in 1..=50 {
+            graph.send(open_in, n);
+        }
+        graph.collect_garbage();
+        let grown = graph.live_nodes() - before;
+        assert_eq!(grown, if on_long_lived { 50 } else { 1 });
+    }
 }
