@@ -22,6 +22,10 @@ critical-section = ["dep:critical-section"]
 derive = ["dep:bough-derive"]
 # Per-transaction phase counters for attributing a regression to a phase.
 statistics = []
+# Spike scaffolding, not API: `bough::smoke` builds and drives a graph with
+# every node kind the engine has so far, so that a library build for a
+# bare-metal target pushes the generic engine through code generation.
+smoke = []
 
 [dependencies]
 bough-derive = { workspace = true, optional = true }

@@ -70,6 +70,8 @@ mod graph;
 mod lift;
 mod mode;
 mod slot;
+#[cfg(feature = "smoke")]
+mod smoke;
 mod source;
 mod token;
 mod trace;
@@ -88,6 +90,9 @@ pub use lift::Lift;
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
 pub use slot::InputSlot;
+#[cfg(feature = "smoke")]
+#[doc(hidden)]
+pub use smoke::smoke;
 pub use source::{Filter, FilterMap, Gate, Map, MapTo, Node, Once, Snapshot, Source};
 pub use token::{Cell, Input, Shared, Stream, TokenRef};
 pub use trace::{Leaf, Trace, Tracer};

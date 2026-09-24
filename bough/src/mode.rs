@@ -144,6 +144,34 @@ pub enum Erase<T> {
 /// stores a user type, so a bound left off a materializer does not compile.
 /// Downstream impls were never possible: coherence rejects
 /// `impl Accepts<NotSend> for Threaded`.
+///
+/// A function generic over the mode builds graph with the bounds its
+/// materializers need. It takes its closures from its caller, whose mode is
+/// concrete, or uses function pointers, because a bound can name those
+/// types:
+///
+/// ```
+/// use bough::{Accepts, Build, Cell, Map, Mode, Source, Stream};
+///
+/// fn plus<M, F>(b: &mut Build<M>, numbers: Stream<u32>, f: F) -> Cell<u32>
+/// where
+///     M: Mode + Accepts<u32> + Accepts<Map<Stream<u32>, F>>,
+///     F: Fn(u32) -> u32 + 'static,
+/// {
+///     numbers.map(f).hold(b, 0)
+/// }
+/// ```
+///
+/// It cannot make a closure of its own and store it, since the bound would
+/// have to name the closure's type:
+///
+/// ```compile_fail,E0277
+/// use bough::{Accepts, Build, Cell, Mode, Source, Stream};
+///
+/// fn plus_one<M: Mode + Accepts<u32>>(b: &mut Build<M>, numbers: Stream<u32>) -> Cell<u32> {
+///     numbers.map(|n| n + 1).hold(b, 0) // error: M: Accepts<Map<Stream<u32>, {closure}>>
+/// }
+/// ```
 pub trait Accepts<T: ?Sized>: Mode {
     /// Erases `T` in one of the engine's shapes.
     #[doc(hidden)]

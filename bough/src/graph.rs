@@ -658,3 +658,35 @@ impl RemoteTransaction {
         todo!()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::slot;
+    use crate::{Graph, Local, Source};
+
+    /// Claim 1, read off the data plane: a linear consumer moves the event
+    /// out of its dependency's slot, and a shared slot keeps its event for
+    /// every consumer.
+    #[test]
+    fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
+        let (mut graph, (linear_in, shared_in, shared)) = Graph::build(|b| {
+            let (linear, linear_in) = b.input::<u32>();
+            let _latest = linear.hold(b, 0u32);
+            let (events, shared_in) = b.input::<u32>();
+            let shared = events.share(b);
+            let _plus = shared.map(|x| x + 1).hold(b, 0u32);
+            let _same = shared.hold(b, 0u32);
+            (linear_in, shared_in, shared)
+        });
+        let data = |graph: &Graph, index: u32| {
+            *slot::<Local, u32>(&graph.build.store.data[index as usize])
+        };
+        graph.send(linear_in, 5);
+        assert_eq!(data(&graph, linear_in.token.index), None);
+        graph.send(shared_in, 7);
+        // The shared node took its input's event, since its own chain reads
+        // a linear stream, and both of its consumers cloned from it.
+        assert_eq!(data(&graph, shared_in.token.index), None);
+        assert_eq!(data(&graph, shared.token.index), Some(7));
+    }
+}
