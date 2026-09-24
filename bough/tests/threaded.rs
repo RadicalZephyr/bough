@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bough::{Graph, Lift, Listener, Source, Threaded};
+use bough::{Graph, Lift, Listener, Source, State, Threaded};
 
 #[test]
 fn a_threaded_graph_is_send_and_runs_on_another_thread() {
@@ -193,4 +193,85 @@ fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
     });
     assert_eq!(driver.join().unwrap(), (8, 12));
     assert_eq!(*heard.lock().unwrap(), [4, 2, 1, 1, 3, 1]);
+}
+
+/// Every switch kind in a Threaded graph: a switch_cell with a steps view,
+/// a switch_cell over states, a switch_stream among shared streams, and one
+/// among linear streams in constant cells selected through a switch_cell.
+/// switch_stream requires the mode to accept the event type, which u64
+/// satisfies. Built on one thread, driven and sampled on another, where
+/// the switches move: at [2] each moves, the switch_cell to a map_cell
+/// whose value after the instant the steps view reads, and each
+/// switch_stream still forwards its old stream's event.
+#[test]
+fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
+    let (mut graph, (numbers_in, pick_in, cells)) = Graph::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        let numbers = numbers.share(b);
+        let (pick, pick_in) = b.input::<bool>();
+        let pick = pick.share(b);
+        let latest = numbers.hold(b, 0u64);
+        let doubled = latest.map_cell(b, |n| n * 2);
+        let shown = pick
+            .map(move |p| if p { doubled } else { latest })
+            .hold(b, latest)
+            .switch_cell(b);
+        let views = shown.steps(b).accumulate(b, 0u64, |v, t| t + v);
+        let all = numbers.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<u64>| v.push(n));
+        let odd =
+            numbers
+                .filter(|n| n % 2 == 1)
+                .accumulate_mut(b, Vec::new(), |n, v: &mut Vec<u64>| v.push(n));
+        let current: State<Vec<u64>> = pick
+            .map(move |p| if p { odd } else { all })
+            .hold(b, all)
+            .switch_cell(b);
+        let evens = numbers.filter(|n| n % 2 == 0).share(b);
+        let followed = pick
+            .map(move |p| if p { evens } else { numbers })
+            .hold(b, numbers)
+            .switch_stream(b)
+            .accumulate(b, 0u64, |n, t| t + n);
+        let tens = numbers.map(|n| n * 10).node(b);
+        let tens = b.constant(tens);
+        let hundreds = numbers.map(|n| n * 100).node(b);
+        let hundreds = b.constant(hundreds);
+        let lines = pick
+            .map(move |p| if p { hundreds } else { tens })
+            .hold(b, tens)
+            .switch_cell(b);
+        let taken = lines.switch_stream(b).accumulate(b, 0u64, |n, t| t + n);
+        (
+            numbers_in,
+            pick_in,
+            (shown, views, current, followed, taken),
+        )
+    });
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let writer = heard.clone();
+    graph
+        .listen_steps(cells.2, move |v| writer.lock().unwrap().push(v.len()))
+        .keep();
+    let driver = thread::spawn(move || {
+        graph.send(numbers_in, 3);
+        graph.transaction(|tx| {
+            tx.send(pick_in, true);
+            tx.send(numbers_in, 4);
+        });
+        graph.send(numbers_in, 5);
+        let (shown, views, current, followed, taken) = cells;
+        (
+            [*graph.sample(shown), *graph.sample(views)],
+            graph.sample(current).clone(),
+            [*graph.sample(followed), *graph.sample(taken)],
+        )
+    });
+    let (shown, current, streams) = driver.join().unwrap();
+    // shown: 3, then doubled at [2], 8, then 10; its steps sum to 21.
+    assert_eq!(shown, [10, 21]);
+    assert_eq!(current, [3, 5]);
+    // followed: 3, and 4 at the switch instant, then only evens: 5 drops.
+    // taken: 30, and 40 at the switch instant, then 500.
+    assert_eq!(streams, [7, 570]);
+    assert_eq!(*heard.lock().unwrap(), [1, 1, 2]);
 }

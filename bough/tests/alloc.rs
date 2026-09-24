@@ -20,8 +20,12 @@
 //! fixed-size state; and from stage 4 child transactions: a split of a
 //! fixed-size array, whose iterator allocates nothing, and a defer, merged
 //! at child index 0, with a hold and listeners in the children, and a
-//! countdown loop through a defer that goes up to three child levels deep.
-//! Later stages widen it.
+//! countdown loop through a defer that goes up to three child levels deep;
+//! and from stage 5 switches that move at every transaction between inners
+//! seen before: a switch_cell with a steps view and a cell listener, a
+//! switch_stream between shared streams, and a switch_stream between
+//! linear streams in constant cells, selected through a switch_cell, whose
+//! one-consumer claim moves with it. Later stages widen it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
@@ -62,6 +66,18 @@ static GLOBAL: Counting = Counting;
 fn tally() -> (Rc<StdCell<u64>>, Rc<StdCell<u64>>) {
     let c = Rc::new(StdCell::new(0));
     (c.clone(), c)
+}
+
+/// Switches moved since the graph was built, with the `statistics`
+/// feature.
+#[cfg(feature = "statistics")]
+fn relinks(graph: &Graph) -> Option<u64> {
+    Some(graph.statistics().relinks)
+}
+
+#[cfg(not(feature = "statistics"))]
+fn relinks(_: &Graph) -> Option<u64> {
+    None
 }
 
 #[test]
@@ -170,13 +186,38 @@ fn steady_state_transactions_do_not_allocate() {
             down_loop.close(b, countdown);
             let counted_down = countdown.accumulate(b, 0u64, |n, t| t.wrapping_add(n));
             let stage4 = (children, last_child, countdown, counted_down);
+
+            // Stage 5: each drive below sends i and then i + 1, so every
+            // switch's outer steps twice per drive and moves once, between
+            // two inners it has followed before.
+            let picked = numbers
+                .map(move |x| if x % 2 == 0 { total } else { tripled })
+                .hold(b, total);
+            let switched = picked.switch_cell(b);
+            let switched_view = switched.steps(b);
+            let evens = numbers.filter(|x| x % 2 == 0).share(b);
+            let odds = numbers.filter(|x| x % 2 == 1).share(b);
+            let followed = numbers
+                .map(move |x| if x % 2 == 0 { odds } else { evens })
+                .hold(b, evens);
+            let followed = followed.switch_stream(b).share(b);
+            let plus = numbers.map(|x| x + 1).node(b);
+            let plus = b.constant(plus);
+            let times = numbers.map(|x| x.wrapping_mul(3)).node(b);
+            let times = b.constant(times);
+            let lines = numbers
+                .map(move |x| if x % 2 == 0 { plus } else { times })
+                .hold(b, plus)
+                .switch_cell(b);
+            let taken = lines.switch_stream(b).share(b);
+            let stage5 = (switched, switched_view, followed, taken);
             (
                 (numbers_in, bumps_in, open_in),
                 (total, both, merged),
-                (stage2, stage3, stage4),
+                (stage2, stage3, stage4, stage5),
             )
         });
-    let (stage2, stage3, stage4) = later;
+    let (stage2, stage3, stage4, stage5) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
     let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
     let (heard, recorder) = tally();
@@ -233,6 +274,26 @@ fn steady_state_transactions_do_not_allocate() {
         .listen(countdown, move |_| on_countdown.set(on_countdown.get() + 1))
         .keep();
 
+    let (switched, switched_view, followed, taken) = stage5;
+    let (switch_steps, on_switch_step) = tally();
+    graph
+        .listen_cell(switched, move |v| on_switch_step.set(*v))
+        .keep();
+    let (switch_views, on_switch_view) = tally();
+    graph
+        .listen(switched_view, move |_| {
+            on_switch_view.set(on_switch_view.get() + 1)
+        })
+        .keep();
+    let (follows, on_follow) = tally();
+    graph
+        .listen(followed, move |_| on_follow.set(on_follow.get() + 1))
+        .keep();
+    let (takes, on_take) = tally();
+    graph
+        .listen(taken, move |_| on_take.set(on_take.get() + 1))
+        .keep();
+
     let drive = |graph: &mut Graph, i: u64| {
         graph.send(numbers_in, i);
         graph.transaction(|tx| {
@@ -246,10 +307,18 @@ fn steady_state_transactions_do_not_allocate() {
         drive(&mut graph, i); // warm up: reused buffers reach their size
     }
     let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let views_before = switch_views.get();
+    let relinks_before = relinks(&graph);
     for i in 0..10_000 {
         drive(&mut graph, i);
     }
     let plain = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    // The switch_cell steps at every transaction whose outer steps.
+    assert!(switch_views.get() - views_before >= 20_000);
+    if let (Some(after), Some(before)) = (relinks(&graph), relinks_before) {
+        // Four switches, each moving once per drive.
+        assert_eq!(after - before, 40_000, "relinks in 10,000 drives");
+    }
 
     graph.set_shuffle_seed(Some(3));
     for i in 0..100 {
@@ -292,4 +361,7 @@ fn steady_state_transactions_do_not_allocate() {
     assert!(child_events.get() > 0);
     assert_eq!(last_children.get(), *graph.sample(last_child));
     assert!(countdowns.get() > 0 && *graph.sample(counted_down) > 0);
+    // The stage 5 listeners kept up with the switches.
+    assert_eq!(switch_steps.get(), *graph.sample(switched));
+    assert!(follows.get() > 0 && takes.get() > 0);
 }
