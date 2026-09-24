@@ -45,7 +45,7 @@ use super::DoubleSend;
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use super::{TokenFault, clear_slot_of};
+use super::TokenFault;
 use crate::build::Build;
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -387,7 +387,7 @@ impl<M: Mode> Build<M> {
     pub(crate) fn cancel(&mut self) {
         let Build { store, s, .. } = self;
         for &n in &s.starts {
-            clear_slot_of(store, n);
+            (store.ops[n as usize].clear_slot)(&mut store.data[n as usize]);
         }
         s.starts.clear();
         self.in_tx = false;

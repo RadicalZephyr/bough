@@ -2,6 +2,7 @@
 //! and `pump` runs each unit as one transaction, in arrival order, after
 //! the slots. A unit is never split and never merged; a unit whose send
 //! fails is dropped whole at `pump`, and the rest stay queued.
+#![cfg(feature = "std")]
 
 use std::any::Any;
 use std::cell::RefCell;

@@ -10,6 +10,7 @@
 //! affine maps, associative and not commutative, on plain integers.
 //! Each property has a static slot of its own, reconnected in every case:
 //! a dropped graph lets its slots go.
+#![cfg(feature = "std")]
 
 use std::cell::RefCell;
 use std::rc::Rc;

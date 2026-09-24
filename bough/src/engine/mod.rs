@@ -59,11 +59,6 @@ pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
 pub use sched::Statistics;
 pub(crate) use store::{Store, TokenFault};
-
-/// Empties node `n`'s slot through its own `clear_slot`.
-pub(crate) fn clear_slot_of<M: Mode>(store: &mut Store<M>, n: u32) {
-    (store.ops[n as usize].clear_slot)(&mut store.data[n as usize]);
-}
 pub(crate) use tx::DoubleSend;
 
 /// A transaction serial: one per instant, child instants included, so a
@@ -308,7 +303,12 @@ pub(crate) struct Ops<M: Mode> {
     /// neither roots nor dangles, and an event type needs no `Trace`.
     pub(crate) clear_slot: fn(&mut Data<M>),
     /// An input: starts it with the event in an `&mut Option<A>`, for the
-    /// senders that do not know `A`, an input slot and a remote unit.
+    /// senders that do not know `A`, an input slot and a remote unit, which
+    /// a build without a lock for them does not have.
+    #[cfg_attr(
+        not(any(feature = "std", feature = "critical-section")),
+        allow(dead_code)
+    )]
     pub(crate) fire: FireFn<M>,
 }
 

@@ -12,6 +12,7 @@
 //!
 //! Each driver sits between `// ---- begin` and `// ---- end` markers, so
 //! that its lines can be counted.
+#![cfg(feature = "std")]
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

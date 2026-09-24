@@ -5,6 +5,7 @@
 //!
 //! A slot is a `static`, and the tests of this binary run at once on
 //! several threads, so every test has slots of its own.
+#![cfg(feature = "std")]
 
 use std::any::Any;
 use std::cell::RefCell;

@@ -711,8 +711,12 @@ impl<M: Mode> Graph<M> {
     /// a future's `poll`, or a bare-metal main loop. Latency is the distance
     /// from a send to the next pump. A slot written while the pump runs, by
     /// a listener or by another thread, is drained now if its turn has not
-    /// come and at the next pump otherwise. A collection that is due runs
-    /// before each transaction opens, as for [`send`](Graph::send).
+    /// come and at the next pump otherwise. The units are those queued when
+    /// the pump reaches them; one queued later, by a listener feeding back
+    /// or by another thread, waits for the next pump, whose wake it has
+    /// already made, so a listener that always sends cannot keep a pump
+    /// from returning. A collection that is due runs before each
+    /// transaction opens, as for [`send`](Graph::send).
     ///
     /// A unit runs as a transaction the driver opens, and its closure sends
     /// into it. A unit whose send fails is dropped whole, with none of its
@@ -756,6 +760,8 @@ impl<M: Mode> Graph<M> {
     /// release build, a stale send is counted and skipped rather than
     /// returned.
     fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+        // Without a lock there are no slots and no units to pump.
+        let _ = skip_stale;
         #[cfg(any(feature = "std", feature = "critical-section"))]
         self.pump_slots(skip_stale)?;
         #[cfg(all(
@@ -850,6 +856,9 @@ impl<M: Mode> Graph<M> {
     /// on the interrupt itself gives `Waker::noop()`. A waker that would
     /// wake the same task as the one registered changes nothing.
     pub fn set_waker(&mut self, waker: Waker) {
+        // Without a lock nothing can wake the driver, so it keeps no waker.
+        #[cfg(not(any(feature = "std", feature = "critical-section")))]
+        drop(waker);
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
             let edge = &mut self.build.edge;

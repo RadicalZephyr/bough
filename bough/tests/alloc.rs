@@ -37,13 +37,20 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell as StdCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+#[cfg(feature = "std")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "std")]
 use std::sync::mpsc;
+#[cfg(feature = "std")]
 use std::task::{Wake, Waker};
+#[cfg(feature = "std")]
 use std::thread;
 
-use bough::{Cell, CollectionPolicy, Graph, InputSlot, Lift, Source};
+#[cfg(feature = "std")]
+use bough::InputSlot;
+use bough::{Cell, CollectionPolicy, Graph, Lift, Source};
 
 struct Counting;
 
@@ -493,9 +500,11 @@ fn steady_state_collections_do_not_allocate() {
 
 /// A waker that counts its wakes and allocates nothing when woken or
 /// cloned.
+#[cfg(feature = "std")]
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 
+#[cfg(feature = "std")]
 impl Wake for Wakes {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
@@ -509,6 +518,7 @@ impl Wake for Wakes {
 /// in place and wakes the driver, and a pump of slots runs each pending
 /// one as a transaction; neither allocates. Two slots, one on each of two
 /// inputs, merged; the driver's waker is registered, so every write wakes.
+#[cfg(feature = "std")]
 #[test]
 fn slot_writes_and_pumps_do_not_allocate() {
     static SENSOR: InputSlot<u64> = InputSlot::new(|a, b| a + b);
@@ -554,6 +564,7 @@ fn slot_writes_and_pumps_do_not_allocate() {
 /// The driver's pumps, which pop each unit, run it as a transaction and
 /// drop it, allocate nothing. The sender runs on a thread of its own and
 /// counts its own allocations.
+#[cfg(feature = "std")]
 #[test]
 fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
     const UNITS: u64 = 1_000;

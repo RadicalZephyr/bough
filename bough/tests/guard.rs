@@ -3,6 +3,7 @@
 //! from a listener, from the closure of a transaction and from another
 //! thread it queues. And the poison mirror: once an entry finds the graph
 //! poisoned, every remote send fails.
+#![cfg(feature = "std")]
 
 use std::any::Any;
 use std::cell::RefCell;

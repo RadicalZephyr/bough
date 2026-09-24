@@ -4,7 +4,7 @@
 //! graph moves into the thread that drives it. The build closure is RFD 6's,
 //! with `#[derive(Trace)]` and a standard `Sender`, whose `send` is
 //! tokio's `try_send`.
-#![cfg(feature = "derive")]
+#![cfg(all(feature = "derive", feature = "std"))]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

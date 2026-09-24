@@ -93,10 +93,6 @@
 //! assert_eq!(graph.sample(label), "2");
 //! ```
 
-// The later stages' bodies are still `todo!()`, so their parameters and
-// fields are unused, and the engine carries the kinds, fields and entries
-// those stages fill in. The names are the documentation, so they stay.
-#![allow(dead_code, unused_variables)]
 #![warn(missing_docs)]
 #![no_std]
 #![forbid(unsafe_code)]
