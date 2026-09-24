@@ -49,6 +49,7 @@
 #![allow(dead_code, unused_variables)]
 #![warn(missing_docs)]
 #![no_std]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 #[cfg(feature = "std")]
@@ -56,6 +57,7 @@ extern crate std;
 
 mod build;
 mod cell;
+mod engine;
 mod error;
 mod graph;
 mod lift;
