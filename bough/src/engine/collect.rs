@@ -6,8 +6,9 @@
 //! tokens a `Trace` walk finds in its committed value (a hold's, an
 //! accumulator's, an in-place accumulator's state, `scan`'s state), and
 //! what `cold.reach` records: what a chain's `Trace` visits when its node
-//! is built (the cells it snapshots or gates on), `depends` declarations, a
-//! split output's capture and a switch_stream's outer. A switch's current inner is a dependency, and is also in its
+//! is built (the cells it snapshots or gates on and `map_to`'s value),
+//! `depends` declarations, a split output's capture and a switch_stream's
+//! outer. A switch's current inner is a dependency, and is also in its
 //! outer's value. Reach is wider than dependency, and only collection
 //! follows it: marking a transaction follows dependents alone.
 //!

@@ -1151,32 +1151,24 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
     assert_eq!(*graph.sample(held), 2);
 }
 
-/// RFD 3 asks a declaration of a closure that captures a token. `map_to`
-/// takes no closure but keeps its value in the chain, where the collector
-/// does not look either: a token given to `map_to` needs a declaration
-/// too, or the node it names is collected while only the chain names it.
+/// A token given to `map_to` lives in the chain, and a chain is traced when
+/// its node is built, so the node keeps the token alive with no
+/// declaration. Under the stress setting the collection that opens the
+/// transaction leaves `away`, which nothing but the chain names, and the
+/// switch moves to it. A closure that returned `away` would need a
+/// declaration: a closure is opaque (RFD 3).
 #[test]
-fn a_token_given_to_map_to_needs_a_declaration_too() {
-    for declare in [false, true] {
-        let (mut graph, (go_in, shown)) = Graph::build(move |b| {
-            let (go, go_in) = b.input::<()>();
-            let home = b.constant("home");
-            let away = b.constant("away");
-            let chosen = go.map_to(away).hold(b, home);
-            if declare {
-                b.depends(&chosen, &[&away]);
-            }
-            (go_in, chosen.switch_cell(b))
-        });
-        graph.set_collect_after_every_transaction(true);
-        if declare {
-            graph.send(go_in, ());
-            assert_eq!(*graph.sample(shown), "away");
-        } else {
-            let message = panic_message(|| graph.send(go_in, ()));
-            assert!(message.contains("a stale token"), "{message}");
-        }
-    }
+fn a_token_given_to_map_to_is_kept_by_its_chain() {
+    let (mut graph, (go_in, shown)) = Graph::build(move |b| {
+        let (go, go_in) = b.input::<()>();
+        let home = b.constant("home");
+        let away = b.constant("away");
+        let chosen = go.map_to(away).hold(b, home);
+        (go_in, chosen.switch_cell(b))
+    });
+    graph.set_collect_after_every_transaction(true);
+    graph.send(go_in, ());
+    assert_eq!(*graph.sample(shown), "away");
 }
 
 /// A leak the model allows: a declaration has no inverse. A construct

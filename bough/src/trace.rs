@@ -43,15 +43,15 @@ impl Tracer {
 /// committed value names is what it reaches: a hold of a cell token keeps
 /// that cell alive, a routing table of screens keeps every screen. So the
 /// operations that persist a value, `hold`, `accumulate`,
-/// `accumulate_mut`, `scan`, `constant` and `input_cell`, require `Trace`
-/// of it, and so does the build closure's return value, which is traced
+/// `accumulate_mut`, `scan`, `constant`, `input_cell` and `map_to`, require
+/// `Trace` of it, and so does the build closure's return value, which is traced
 /// once for the permanent roots. A stream's events need nothing: every
 /// slot is emptied before a collection, so an event roots nothing.
 ///
 /// Implementations ship for the tokens, which visit themselves, for the
 /// standard library's types and collections, for tuples and arrays, and for
-/// the chain adapters, which visit the cells a chain reads and end at its
-/// source; a foreign type that holds no tokens goes in a [`Leaf`]. A hand-written
+/// the chain adapters, which visit the cells a chain reads and the value
+/// `map_to` emits, and end at its source; a foreign type that holds no tokens goes in a [`Leaf`]. A hand-written
 /// implementation visits every token the value holds:
 ///
 /// ```

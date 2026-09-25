@@ -77,7 +77,8 @@ pub(crate) mod sealed {
 /// crate's own.
 ///
 /// A chain is [`Trace`]. It visits the tokens its adapters hold, the cells
-/// `snapshot` and `gate` read, and ends at its source token. A materializer
+/// `snapshot` and `gate` read and the value of `map_to`, and ends at its
+/// source token. A materializer
 /// traces the chain once, when it builds the node: what the trace finds
 /// besides the dependency is the node's reach (RFD 3), since the chain never
 /// changes after it is built. A closure is opaque to the trace, so a token a
@@ -127,9 +128,27 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     }
 
     /// Replaces each event with a clone of one value.
+    ///
+    /// The chain keeps the value for as long as its node lives, so the value
+    /// is [`Trace`], like every value the graph keeps: the node is traced
+    /// when it is built, and a token in the value is in its reach, with no
+    /// declaration (RFD 3). A foreign type that holds no tokens goes in a
+    /// [`Leaf`](crate::Leaf); one that is not `Trace` does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Graph, Source};
+    ///
+    /// #[derive(Clone)]
+    /// struct Label(&'static str);
+    ///
+    /// let (graph, _) = Graph::build(|b| {
+    ///     let (clicks, _clicks_in) = b.input::<()>();
+    ///     let _ = clicks.map_to(Label("clicked")).node(b); // error: Label is not Trace
+    /// });
+    /// ```
     fn map_to<B>(self, value: B) -> MapTo<Self, B>
     where
-        B: Clone + 'static,
+        B: Clone + Trace + 'static,
     {
         MapTo {
             source: self,
@@ -822,7 +841,7 @@ pub struct MapTo<S, B> {
     value: B,
 }
 impl<S, B> sealed::Sealed for MapTo<S, B> {}
-impl<S: Source, B: Clone + 'static> Source for MapTo<S, B> {
+impl<S: Source, B: Clone + Trace + 'static> Source for MapTo<S, B> {
     type Event = B;
     fn dependency(&self) -> Token {
         self.source.dependency()
@@ -831,8 +850,10 @@ impl<S: Source, B: Clone + 'static> Source for MapTo<S, B> {
         self.source.pull(cx).map(|_| self.value.clone())
     }
 }
-impl<S: Trace, B> Trace for MapTo<S, B> {
+impl<S: Trace, B: Trace> Trace for MapTo<S, B> {
+    /// The value every event carries, then the source.
     fn trace(&self, tracer: &mut Tracer) {
+        self.value.trace(tracer);
         self.source.trace(tracer)
     }
 }
