@@ -112,6 +112,33 @@ pub enum RemoteTransactionError {
     GraphDropped,
 }
 
+/// Failure modes of the calls on an [`Io`](crate::Io) that can wait for
+/// the graph: [`send`](crate::Io::send) and
+/// [`transaction`](crate::Io::transaction).
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoError {
+    /// The [`Owner`](crate::Owner) was dropped, and the graph with it.
+    Gone,
+    /// A previous transaction never finished: a panic escaped it.
+    Poisoned,
+}
+
+/// Failure modes of the calls on an [`Io`](crate::Io) that cannot wait
+/// for the graph: [`with_sample`](crate::Io::with_sample) and
+/// [`with_graph`](crate::Io::with_graph).
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowError {
+    /// The graph is busy: a transaction, its listeners, or another call on
+    /// it is in progress, and this call cannot wait for it.
+    Busy,
+    /// The [`Owner`](crate::Owner) was dropped, and the graph with it.
+    Gone,
+    /// A previous transaction never finished: a panic escaped it.
+    Poisoned,
+}
+
 macro_rules! display_error {
     ($ty:ty, $text:literal) => {
         impl fmt::Display for $ty {
@@ -140,3 +167,7 @@ display_error!(RemoteSendError, "remote send failed");
     any(feature = "std", feature = "critical-section")
 ))]
 display_error!(RemoteTransactionError, "remote transaction failed");
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+display_error!(IoError, "the graph refused a call through its handle");
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+display_error!(NowError, "the graph refused a call that cannot wait");

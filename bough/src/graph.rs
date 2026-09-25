@@ -150,6 +150,24 @@ impl Graph<Threaded> {
     }
 }
 
+/// What the same-thread handle needs of the graph it shares, which it
+/// cannot borrow while the graph is busy.
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Graph<Local> {
+    /// The inbox: its poison mirror, read while the graph is busy.
+    pub(crate) fn inbox(&self) -> Arc<Inbox> {
+        self.build.edge.inbox.clone()
+    }
+
+    /// Wakes the waker the driver registered, if there is one: the
+    /// handle's queue has calls left for a later run.
+    pub(crate) fn wake(&self) {
+        if let Some(waker) = &self.build.edge.waker {
+            waker.wake_by_ref();
+        }
+    }
+}
+
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
 
 /// What the operations on collected nodes that the semantics cannot
@@ -187,7 +205,7 @@ impl<M: Mode> Graph<M> {
     /// Whether a transaction never finished. Every entry checks this, and
     /// one that finds it set mirrors it into the inbox, so that remote
     /// sends fail from then on (RFD 6).
-    fn poisoned(&self) -> bool {
+    pub(crate) fn poisoned(&self) -> bool {
         let poisoned = self.build.in_tx;
         #[cfg(all(
             target_has_atomic = "ptr",
@@ -257,7 +275,7 @@ impl<M: Mode> Graph<M> {
     /// under the stress setting. Before the transaction rather than after
     /// it, so that I/O code can anchor a token a listener handed it in the
     /// transaction before (RFD 2's receive, then wire).
-    fn collect_if_due(&mut self) {
+    pub(crate) fn collect_if_due(&mut self) {
         let due = self.stress
             || (self.policy == CollectionPolicy::Automatic
                 && self
@@ -298,6 +316,18 @@ impl<M: Mode> Graph<M> {
     {
         self.enter();
         self.collect_if_due();
+        self.send_without_collecting(input, value);
+    }
+
+    /// [`send`](Graph::send) without the collection that may run first. The
+    /// same-thread handle's queue sends this way: its sends are the I/O
+    /// code a transaction's listeners asked for, and no collection runs
+    /// between a transaction and that code.
+    pub(crate) fn send_without_collecting<A: 'static>(&mut self, input: Input<A>, value: A)
+    where
+        M: Accepts<A>,
+    {
+        self.enter();
         // The token is checked before the transaction opens, so a foreign
         // token is a panic that leaves the graph usable.
         let Some(i) = self.checked(input.token, SEND) else {
@@ -345,6 +375,17 @@ impl<M: Mode> Graph<M> {
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
         self.collect_if_due();
+        self.transaction_without_collecting(f)
+    }
+
+    /// [`transaction`](Graph::transaction) without the collection that may
+    /// run first, for the same-thread handle's queue, as
+    /// [`send_without_collecting`](Graph::send_without_collecting).
+    pub(crate) fn transaction_without_collecting<R>(
+        &mut self,
+        f: impl FnOnce(&mut Transaction<'_, M>) -> R,
+    ) -> R {
+        self.enter();
         self.build.begin();
         let r = f(&mut Transaction { graph: self });
         self.build.finish();
