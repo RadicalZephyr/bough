@@ -22,7 +22,9 @@
 //! run takes the calls queued when it starts. A call made during a run
 //! waits for the next one and wakes the driver, so a listener that always
 //! sends cannot keep a call from returning, as with
-//! [`pump`](Graph::pump).
+//! [`pump`](Graph::pump). [`Io::pump`] also runs the queue after each slot
+//! and each remote unit, so a listener can wire what one unit built before
+//! the next unit's collection.
 //!
 //! # Listeners and anchors
 //!
@@ -286,6 +288,25 @@ impl Io {
         let r = f(&mut graph);
         inner.finish(&mut graph);
         Ok(r)
+    }
+
+    /// Runs every pending slot and remote unit, as [`Graph::pump`], if the
+    /// graph is not busy. The queue runs after each slot's and each unit's
+    /// transaction, before the next one opens and before its collection:
+    /// a listener can wire what one unit built before the next unit runs.
+    pub fn pump(&self) -> Result<(), NowError> {
+        let inner = self.0.upgrade().ok_or(NowError::Gone)?;
+        if inner.inbox.inside() {
+            return Err(NowError::FromGraphCode);
+        }
+        let mut graph = inner.graph.try_borrow_mut().map_err(|_| NowError::Busy)?;
+        if graph.poisoned() {
+            return Err(NowError::Poisoned);
+        }
+        inner.run_queue(&mut graph);
+        graph.pump_between(&mut |graph| inner.run_queue(graph));
+        inner.finish(&mut graph);
+        Ok(())
     }
 
     /// Makes the flag a handle shares with its registration, and asks for

@@ -890,8 +890,17 @@ impl<M: Mode> Graph<M> {
     /// another graph, panics in both builds. A panic leaves the rest pending
     /// for the next pump.
     pub fn pump(&mut self) {
+        self.pump_between(&mut |_| {});
+    }
+
+    /// [`pump`](Graph::pump), running `between` after each slot's and each
+    /// unit's transaction, before the next one opens and before the
+    /// collection that may run first. The same-thread handle runs its
+    /// queue there, so that a listener can wire what one unit built before
+    /// the next unit's collection.
+    pub(crate) fn pump_between(&mut self, between: &mut dyn FnMut(&mut Self)) {
         self.enter();
-        if let Err(error) = self.pump_all(!cfg!(debug_assertions)) {
+        if let Err(error) = self.pump_all(!cfg!(debug_assertions), between) {
             match error {
                 PumpError::Stale => self.stale_operation(SEND),
                 PumpError::DoubleSend => {
@@ -910,22 +919,26 @@ impl<M: Mode> Graph<M> {
         if self.poisoned() {
             return Err(PumpError::Poisoned);
         }
-        self.pump_all(false)
+        self.pump_all(false, &mut |_| {})
     }
 
     /// The slots, then the units. With `skip_stale`, the panicking pump's
     /// release build, a stale send is counted and skipped rather than
     /// returned.
-    fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_all(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         // Without a lock there are no slots and no units to pump.
-        let _ = skip_stale;
+        let _ = (skip_stale, &between);
         #[cfg(any(feature = "std", feature = "critical-section"))]
-        self.pump_slots(skip_stale)?;
+        self.pump_slots(skip_stale, between)?;
         #[cfg(all(
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        self.pump_units(skip_stale)?;
+        self.pump_units(skip_stale, between)?;
         Ok(())
     }
 
@@ -936,7 +949,11 @@ impl<M: Mode> Graph<M> {
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    fn pump_units(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_units(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         let queued = self.build.edge.inbox.len();
         for _ in 0..queued {
             let Some(unit) = self.build.edge.inbox.pop() else {
@@ -962,6 +979,7 @@ impl<M: Mode> Graph<M> {
                 });
             }
             self.build.finish();
+            between(self);
         }
         Ok(())
     }
@@ -970,7 +988,11 @@ impl<M: Mode> Graph<M> {
     /// The event leaves the slot under its lock, and the transaction runs
     /// after the lock is released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_slots(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         let mut k = 0;
         while k < self.build.edge.slots.len() {
             let Connection { input, slot } = self.build.edge.slots[k];
@@ -984,6 +1006,7 @@ impl<M: Mode> Graph<M> {
                         fire(&mut self.build, i, event)
                             .expect("bough engine: a slot's event is its transaction's only send");
                         self.build.finish();
+                        between(self);
                     }
                     // `connect` checked the graph, so the input was collected.
                     Err(_) => live = false,

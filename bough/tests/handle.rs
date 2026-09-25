@@ -95,7 +95,7 @@ fn a_send_from_a_listener_runs_right_after_its_transaction() {
 }
 
 #[test]
-fn a_read_while_the_graph_is_busy_is_refused() {
+fn a_call_that_cannot_wait_is_refused_while_the_graph_is_busy() {
     let (graph, (a_in, _, a, b)) = two_cells();
     let owner = Owner::new(graph);
     let io = owner.io();
@@ -106,12 +106,13 @@ fn a_read_while_the_graph_is_busy_is_refused() {
             .listen_steps(a, move |_| {
                 found.borrow_mut().push(inner.with_sample(b, |n| *n));
                 found.borrow_mut().push(inner.with_graph(|_| 0));
+                found.borrow_mut().push(inner.pump().map(|()| 0));
             })
             .keep();
     })
     .unwrap();
     io.send(a_in, 1).unwrap();
-    assert_eq!(*found.borrow(), [Err(NowError::Busy), Err(NowError::Busy)]);
+    assert_eq!(*found.borrow(), [Err(NowError::Busy); 3]);
     // A read inside a read is not refused: both only read.
     let nested = io.with_sample(a, |_| io.with_sample(b, |n| *n)).unwrap();
     assert_eq!(nested, Ok(0));
@@ -373,4 +374,60 @@ fn a_listener_registered_from_a_listener_misses_its_transactions_child_instants(
     io.send(numbers_in, 1).unwrap();
     io.send(numbers_in, 2).unwrap();
     assert_eq!(*log.borrow(), ["now 1", "now 2", "later 2"]);
+}
+
+/// The pump case of receive, then wire. Two remote units each open a
+/// counter, and the listener anchors it through the handle. The queue runs
+/// after each unit, before the next unit's collection, so both survive.
+#[test]
+fn a_pump_runs_the_queue_between_units() {
+    let (mut graph, (open_in, opened)) = counters();
+    graph.set_collect_after_every_transaction(true);
+    let remote = graph.remote();
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let anchored = Rc::new(RefCell::new(Vec::new()));
+    let (inner, kept) = (io.clone(), anchored.clone());
+    io.listen(opened, move |counter: Counter| {
+        let anchor = inner.anchor(counter).unwrap();
+        kept.borrow_mut().push((counter, anchor));
+    })
+    .unwrap()
+    .keep();
+    remote.send(open_in, 10);
+    remote.send(open_in, 20);
+    io.pump().unwrap();
+    let counters: Vec<Counter> = anchored.borrow().iter().map(|(c, _)| *c).collect();
+    for (bumps_in, _) in &counters {
+        io.send(*bumps_in, 1).unwrap(); // a stale input would panic here
+    }
+    let totals: Vec<u32> = counters
+        .iter()
+        .map(|(_, count)| io.with_sample(*count, |n| *n).unwrap())
+        .collect();
+    assert_eq!(totals, [11, 21]);
+}
+
+#[test]
+fn what_one_unit_asks_for_runs_before_the_next_unit() {
+    let (graph, (a_in, b_in, a, b)) = two_cells();
+    let remote = graph.remote();
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let log: Log = Rc::default();
+    let (echo, seen) = (io.clone(), log.clone());
+    io.listen_steps(a, move |n| {
+        seen.borrow_mut().push(format!("a {n}"));
+        echo.send(b_in, n * 10).unwrap();
+    })
+    .unwrap()
+    .keep();
+    let seen = log.clone();
+    io.listen_steps(b, move |n| seen.borrow_mut().push(format!("b {n}")))
+        .unwrap()
+        .keep();
+    remote.send(a_in, 1);
+    remote.send(a_in, 2);
+    io.pump().unwrap();
+    assert_eq!(*log.borrow(), ["a 1", "b 10", "a 2", "b 20"]);
 }

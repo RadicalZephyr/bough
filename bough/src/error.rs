@@ -130,8 +130,8 @@ pub enum IoError {
 }
 
 /// Failure modes of the calls on an [`Io`](crate::Io) that cannot wait
-/// for the graph: [`with_sample`](crate::Io::with_sample) and
-/// [`with_graph`](crate::Io::with_graph).
+/// for the graph: [`with_sample`](crate::Io::with_sample),
+/// [`with_graph`](crate::Io::with_graph) and [`pump`](crate::Io::pump).
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowError {
