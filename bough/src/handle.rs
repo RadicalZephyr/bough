@@ -24,6 +24,15 @@
 //! sends cannot keep a call from returning, as with
 //! [`pump`](Graph::pump).
 //!
+//! # Listeners and anchors
+//!
+//! A listener or an anchor asked for while the graph is busy waits like
+//! any other call, but its handle is handed out at once: dropping it
+//! before the registration runs means it never does. A `listen_cell`'s
+//! first call runs when the listener is registered. A listener registered
+//! after a transaction misses that transaction's events, and those of the
+//! child transactions a `split` or a `defer` started in it.
+//!
 //! # Graph code
 //!
 //! An `Io` is `Clone + 'static`, so graph code can capture one: a `map`
@@ -44,14 +53,16 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::{Rc, Weak};
 use alloc::sync::Arc;
-use core::cell::RefCell;
+use core::cell::{Cell as CoreCell, RefCell};
 
 use crate::cell::CellRef;
 use crate::engine::edge::Inbox;
 use crate::error::{IoError, NowError};
-use crate::graph::{Graph, Transaction};
-use crate::mode::Local;
+use crate::graph::{Anchor, Graph, Listener, Transaction};
+use crate::mode::{FlagOps, Local, LocalFlag};
+use crate::source::Node;
 use crate::token::Input;
+use crate::trace::Trace;
 
 /// A call that waits for the graph.
 type Call = Box<dyn FnOnce(&mut Graph<Local>)>;
@@ -63,6 +74,10 @@ struct Inner {
     /// The graph's inbox, whose poison mirror and guard can be read while
     /// the graph is busy.
     inbox: Arc<Inbox>,
+    /// The graph's count of released handles, which the flag of a listener
+    /// or an anchor points to, so that one can be made while the graph is
+    /// busy.
+    released: Rc<CoreCell<usize>>,
 }
 
 impl Inner {
@@ -98,11 +113,12 @@ pub struct Owner(Rc<Inner>);
 impl Owner {
     /// Moves a built graph behind the owner.
     pub fn new(graph: Graph<Local>) -> Owner {
-        let inbox = graph.inbox();
+        let (inbox, released) = (graph.inbox(), graph.released());
         Owner(Rc::new(Inner {
             graph: RefCell::new(graph),
             queue: RefCell::new(VecDeque::new()),
             inbox,
+            released,
         }))
     }
 
@@ -130,12 +146,11 @@ impl Owner {
 /// });
 /// let owner = Owner::new(graph);
 /// let io = owner.io();
-/// io.with_graph(|graph| {
-///     let io = io.clone();
-///     // The graph is busy while its listeners run, so this send waits.
-///     graph.listen_steps(a, move |n| io.send(b_in, n * 10).unwrap()).keep();
-/// })
-/// .unwrap();
+/// let echo = io.clone();
+/// // The graph is busy while its listeners run, so this send waits.
+/// io.listen_steps(a, move |n| echo.send(b_in, n * 10).unwrap())
+///     .unwrap()
+///     .keep();
 /// io.send(a_in, 1).unwrap(); // the graph is idle: this runs now
 /// assert_eq!(io.with_sample(b, |n| *n), Ok(10));
 /// ```
@@ -173,6 +188,54 @@ impl Io {
             true,
             Box::new(move |graph| graph.transaction_without_collecting(f)),
         )
+    }
+
+    /// Listens to a materialized node, as [`Graph::listen`], now or right
+    /// after the call in progress. The [`Listener`] is handed out at once,
+    /// so dropping it before the listener is registered means it never is.
+    ///
+    /// A listener registered after a transaction misses that transaction's
+    /// events, and those of the child transactions a `split` or a `defer`
+    /// started in it.
+    pub fn listen<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
+    {
+        self.register(move |graph, flag| graph.listen_flagged(flag, source, f))
+            .map(Listener::from_flag)
+    }
+
+    /// Listens to a cell, as [`Graph::listen_cell`], now or right after the
+    /// call in progress. The first call, with the current value, runs when
+    /// the listener is registered.
+    pub fn listen_cell<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef + 'static,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.register(move |graph, flag| graph.listen_cell_flagged(flag, cell, f))
+            .map(Listener::from_flag)
+    }
+
+    /// Listens to a cell's steps, as [`Graph::listen_steps`], now or right
+    /// after the call in progress.
+    pub fn listen_steps<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef + 'static,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.register(move |graph, flag| graph.listen_steps_flagged(flag, cell, f))
+            .map(Listener::from_flag)
+    }
+
+    /// Anchors what `value` holds, as [`Graph::anchor`], now or right after
+    /// the call in progress. No collection runs in between, so a listener
+    /// can anchor what it is handed.
+    pub fn anchor<T: Trace + 'static>(&self, value: T) -> Result<Anchor, IoError> {
+        self.register(move |graph, flag| graph.anchor_flagged(flag, &value))
+            .map(Anchor::from_flag)
     }
 
     /// Reads a cell's current value by reference, if the graph is not busy.
@@ -223,6 +286,19 @@ impl Io {
         let r = f(&mut graph);
         inner.finish(&mut graph);
         Ok(r)
+    }
+
+    /// Makes the flag a handle shares with its registration, and asks for
+    /// the registration.
+    fn register(
+        &self,
+        register: impl FnOnce(&mut Graph<Local>, LocalFlag) + 'static,
+    ) -> Result<LocalFlag, IoError> {
+        let released = self.0.upgrade().ok_or(IoError::Gone)?.released.clone();
+        let flag = LocalFlag::live(&released);
+        let shared = flag.clone();
+        self.request(false, Box::new(move |graph| register(graph, shared)))?;
+        Ok(flag)
     }
 
     /// Runs `call` now if the graph is idle, and queues it if not. Now,

@@ -113,8 +113,9 @@ pub enum RemoteTransactionError {
 }
 
 /// Failure modes of the calls on an [`Io`](crate::Io) that can wait for
-/// the graph: [`send`](crate::Io::send) and
-/// [`transaction`](crate::Io::transaction).
+/// the graph: [`send`](crate::Io::send),
+/// [`transaction`](crate::Io::transaction), the listens and
+/// [`anchor`](crate::Io::anchor).
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoError {

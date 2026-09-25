@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Cell, Graph, Input, Io, IoError, NowError, Owner, Source};
+use bough::{Cell, Graph, Input, Io, IoError, NowError, Owner, Source, Stream};
 
 type Log = Rc<RefCell<Vec<String>>>;
 
@@ -21,6 +21,21 @@ fn two_cells() -> (Graph, TwoCells) {
         let (a, a_in) = build.input::<u32>();
         let (b, b_in) = build.input::<u32>();
         (a_in, b_in, a.hold(build, 0), b.hold(build, 0))
+    })
+}
+
+/// A counter: an input of its own, and the running total of what it gets.
+type Counter = (Input<u32>, Cell<u32>);
+
+/// Each event opens a counter that starts from the event's value.
+fn counters() -> (Graph, (Input<u32>, Stream<Counter>)) {
+    Graph::build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let opened = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
+        });
+        (open_in, opened)
     })
 }
 
@@ -239,4 +254,123 @@ fn a_call_from_graph_code_is_refused() {
             "map: Err(FromGraphCode) Err(FromGraphCode)",
         ]
     );
+}
+
+/// A listener hears of a counter and wires it. The listener it asks for is
+/// registered right after the transaction, before any collection, and its
+/// first call runs then.
+#[test]
+fn a_listener_can_wire_what_it_hears_of() {
+    let (mut graph, (open_in, opened)) = counters();
+    graph.set_collect_after_every_transaction(true);
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let log: Log = Rc::default();
+    let wired = Rc::new(RefCell::new(Vec::new()));
+    let (inner, seen, rows) = (io.clone(), log.clone(), wired.clone());
+    io.listen(opened, move |(bumps_in, count): Counter| {
+        seen.borrow_mut().push("opened".into());
+        let shown = seen.clone();
+        let listener = inner
+            .listen_cell(count, move |n| {
+                shown.borrow_mut().push(format!("count {n}"))
+            })
+            .unwrap();
+        seen.borrow_mut().push("asked".into());
+        rows.borrow_mut().push((bumps_in, listener));
+    })
+    .unwrap()
+    .keep();
+    io.send(open_in, 10).unwrap();
+    assert_eq!(*log.borrow(), ["opened", "asked", "count 10"]);
+    let bumps_in = wired.borrow()[0].0;
+    io.send(bumps_in, 5).unwrap(); // this one collects first
+    assert_eq!(*log.borrow(), ["opened", "asked", "count 10", "count 15"]);
+}
+
+#[test]
+fn a_listener_dropped_before_it_is_registered_never_is() {
+    let (graph, (a_in, b_in, a, b)) = two_cells();
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let log: Log = Rc::default();
+    let (inner, seen) = (io.clone(), log.clone());
+    io.listen_steps(a, move |_| {
+        let shown = seen.clone();
+        let dropped = inner.listen_cell(b, move |n| {
+            shown.borrow_mut().push(format!("dropped {n}"));
+        });
+        drop(dropped);
+        let shown = seen.clone();
+        inner
+            .listen_cell(b, move |n| shown.borrow_mut().push(format!("kept {n}")))
+            .unwrap()
+            .keep();
+    })
+    .unwrap()
+    .keep();
+    io.send(a_in, 1).unwrap();
+    io.send(b_in, 2).unwrap();
+    assert_eq!(*log.borrow(), ["kept 0", "kept 2"]);
+}
+
+#[test]
+fn an_anchor_from_a_listener_keeps_what_it_anchors() {
+    let (mut graph, (open_in, opened)) = counters();
+    graph.set_collect_after_every_transaction(true);
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let anchored = Rc::new(RefCell::new(Vec::new()));
+    let (inner, kept) = (io.clone(), anchored.clone());
+    io.listen(opened, move |counter: Counter| {
+        let anchor = inner.anchor(counter).unwrap();
+        kept.borrow_mut().push((counter, anchor));
+    })
+    .unwrap()
+    .keep();
+    io.send(open_in, 10).unwrap();
+    io.send(open_in, 20).unwrap(); // collects first: the first counter is anchored
+    let counters: Vec<Counter> = anchored.borrow().iter().map(|(c, _)| *c).collect();
+    for (bumps_in, _) in &counters {
+        io.send(*bumps_in, 1).unwrap(); // a stale input would panic here
+    }
+    let totals: Vec<u32> = counters
+        .iter()
+        .map(|(_, count)| io.with_sample(*count, |n| *n).unwrap())
+        .collect();
+    assert_eq!(totals, [11, 21]);
+}
+
+/// The cost of waiting: a listener registered from a listener misses the
+/// events of the child transactions its transaction started.
+#[test]
+fn a_listener_registered_from_a_listener_misses_its_transactions_child_instants() {
+    let (graph, (numbers_in, numbers, later)) = Graph::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        let later = numbers.defer(b).share(b);
+        (numbers_in, numbers, later)
+    });
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let log: Log = Rc::default();
+    let (inner, seen) = (io.clone(), log.clone());
+    let mut first = true;
+    io.listen(numbers, move |n| {
+        seen.borrow_mut().push(format!("now {n}"));
+        if std::mem::take(&mut first) {
+            let shown = seen.clone();
+            inner
+                .listen(later, move |n| {
+                    shown.borrow_mut().push(format!("later {n}"))
+                })
+                .unwrap()
+                .keep();
+        }
+    })
+    .unwrap()
+    .keep();
+    io.send(numbers_in, 1).unwrap();
+    io.send(numbers_in, 2).unwrap();
+    assert_eq!(*log.borrow(), ["now 1", "now 2", "later 2"]);
 }

@@ -5,12 +5,16 @@
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::boxed::Box;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use alloc::rc::Rc;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use core::cell::Cell as CoreCell;
 use core::task::Waker;
 
 use crate::Build;
@@ -31,6 +35,8 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use crate::mode::LocalFlag;
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
@@ -166,6 +172,102 @@ impl Graph<Local> {
         if let Some(waker) = &self.build.edge.waker {
             waker.wake_by_ref();
         }
+    }
+
+    /// The count of released handles, for the flag of a handle made while
+    /// the graph is busy.
+    pub(crate) fn released(&self) -> Rc<CoreCell<usize>> {
+        self.released.clone()
+    }
+
+    /// [`listen`](Graph::listen), with the flag of a [`Listener`] the
+    /// handle gave out before the graph could register it. A cleared flag
+    /// means the listener was dropped first, and nothing registers.
+    pub(crate) fn listen_flagged<S, F>(&mut self, flag: LocalFlag, source: S, f: F)
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        if let Some(i) = self.checked(source.node_token(), LISTEN) {
+            self.attach_flag(i, f, call_stream::<Local, S, F>, flag);
+        }
+    }
+
+    /// [`listen_cell`](Graph::listen_cell), with a flag, as
+    /// [`listen_flagged`](Graph::listen_flagged). The first call runs now,
+    /// when the listener is registered.
+    pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, mut f: F)
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        let Some(i) = self.checked(cell.token(), LISTEN) else {
+            return;
+        };
+        f(self.build.value::<C::Value>(i));
+        self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
+    }
+
+    /// [`listen_steps`](Graph::listen_steps), with a flag, as
+    /// [`listen_flagged`](Graph::listen_flagged).
+    pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, f: F)
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        if let Some(i) = self.checked(cell.token(), LISTEN) {
+            self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
+        }
+    }
+
+    /// [`anchor`](Graph::anchor), with the flag of an [`Anchor`] the
+    /// handle gave out, as [`listen_flagged`](Graph::listen_flagged).
+    pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: LocalFlag, value: &T) {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let nodes: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .filter_map(|token| self.checked(token, ANCHOR))
+            .collect();
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+    }
+}
+
+/// The handles the same-thread handle gives out before the graph can
+/// register them.
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Listener<Local> {
+    /// A listener whose registration shares `flag`, now or later.
+    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
+        Listener { alive: Some(flag) }
+    }
+}
+
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Anchor<Local> {
+    /// An anchor whose registration shares `flag`, now or later.
+    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
+        Anchor { alive: Some(flag) }
     }
 }
 
@@ -533,14 +635,27 @@ impl<M: Mode> Graph<M> {
         M: Accepts<F>,
     {
         let flag = <M::Flag as FlagOps>::live(&self.released);
+        self.attach_flag(i, f, call, flag.clone());
+        Listener { alive: Some(flag) }
+    }
+
+    /// Registers a listener on node `i` with the flag its handle shares.
+    fn attach_flag<F: 'static>(
+        &mut self,
+        i: u32,
+        f: F,
+        call: fn(&mut M::Carrier, &mut Build<M>, u32),
+        flag: M::Flag,
+    ) where
+        M: Accepts<F>,
+    {
         let store = &mut self.build.store;
         store.listeners[i as usize].push(Entry {
-            flag: flag.clone(),
+            flag,
             f: <M as Accepts<F>>::erase(Erase::Value(f)),
             call,
         });
         store.hot[i as usize].flags |= LISTENERS;
-        Listener { alive: Some(flag) }
     }
 
     /// Anchors what I/O code wants to hold without listening to it, and
