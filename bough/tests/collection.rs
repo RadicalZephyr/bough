@@ -3,7 +3,7 @@
 //!
 //! The roots are the build closure's return value, every live listener
 //! and every live anchor. A node reaches its dependencies, the tokens in a
-//! stateful cell's committed value, the cells its chain reads, and what
+//! stateful cell's committed value, the tokens its chain holds, and what
 //! `depends` declares. A token I/O code keeps without rooting it, which a
 //! build closure hands out here through a side channel or a listener
 //! hands out as data, names a node that is collected when nothing else
@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use bough::{
     Build, Cell, CollectionPolicy, Graph, Input, Lift, Listener, PoisonedError, SendError, Shared,
-    Source, State, Stream, TokenError, TokenRef, Trace, Tracer, TransactionSendError,
+    Source, State, Stream, TokenError, Trace, Tracer, TransactionSendError,
 };
 
 // ----------------------------------------------------------- helpers
@@ -1123,10 +1123,9 @@ fn states_are_traced_declared_and_anchored_like_cells() {
     assert_eq!(*graph.sample(short), ["ada"], "declared, so alive");
 }
 
-/// What a token names is one of the five token types, and `TokenRef`
-/// covers them all: a heterogeneous declaration takes a stream, a shared
-/// stream, a cell, a state and an input in one slice without consuming
-/// the linear stream.
+/// What a token names is one of the five token types, and each is `Trace`:
+/// a heterogeneous declaration takes a stream, a shared stream, a cell, a
+/// state and an input in one slice without consuming the linear stream.
 #[test]
 fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
     let (mut graph, (n_in, held)) = Graph::build(|b| {
@@ -1137,7 +1136,7 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
         let state = n.accumulate_mut(b, 0u32, |v, s: &mut u32| *s += v);
         let (_, input) = b.input::<u32>();
         let held = n.hold(b, 0u32);
-        let on: [&dyn TokenRef; 5] = [&linear, &n, &cell, &state, &input];
+        let on: [&dyn Trace; 5] = [&linear, &n, &cell, &state, &input];
         b.depends(&held, &on);
         let _still_mine = linear.hold(b, 0u32);
         (n_in, held)
@@ -1169,6 +1168,70 @@ fn a_token_given_to_map_to_is_kept_by_its_chain() {
     graph.set_collect_after_every_transaction(true);
     graph.send(go_in, ());
     assert_eq!(*graph.sample(shown), "away");
+}
+
+/// Panels a closure picks among: a struct of tokens, one of them in a
+/// collection, as a user's own type holds them.
+#[derive(Clone)]
+struct Panels {
+    home: Cell<&'static str>,
+    others: Vec<Cell<&'static str>>,
+}
+
+impl Trace for Panels {
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(&self.home);
+        self.others.trace(tracer);
+    }
+}
+
+/// A struct of tokens moved into a closure is data the collector cannot see
+/// inside, like a token the closure captures bare. One declaration of the
+/// struct, which `depends` traces, keeps every token in it, the one in the
+/// `Vec` too, whose count no slice of tokens could name. Declared, the
+/// switch moves away and back to `home`, which only the closure names once
+/// the hold has left it. Undeclared, the collection that opens the first
+/// transaction frees the panels nothing else names, and moving to one is a
+/// stale token. The closure owns the struct, so the declaration names a
+/// copy.
+#[test]
+fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
+    for declare in [false, true] {
+        let (mut graph, (pick_in, shown)) = Graph::build(move |b| {
+            let (pick, pick_in) = b.input::<usize>();
+            let panels = Panels {
+                home: b.constant("home"),
+                others: vec![b.constant("away"), b.constant("elsewhere")],
+            };
+            let declared = panels.clone();
+            let home = panels.home;
+            let chosen = pick
+                .map(move |k| {
+                    if k == 0 {
+                        panels.home
+                    } else {
+                        panels.others[k - 1]
+                    }
+                })
+                .hold(b, home);
+            if declare {
+                b.depends(&chosen, &[&declared]);
+            }
+            (pick_in, chosen.switch_cell(b))
+        });
+        graph.set_collect_after_every_transaction(true);
+        if declare {
+            graph.send(pick_in, 2);
+            assert_eq!(*graph.sample(shown), "elsewhere");
+            graph.send(pick_in, 0);
+            assert_eq!(*graph.sample(shown), "home");
+            graph.send(pick_in, 1);
+            assert_eq!(*graph.sample(shown), "away");
+        } else {
+            let message = panic_message(|| graph.send(pick_in, 2));
+            assert!(message.contains("a stale token"), "{message}");
+        }
+    }
 }
 
 /// A leak the model allows: a declaration has no inverse. A construct

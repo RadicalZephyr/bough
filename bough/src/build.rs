@@ -1,6 +1,7 @@
 //! The build context (RFD 2).
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -16,7 +17,7 @@ use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::slot::InputSlot;
 use crate::source::Source;
 use crate::token::{Cell, Input, State, Stream, Token, TokenRef};
-use crate::trace::Trace;
+use crate::trace::{Trace, Tracer};
 
 /// The next graph id. Ids start at 1, so a token that names no graph never
 /// validates.
@@ -302,20 +303,23 @@ impl<M: Mode> Build<M> {
         )
     }
 
-    /// Declares that `node` keeps every token in `on` alive, for a closure
-    /// that captures tokens that are not upstream of its own node (RFD 3).
-    /// One declaration per closure; the slice is heterogeneous, and takes
-    /// references, so a linear stream is not consumed.
+    /// Declares that `node` keeps alive every token the values in `on`
+    /// hold, for a closure that captures them (RFD 3). Each value is traced,
+    /// so a token counts wherever it sits: bare, or in a struct, a tuple or a
+    /// collection at any depth. One declaration per closure; the slice is
+    /// heterogeneous, and takes references, so a linear stream is not
+    /// consumed.
     ///
     /// A node is alive while a root reaches it: the build closure's return
     /// value, a live listener, or a live [`Anchor`](crate::Anchor). What a
     /// node reaches is what it depends on, the tokens in a stateful cell's
-    /// committed value, and what this declares. A closure's captures are
-    /// invisible to the collector, so a capture of a node that is not
-    /// upstream of the closure's own node, a backward or an unrelated one,
-    /// must be declared here, or the node is collected when nothing else
-    /// reaches it and the closure's next use of the token is a stale-token
-    /// error. Here the map emits a cell nothing else names:
+    /// committed value and in its chain, and what this declares. A closure
+    /// is the one thing the collector cannot look inside, so every value a
+    /// `move` closure captures that holds a token is declared here, on the
+    /// node the closure belongs to, which for an adapter is the node its
+    /// chain becomes. Otherwise a node the closure names is collected when
+    /// nothing else reaches it, and the closure's next use of its token is a
+    /// stale-token error. Here the map emits a cell nothing else names:
     ///
     /// ```
     /// use bough::{Graph, Source};
@@ -337,16 +341,23 @@ impl<M: Mode> Build<M> {
     /// assert_eq!(graph.sample(shown), "bonjour");
     /// ```
     ///
-    /// A capture upstream of the node needs nothing, since the node reaches
-    /// it anyway. A declaration is reach, not a dependency: it orders no
-    /// evaluation and can close no cycle. It panics on a stale or foreign
-    /// token, as every build-time use of one does.
-    pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn TokenRef]) {
+    /// Declaring a token the node reaches anyway costs one entry. A
+    /// declaration is reach, not a dependency: it orders no evaluation and
+    /// can close no cycle. Every token is checked before any is recorded,
+    /// and a stale or foreign one panics, as every build-time use of one
+    /// does.
+    pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn Trace]) {
         let n = self.check(node.token());
-        for token in on {
-            let d = self.check(token.token());
-            self.store.cold[n as usize].reach.push(d);
+        let mut tracer = Tracer::new();
+        for value in on {
+            value.trace(&mut tracer);
         }
+        let reach: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .map(|token| self.check(token))
+            .collect();
+        self.store.cold[n as usize].reach.extend(reach);
     }
 
     /// Connects an [`InputSlot`] to an input, so that

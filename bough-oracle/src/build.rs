@@ -2476,7 +2476,7 @@ impl CellToken {
         }
     }
 
-    fn token(&self) -> &dyn TokenRef {
+    fn token(&self) -> &dyn Trace {
         match self {
             CellToken::Integer(cell) => cell,
             CellToken::IntegerState(state) => state,
@@ -2564,7 +2564,7 @@ enum Outer {
 }
 
 impl Outer {
-    fn token(&self) -> &dyn TokenRef {
+    fn token(&self) -> &dyn Trace {
         match self {
             Outer::Streams(outer) => outer,
             Outer::Linear(outer) => outer,
@@ -2628,8 +2628,8 @@ fn picker<T: Copy + Send + 'static>(index: Expression, choices: Vec<T>) -> PickF
 
 /// Declares that `node`, whose function captures `tokens`, keeps them
 /// alive: the collector cannot see a closure's captures (RFD 3).
-fn declare<M: EngineMode, T: TokenRef>(b: &mut Build<M>, node: &impl TokenRef, tokens: &[T]) {
-    let on: Vec<&dyn TokenRef> = tokens.iter().map(|token| token as &dyn TokenRef).collect();
+fn declare<M: EngineMode, T: Trace>(b: &mut Build<M>, node: &impl TokenRef, tokens: &[T]) {
+    let on: Vec<&dyn Trace> = tokens.iter().map(|token| token as &dyn Trace).collect();
     b.depends(node, &on);
 }
 
@@ -2728,7 +2728,7 @@ impl Captured {
         }
     }
 
-    fn token(&self) -> &dyn TokenRef {
+    fn token(&self) -> &dyn Trace {
         match self {
             Captured::Shared(shared) => shared,
             Captured::Cell(cell) => cell.token(),
@@ -3630,7 +3630,7 @@ fn declare_captures<M: EngineMode>(
     node: &impl TokenRef,
     captured: &[Option<Captured>],
 ) {
-    let on: Vec<&dyn TokenRef> = captured.iter().flatten().map(Captured::token).collect();
+    let on: Vec<&dyn Trace> = captured.iter().flatten().map(Captured::token).collect();
     b.depends(node, &on);
 }
 

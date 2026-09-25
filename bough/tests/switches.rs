@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use bough::{
     Build, Cell, Graph, Input, Lift, Local, PoisonedError, SendError, Shared, Source, State,
-    Stream, TokenError, TokenRef, Trace, Transaction,
+    Stream, TokenError, Trace, Transaction,
 };
 
 /// The plain order, then seeds for RFD 1's order shuffle.
@@ -847,8 +847,7 @@ fn switch_stream_loop_through_its_selection() {
                     // hold declares the table's cells.
                     let table = cells.clone();
                     let current = out.map(move |v| cells[v as usize]).hold(b, first);
-                    let on: Vec<&dyn TokenRef> = table.iter().map(|c| c as _).collect();
-                    b.depends(&current, &on);
+                    b.depends(&current, &[&table]);
                     let sw = current.switch_cell(b);
                     sw.switch_stream(b)
                 } else {
@@ -858,8 +857,7 @@ fn switch_stream_loop_through_its_selection() {
                     let first = streams[0];
                     let table = streams.clone();
                     let current = out.map(move |v| streams[v as usize]).hold(b, first);
-                    let on: Vec<&dyn TokenRef> = table.iter().map(|s| s as _).collect();
-                    b.depends(&current, &on);
+                    b.depends(&current, &[&table]);
                     current.switch_stream(b)
                 };
                 closer.close(b, switched);
