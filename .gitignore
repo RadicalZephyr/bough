@@ -1,1 +1,9 @@
 /target
+# GHC's build products, should anyone build in bough-oracle/haskell without
+# -outputdir. The tests build under target/tmp.
+/bough-oracle/haskell/**/*.o
+/bough-oracle/haskell/**/*.hi
+/bough-oracle/haskell/**/*.dyn_o
+/bough-oracle/haskell/**/*.dyn_hi
+/bough-oracle/haskell/OracleTests
+/bough-oracle/haskell/sodium

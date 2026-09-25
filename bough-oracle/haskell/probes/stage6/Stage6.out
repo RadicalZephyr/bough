@@ -1,0 +1,39 @@
+claim4: sample inside: 0
+claim4: samples h after [1], [2]: [107,101]
+R1: rounds: 3
+R1: samples total, label, seen after [1], [2]: ([5,12],[50,120],[0,50])
+R1: steps label: (0,[([1],50),([2],120)])
+R2: samples of each held after [1], [2]: [[105,107],[147]]
+R6: samples h after [1], [2]: [12,15]
+R6: steps sw: (0,[([1],12),([2],15)])
+F6: sample inside: 2
+F6: samples seen after [2], [3]: [2,30]
+F6: steps sw: (2,[([2],2),([3],30)])
+F6 (text): sample inside: 2
+F6 (text): samples seen after [2], [3]: [1,30]
+F6 (text): steps sw: (2,[([2],1),([1],2),([3],30)])
+switch_stream at t: [([2],[([2],'b'),([3],'Z'),([4],'W'),([5],'e')]),([3],[([3],'Z'),([4],'W'),([5],'e')])]
+nested: steps top: (0,[([0],0),([1],111),([2],222),([3],333)])
+nested: samples top: [0,111,222,333]
+nested: samples of each body's switch, from its instant: [[111,122,133],[222,233],[333]]
+children: steps top: (0,[([0],0),([1,0],11),([1,1],22),([1,2],33),([2,0],44)])
+children: steps later: (0,[([0],0),([1,0],0),([1,0,0],101),([1,1],0),([1,1,0],202),([1,2],0),([1,2,0],303),([2,0],0),([2,0,0],404)])
+children: samples top, later: ([0,33,44],[0,303,404])
+children: samples of each body's hold, from its transaction: [[31,41],[32,42],[33,43],[44]]
+children: build's children: steps top0: (0,[([0],0),([0,0],5),([0,1],6),([1,0],7),([1,1],8),([1,2],9),([2,0],10)])
+children: build's children: samples top0: [6,9,10]
+navigation: rounds: 4
+navigation: nav: [([2],1),([4],2),([6],3)]
+navigation: out: [([1],(0,5,1)),([2],(0,0,2)),([3],(1,7,2)),([4],(1,0,3)),([5],(2,9,2)),([6],(2,0,3)),([7],(3,4,2))]
+selection loop: ([([1],1),([2],2),([3],3),([4],4)],5)
+input inside: samples total after [1], [2], [3]: [100,105,111]
+input inside: doubled: [([2],10),([3],12)]
+own output: rounds: 2
+own output: outs: [([1],10),([2],20)]
+own output: steps shown: (0,[([0],0),([1],11),([2],22)])
+own output: samples of each hold, from its transaction: [[11,21],[22]]
+switch matrix: samples inside: [2,10,10,3,10]
+switch matrix: steps: [[([2],200),([3],300)],[([2],200),([3],300)],[([2],20),([3],300)],[([2],21),([3],31)],[([2],200),([3],300)]]
+switch matrix: samples after [2], [3]: [[200,300],[200,300],[20,300],[21,31],[200,300]]
+creation: sample inside: 11
+creation: samples after [2], [3]: [[2,3],[2,5],[200,301],[2,2],[12,13],[12,13],[24,26],[22,55],[1002,1003],[211,312],[40,43]]

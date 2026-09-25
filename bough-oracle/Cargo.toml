@@ -10,6 +10,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-
-[dev-dependencies]
+bough.workspace = true
+# The strategies of `generate` are library code.
 proptest.workspace = true

@@ -1,9 +1,9 @@
 //! Tokens: the names I/O code and graph code hold for nodes.
 //!
 //! A token is an index, a generation and a graph id. It has no method that
-//! creates a node without a [`Build`](crate::Build) context. `Cell`, `Input`
-//! and `Shared` are `Copy` for every event type; `Stream` is move-only because
-//! it is linear (RFD 4).
+//! creates a node without a [`Build`](crate::Build) context. `Cell`, `State`,
+//! `Input` and `Shared` are `Copy` for every event type; `Stream` is
+//! move-only because it is linear (RFD 4).
 
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -19,16 +19,18 @@ pub struct Token {
 }
 
 pub(crate) mod sealed {
-    /// Implemented by the four token types and nothing else.
+    /// Implemented by the five token types and nothing else.
     pub trait Sealed {
         fn token(&self) -> super::Token;
     }
 }
 
-/// Anything that names a node: the four token types.
+/// Anything that names a node: the five token types.
 ///
-/// Used by [`Build::depends`](crate::Build::depends) and
-/// [`Graph::anchor`](crate::Graph::anchor), which take any token.
+/// Used by [`Build::depends`](crate::Build::depends), which takes a slice of
+/// any tokens. Every token type is also [`Trace`](crate::Trace), visiting
+/// itself, so [`Graph::anchor`](crate::Graph::anchor), which takes any
+/// value that holds tokens, takes a single token too.
 pub trait TokenRef: sealed::Sealed {}
 
 /// A linear stream of events.
@@ -39,7 +41,7 @@ pub trait TokenRef: sealed::Sealed {}
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
 /// token `Send` and `Sync` whatever `A` is; a token is three integers.
 pub struct Stream<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -47,7 +49,7 @@ pub struct Stream<A> {
 ///
 /// Produced by [`share`](crate::Source::share), which requires `A: Clone`.
 pub struct Shared<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -57,7 +59,37 @@ pub struct Shared<A> {
 /// cell is either a hold, which moves its event into its committed value
 /// at commit, or a read-through cell computed from other cells on demand.
 pub struct Cell<A> {
-    token: Token,
+    pub(crate) token: Token,
+    event: PhantomData<fn() -> A>,
+}
+
+/// A cell whose new value does not exist until commit: the state of an
+/// in-place accumulator, [`accumulate_mut`](crate::Source::accumulate_mut),
+/// and every read-through cell computed from one.
+///
+/// A `State` is read like a [`Cell`]. `sample`, `snapshot`, `gate`,
+/// `map_cell`, `lift` and the cell listeners on
+/// [`Graph`](crate::Graph) accept either, through
+/// [`CellRef`](crate::CellRef); `map_cell` over a `State` is a `State`, and
+/// so is a `lift` with a `State` among its inputs. What a `State` lacks is
+/// a stream view. `steps` and `steps_with_current` carry a cell's value
+/// after the instant, during the instant, and an in-place accumulator's
+/// function runs only at commit, after every reader has seen the state
+/// from before the instant. The listeners read after commit, so
+/// [`Graph::listen_steps`](crate::Graph::listen_steps) and
+/// [`Graph::listen_cell`](crate::Graph::listen_cell) work on a `State`.
+///
+/// ```compile_fail,E0599
+/// use bough::{Graph, Source};
+///
+/// let (_graph, _) = Graph::build(|b| {
+///     let (names, _names_in) = b.input::<String>();
+///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+///     let _joined = members.steps(b); // error: no method named `steps` found for struct `State`
+/// });
+/// ```
+pub struct State<A> {
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -69,7 +101,7 @@ pub struct Cell<A> {
 /// transaction are an error, and that is a rule about one instant that no
 /// token discipline could make static.
 pub struct Input<A> {
-    token: Token,
+    pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
 }
 
@@ -114,6 +146,7 @@ macro_rules! token_impls {
 token_impls!(Stream, "Stream");
 token_impls!(Shared, "Shared");
 token_impls!(Cell, "Cell");
+token_impls!(State, "State");
 token_impls!(Input, "Input");
 
 // Unconditional Copy through hand-written impls, so `Cell<String>` is Copy.
@@ -129,4 +162,5 @@ macro_rules! copy_impls {
 }
 copy_impls!(Shared);
 copy_impls!(Cell);
+copy_impls!(State);
 copy_impls!(Input);

@@ -10,13 +10,31 @@ use iai_callgrind::{
 };
 use std::hint::black_box;
 
+use bough_bench::{Frame, Shallow};
+
+// A thousand transactions of the shallow shape, build included.
 #[library_benchmark]
-#[bench::small(1_000)]
-fn placeholder(n: u64) -> u64 {
-    black_box(bough_bench::placeholder(n))
+#[bench::plain(false)]
+#[bench::share(true)]
+fn shallow(share: bool) -> u64 {
+    let mut shape = Shallow::new(share, false);
+    for k in 0..1000 {
+        shape.send(black_box(k));
+    }
+    black_box(shape.value())
 }
 
-library_benchmark_group!(name = shapes; benchmarks = placeholder);
+// Ten frames of the frame shape, build included.
+#[library_benchmark]
+fn frame() -> u64 {
+    let mut shape = Frame::new();
+    for k in 0..10 {
+        shape.frame(black_box(k));
+    }
+    black_box(shape.checksum())
+}
+
+library_benchmark_group!(name = shapes; benchmarks = shallow, frame);
 
 main!(
     config = LibraryBenchmarkConfig::default()

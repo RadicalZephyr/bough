@@ -3,7 +3,8 @@
 //! Every type held in a cell implements `Trace`. It is a safe trait: a wrong
 //! implementation frees a node early, and the next use of a token naming it
 //! fails the generation check; no memory is ever touched through a stale
-//! token. A derive lands with the memory-model increment.
+//! token. `#[derive(Trace)]`, with the `derive` feature, writes one that
+//! visits every field but those marked `#[trace(skip)]`.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -16,21 +17,110 @@ use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
 
-use crate::token::{Cell, Input, Shared, Stream, TokenRef};
+use crate::token::{Cell, Input, Shared, State, Stream, TokenRef};
 
 /// Visits the tokens a value holds.
 pub struct Tracer {
-    visited: Vec<crate::token::Token>,
+    pub(crate) visited: Vec<crate::token::Token>,
 }
 
 impl Tracer {
+    pub(crate) fn new() -> Self {
+        Tracer {
+            visited: Vec::new(),
+        }
+    }
+
     /// Records that the value being traced holds this token.
     pub fn visit(&mut self, token: &impl TokenRef) {
-        todo!()
+        self.visited.push(token.token());
     }
 }
 
-/// A value the collector can look inside.
+/// A value the collector can look inside (RFD 3).
+///
+/// A node is alive while a root reaches it, and what a stateful cell's
+/// committed value names is what it reaches: a hold of a cell token keeps
+/// that cell alive, a routing table of screens keeps every screen. So the
+/// operations that persist a value, `hold`, `accumulate`,
+/// `accumulate_mut`, `scan`, `constant`, `input_cell` and `map_to`, require
+/// `Trace` of it, and so does the build closure's return value, which is traced
+/// once for the permanent roots. A stream's events need nothing: every
+/// slot is emptied before a collection, so an event roots nothing.
+///
+/// Implementations ship for the tokens, which visit themselves, for the
+/// standard library's types and collections, for tuples and arrays, and for
+/// the chain adapters, which visit the cells a chain reads and the value
+/// `map_to` emits, and end at its source; a foreign type that holds no tokens goes in a [`Leaf`]. A hand-written
+/// implementation visits every token the value holds:
+///
+/// ```
+/// use bough::{Cell, Trace, Tracer};
+///
+/// struct Panel {
+///     title: String,
+///     count: Cell<u32>,
+/// }
+///
+/// impl Trace for Panel {
+///     fn trace(&self, tracer: &mut Tracer) {
+///         self.count.trace(tracer); // the title holds no token
+///     }
+/// }
+/// ```
+///
+/// It is a safe trait. The obligation is real, but an implementation that
+/// misses a token only lets the collector free its node early, and the
+/// token's next use is a stale-token error: no memory is touched through a
+/// stale token.
+#[cfg_attr(
+    feature = "derive",
+    doc = r#"
+With the `derive` feature, `#[derive(Trace)]` visits every field, and
+`#[trace(skip)]` leaves out one that cannot hold tokens:
+
+```
+use std::sync::mpsc;
+
+use bough::{Cell, Input, Trace};
+
+#[derive(Trace)]
+struct Screen {
+    title: String,
+    clicks_in: Input<()>,
+    panels: Vec<Option<Cell<u32>>>,
+    #[trace(skip)]
+    log: mpsc::Sender<String>,
+}
+```
+
+A field whose type has no `Trace` and no `#[trace(skip)]` does not
+compile:
+
+```compile_fail,E0277
+use std::sync::mpsc;
+
+use bough::Trace;
+
+#[derive(Trace)]
+struct Screen {
+    log: mpsc::Sender<String>, // error: Sender<String> is not Trace
+}
+```
+
+`skip` is the one attribute:
+
+```compile_fail
+use bough::Trace;
+
+#[derive(Trace)]
+struct Screen {
+    #[trace(sometimes)] // error: unknown trace attribute
+    title: String,
+}
+```
+"#
+)]
 pub trait Trace {
     /// Calls [`Tracer::visit`] on every token this value holds, directly or
     /// inside its fields.
@@ -79,6 +169,11 @@ impl<A> Trace for Shared<A> {
     }
 }
 impl<A> Trace for Cell<A> {
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(self);
+    }
+}
+impl<A> Trace for State<A> {
     fn trace(&self, tracer: &mut Tracer) {
         tracer.visit(self);
     }

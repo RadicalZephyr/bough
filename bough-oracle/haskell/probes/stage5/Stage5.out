@@ -1,0 +1,60 @@
+vector SwitchS: [([1],'a'),([2],'b'),([3],'Y'),([4],'Z')]
+vector SwitchC 1: ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 1 (text): ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 1 samples: "abXYZ"
+vector SwitchC 2: ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 2 (text): ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 2 samples: "abXYZ"
+vector SwitchC 3: ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 3 (text): ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'Z')])
+vector SwitchC 3 samples: "abXYZ"
+vector SwitchC 4: ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'5')])
+vector SwitchC 4 (text): ('a',[([0],'a'),([1],'b'),([2],'X'),([3],'Y'),([4],'5')])
+vector SwitchC 4 samples: "abXY5"
+claim5: steps sc: (1,[([0],1),([1],70),([2],80)])
+claim5: samples: [1,70,80]
+R3: steps (map_cell (+1) loop): (2,[([0],2),([1],71)])
+R4: steps top: (0,[([0],0),([1],70)])
+R4: samples top: [0,70]
+R5: steps lift: (1,[([0],1),([1],73)])
+R8: samples cur: [1,2]
+probe selector: [([1],'a'),([3],'Y'),([4],'Z')]
+probe loop, shared inners held directly: Just ([([1],1),([2],2),([3],3),([4],4)],5)
+probe loop, linear inners through a switch cell: Just ([([1],1),([2],2),([3],3),([4],4)],5)
+probe loop with construct (SwitchS.hs): Just ([([1],1),([2],2),([3],3),([4],4)],5)
+quiet: steps sw: (1,[([0],1),([1],5),([2],2),([3],30),([4],8)])
+quiet: samples: [1,5,2,30,8]
+quiet: steps (map_cell (*10) sw): (10,[([0],10),([1],50),([2],20),([3],300),([4],80)])
+creation: steps sw: (4,[([0],4),([2],9),([3],5)])
+creation: updates sw: [([0],4),([2],9),([3],5)]
+creation: value sw [0]: [([0],4),([2],9),([3],5)]
+creation: hold 99 (updates sw): [4,4,9,5]
+creation: outer steps at [0]: steps: (4,[([0],6)])
+creation: outer steps at [0]: samples: [6,6,6,6]
+creation: outer steps at [0]: text: (4,[([0],6)])
+nested: steps top: (10,[([0],10),([1],11),([2],22),([3],40),([4],23),([5],15),([6],36)])
+nested: samples top: [10,11,22,40,23,15,36]
+nested: steps twice: (10,[([0],10),([1],11),([2],22),([3],40),([4],23),([5],15),([6],36)])
+nested: samples twice: [10,11,22,40,23,15,36]
+through memo: steps sw: (1,[([0],1),([1],70),([2],80),([3],90)])
+through memo: samples: [1,70,80,90]
+new inner fires: out: [([1],'a'),([2],'b'),([3],'Y')]
+new inner fires: linear, through a switch cell: [([1],'a'),([2],'b'),([3],'Y')]
+state switch: steps current: ([],[([0],[]),([1],["ada"]),([2],["ada","grace"]),([3],["ada","bo"]),([4],["ada","bo","x"]),([5],["ada","grace","bo","x","eve"])])
+state switch: samples: [[],["ada"],["ada","grace"],["ada","bo"],["ada","bo","x"],["ada","grace","bo","x","eve"]]
+state switch: lengths: [0,1,2,2,3,5]
+same inner: steps sw: (1,[([0],1),([1],5),([2],5),([3],6)])
+other outers: through a loop forward: [([1],'a'),([3],'Y'),([4],'Z'),([5],'d')]
+other outers: through a map cell: [([1],'a'),([3],'Y'),([4],'Z'),([5],'d')]
+stream creation: out: [([0],'p'),([1],'X'),([2],'Y')]
+later inner: out: [([0],'p'),([1],'x'),([2],'y')]
+reversal: rounds: 2
+reversal: steps a: (1,[([0],1),([1],102)])
+reversal: steps b: (11,[([0],11),([1],2)])
+reversal: samples a, b, p, y: ([1,102,102],[11,2,2],[11,112,112],[111,102,102])
+map outer: steps sw: (1,[([0],1),([1],2),([2],20),([3],30),([4],5)])
+trade: a: [([1],11),([2],21),([3],32)]
+trade: b: [([1],13),([2],23),([3],31)]
+children: steps sw: (1,[([0],1),([1,0],20),([1,1],3),([2,0],5),([3,0],21)])
+children: samples: [1,3,5,21]
+children: switch_stream: [([1,0],'a'),([1,1],'z'),([2,0],'c')]
