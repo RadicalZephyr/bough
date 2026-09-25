@@ -8,6 +8,14 @@
 
 ---
 
+## Status
+
+Bough is in early development while the API and performance model are
+refined. Expect rapid iteration, breaking changes, and new modules as
+the design evolves.
+
+---
+
 ## Overview
 
 **Bough** is a modern, idiomatic Rust implementation of **Functional
@@ -28,14 +36,6 @@ reactive systems that feel natural in Rust projects.
 
 If you’ve ever wanted FRP that feels more like Rust and less like a
 port, this library is for you.
-
----
-
-## Status
-
-Bough is in early development while the API and performance model are
-refined. Expect rapid iteration, breaking changes, and new modules as
-the design evolves.
 
 ---
 
