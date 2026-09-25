@@ -160,18 +160,10 @@ impl Graph<Threaded> {
 /// cannot borrow while the graph is busy.
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 impl Graph<Local> {
-    /// The inbox: its poison mirror and its guard, read while the graph is
-    /// busy.
+    /// The inbox: its poison mirror, its guard and the driver's waker,
+    /// read while the graph is busy.
     pub(crate) fn inbox(&self) -> Arc<Inbox> {
         self.build.edge.inbox.clone()
-    }
-
-    /// Wakes the waker the driver registered, if there is one: the
-    /// handle's queue has calls left for a later run.
-    pub(crate) fn wake(&self) {
-        if let Some(waker) = &self.build.edge.waker {
-            waker.wake_by_ref();
-        }
     }
 
     /// The count of released handles, for the flag of a handle made while

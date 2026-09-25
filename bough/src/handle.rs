@@ -73,8 +73,8 @@ struct Inner {
     graph: RefCell<Graph<Local>>,
     /// The calls made while the graph was busy, in the order they were made.
     queue: RefCell<VecDeque<Call>>,
-    /// The graph's inbox, whose poison mirror and guard can be read while
-    /// the graph is busy.
+    /// The graph's inbox, whose poison mirror, guard and waker can be read
+    /// while the graph is busy.
     inbox: Arc<Inbox>,
     /// The graph's count of released handles, which the flag of a listener
     /// or an anchor points to, so that one can be made while the graph is
@@ -100,7 +100,7 @@ impl Inner {
     fn finish(&self, graph: &mut Graph<Local>) {
         self.run_queue(graph);
         if !self.queue.borrow().is_empty() {
-            graph.wake();
+            self.inbox.wake();
         }
     }
 }
@@ -127,6 +127,14 @@ impl Owner {
     /// A handle for I/O code.
     pub fn io(&self) -> Io {
         Io(Rc::downgrade(&self.0))
+    }
+}
+
+/// Dropping the owner wakes the driver, which finds the graph gone and
+/// can end. The graph itself goes once no call is in progress.
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.0.inbox.wake();
     }
 }
 

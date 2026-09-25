@@ -136,6 +136,21 @@ fn a_listener_that_holds_an_io_does_not_keep_the_graph_alive() {
     assert_eq!(io.with_sample(a, |n| *n), Err(NowError::Gone));
 }
 
+/// So that a driver waiting for work learns the graph is gone and ends.
+#[test]
+fn dropping_the_owner_wakes_the_driver() {
+    let (graph, _) = two_cells();
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+    io.with_graph(|graph| graph.set_waker(Waker::from(wakes.clone())))
+        .unwrap();
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+    drop(owner);
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(io.pump(), Err(NowError::Gone));
+}
+
 /// A listener that always sends: each run of the queue takes the calls
 /// queued when it starts, so every call returns, and what is left wakes
 /// the driver. What waited runs before a later call, in the order it was
