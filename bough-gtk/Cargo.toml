@@ -13,3 +13,7 @@ publish = false
 [dependencies]
 bough = { path = "../bough", features = ["derive"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+
+[[test]]
+name = "scenarios"
+harness = false
