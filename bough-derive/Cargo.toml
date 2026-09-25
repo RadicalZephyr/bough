@@ -1,6 +1,6 @@
 [package]
 name = "bough-derive"
-description = "Derive macros for bough."
+description = "Derive macros for bough. Early development: not yet usable."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

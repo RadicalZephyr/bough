@@ -1,6 +1,6 @@
 [package]
 name = "bough"
-description = "Lightweight FRP rooted in Rust: an efficient FRP engine backed by a strong denotational semantics."
+description = "Lightweight FRP rooted in Rust: an efficient FRP engine backed by a strong denotational semantics. Early development: not yet usable."
 readme = "../README.md"
 version.workspace = true
 authors.workspace = true
