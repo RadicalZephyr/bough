@@ -49,8 +49,9 @@ impl Tracer {
 /// slot is emptied before a collection, so an event roots nothing.
 ///
 /// Implementations ship for the tokens, which visit themselves, for the
-/// standard library's types and collections, and for tuples and arrays; a
-/// foreign type that holds no tokens goes in a [`Leaf`]. A hand-written
+/// standard library's types and collections, for tuples and arrays, and for
+/// the chain adapters, which visit the cells a chain reads and end at its
+/// source; a foreign type that holds no tokens goes in a [`Leaf`]. A hand-written
 /// implementation visits every token the value holds:
 ///
 /// ```

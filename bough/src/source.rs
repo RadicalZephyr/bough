@@ -58,7 +58,7 @@ use crate::engine::nodes::stream::{ChainNode, MergeNode, SlotNode};
 use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
 use crate::mode::{Accepts, Erase, Mode};
 use crate::token::{Cell, Shared, State, Stream, Token};
-use crate::trace::Trace;
+use crate::trace::{Trace, Tracer};
 
 pub(crate) mod sealed {
     /// Implemented by the two node types and the adapter types.
@@ -75,19 +75,20 @@ pub(crate) mod sealed {
 /// Sealed, and `'static`: a materializer stores the chain itself in its node
 /// and runs it through the hidden methods, so every adapter must be the
 /// crate's own.
-pub trait Source: Sized + 'static + sealed::Sealed {
+///
+/// A chain is [`Trace`]. It visits the tokens its adapters hold, the cells
+/// `snapshot` and `gate` read, and ends at its source token. A materializer
+/// traces the chain once, when it builds the node: what the trace finds
+/// besides the dependency is the node's reach (RFD 3), since the chain never
+/// changes after it is built. A closure is opaque to the trace, so a token a
+/// closure captures is declared with [`Build::depends`].
+pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// The type of each event.
     type Event;
 
     /// The one node this chain reads events from: its dependency.
     #[doc(hidden)]
     fn dependency(&self) -> Token;
-
-    /// The cells the chain reads with `snapshot` and `gate`: reach for
-    /// collection, never dependencies, since a cell is read as it was
-    /// before the instant.
-    #[doc(hidden)]
-    fn read_cells(&self, visit: &mut dyn FnMut(Token));
 
     /// Runs the fused chain for this instant: reads the dependency's slot,
     /// taking the event from a linear stream and cloning it from a shared
@@ -663,13 +664,21 @@ where
 }
 
 impl<M: Mode> Build<M> {
-    /// Checks a chain's dependency and the cells it reads, and returns
-    /// their indices. A foreign or stale token is a build-time panic.
+    /// Checks a chain's dependency and the tokens its trace visits, and
+    /// returns their indices: the dependency, and the reach, which is every
+    /// token besides the dependency. A foreign or stale token is a
+    /// build-time panic.
     pub(crate) fn chain_reach<S: Source>(&self, chain: &S) -> (u32, Vec<u32>) {
         let dependency = self.check(chain.dependency());
-        let mut cells = Vec::new();
-        chain.read_cells(&mut |t| cells.push(self.check(t)));
-        (dependency, cells)
+        let mut tracer = Tracer::new();
+        chain.trace(&mut tracer);
+        let reach = tracer
+            .visited
+            .into_iter()
+            .map(|token| self.check(token))
+            .filter(|&index| index != dependency)
+            .collect();
+        (dependency, reach)
     }
 
     /// Records what a new node keeps alive beyond its dependencies.
@@ -707,7 +716,6 @@ impl<A: 'static> Source for Stream<A> {
     fn dependency(&self) -> Token {
         self.token
     }
-    fn read_cells(&self, _visit: &mut dyn FnMut(Token)) {}
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
         cx.take::<A>(self.token.index)
     }
@@ -728,7 +736,6 @@ impl<A: Clone + 'static> Source for Shared<A> {
     fn dependency(&self) -> Token {
         self.token
     }
-    fn read_cells(&self, _visit: &mut dyn FnMut(Token)) {}
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
         cx.cloned::<A>(self.token.index)
     }
@@ -754,11 +761,14 @@ impl<S: Source, B, F: Fn(S::Event) -> B + 'static> Source for Map<S, F> {
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
         self.source.pull(cx).map(&self.f)
+    }
+}
+impl<S: Trace, F> Trace for Map<S, F> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
     }
 }
 
@@ -773,11 +783,14 @@ impl<S: Source, P: Fn(&S::Event) -> bool + 'static> Source for Filter<S, P> {
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
         self.source.pull(cx).filter(|e| (self.predicate)(e))
+    }
+}
+impl<S: Trace, P> Trace for Filter<S, P> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
     }
 }
 
@@ -792,11 +805,14 @@ impl<S: Source, B, F: Fn(S::Event) -> Option<B> + 'static> Source for FilterMap<
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
         self.source.pull(cx).and_then(&self.f)
+    }
+}
+impl<S: Trace, F> Trace for FilterMap<S, F> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
     }
 }
 
@@ -811,11 +827,13 @@ impl<S: Source, B: Clone + 'static> Source for MapTo<S, B> {
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
         self.source.pull(cx).map(|_| self.value.clone())
+    }
+}
+impl<S: Trace, B> Trace for MapTo<S, B> {
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
     }
 }
 
@@ -837,14 +855,19 @@ where
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        visit(self.cell.token());
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
         let a = self.source.pull(cx)?;
         // The value before the instant: a read, not a dependency.
         Some((self.f)(a, cx.sample::<C::Value>(self.cell.token().index)))
+    }
+}
+impl<S: Trace, C: CellRef, F> Trace for Snapshot<S, C, F> {
+    /// The cell it reads, which is reach and never a dependency, since it
+    /// is read as it was before the instant; then the source. The closure is
+    /// opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(&self.cell);
+        self.source.trace(tracer)
     }
 }
 
@@ -860,15 +883,19 @@ impl<S: Source, C: CellRef<Value = bool>> Source for Gate<S, C> {
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        visit(self.cell.token());
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
         // The source is pulled whether or not the gate is open, so a `once`
         // inside it takes its first event even when the gate drops it.
         let a = self.source.pull(cx)?;
         (*cx.sample::<bool>(self.cell.token().index)).then_some(a)
+    }
+}
+impl<S: Trace, C: CellRef> Trace for Gate<S, C> {
+    /// The cell it reads, which is reach and never a dependency, since it
+    /// is read as it was before the instant; then the source.
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(&self.cell);
+        self.source.trace(tracer)
     }
 }
 
@@ -883,9 +910,6 @@ impl<S: Source> Source for Once<S> {
     fn dependency(&self) -> Token {
         self.source.dependency()
     }
-    fn read_cells(&self, visit: &mut dyn FnMut(Token)) {
-        self.source.read_cells(visit)
-    }
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
         if self.done {
             return None;
@@ -893,5 +917,10 @@ impl<S: Source> Source for Once<S> {
         let a = self.source.pull(cx)?;
         self.done = true;
         Some(a)
+    }
+}
+impl<S: Trace> Trace for Once<S> {
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
     }
 }
