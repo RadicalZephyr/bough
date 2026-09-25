@@ -24,6 +24,16 @@
 //! sends cannot keep a call from returning, as with
 //! [`pump`](Graph::pump).
 //!
+//! # Graph code
+//!
+//! An `Io` is `Clone + 'static`, so graph code can capture one: a `map`
+//! function, a `construct` closure. A call from there would be I/O inside
+//! FRP logic, so it is refused with [`IoError::FromGraphCode`], by the
+//! thread token that guards [`Remote`](crate::Remote) (RFD 6). A listener
+//! is I/O code, so its calls wait instead.
+//!
+//! # Collection
+//!
 //! No collection runs while the queue does. A collection runs as a
 //! transaction opens, and never between a transaction and the I/O code its
 //! listeners report to; the calls in the queue are that code. So a token a
@@ -50,8 +60,8 @@ struct Inner {
     graph: RefCell<Graph<Local>>,
     /// The calls made while the graph was busy, in the order they were made.
     queue: RefCell<VecDeque<Call>>,
-    /// The graph's inbox, whose poison mirror can be read while the graph
-    /// is busy.
+    /// The graph's inbox, whose poison mirror and guard can be read while
+    /// the graph is busy.
     inbox: Arc<Inbox>,
 }
 
@@ -176,6 +186,9 @@ impl Io {
         f: impl FnOnce(&C::Value) -> R,
     ) -> Result<R, NowError> {
         let inner = self.0.upgrade().ok_or(NowError::Gone)?;
+        if inner.inbox.inside() {
+            return Err(NowError::FromGraphCode);
+        }
         if let Ok(mut graph) = inner.graph.try_borrow_mut() {
             if graph.poisoned() {
                 return Err(NowError::Poisoned);
@@ -199,6 +212,9 @@ impl Io {
     /// does not wrap. What waited runs first, and what `f` asked for after.
     pub fn with_graph<R>(&self, f: impl FnOnce(&mut Graph<Local>) -> R) -> Result<R, NowError> {
         let inner = self.0.upgrade().ok_or(NowError::Gone)?;
+        if inner.inbox.inside() {
+            return Err(NowError::FromGraphCode);
+        }
         let mut graph = inner.graph.try_borrow_mut().map_err(|_| NowError::Busy)?;
         if graph.poisoned() {
             return Err(NowError::Poisoned);
@@ -214,6 +230,9 @@ impl Io {
     /// opens a transaction, then the call, then what it asked for.
     fn request(&self, transaction: bool, call: Call) -> Result<(), IoError> {
         let inner = self.0.upgrade().ok_or(IoError::Gone)?;
+        if inner.inbox.inside() {
+            return Err(IoError::FromGraphCode);
+        }
         if inner.inbox.is_poisoned() {
             return Err(IoError::Poisoned);
         }

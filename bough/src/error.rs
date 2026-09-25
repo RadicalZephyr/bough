@@ -118,6 +118,10 @@ pub enum RemoteTransactionError {
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoError {
+    /// Called from graph code, such as a `map` function or a `construct`
+    /// closure: I/O from inside FRP logic. A listener is I/O code, and its
+    /// calls wait instead.
+    FromGraphCode,
     /// The [`Owner`](crate::Owner) was dropped, and the graph with it.
     Gone,
     /// A previous transaction never finished: a panic escaped it.
@@ -130,6 +134,9 @@ pub enum IoError {
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowError {
+    /// Called from graph code, such as a `map` function or a `construct`
+    /// closure: I/O from inside FRP logic.
+    FromGraphCode,
     /// The graph is busy: a transaction, its listeners, or another call on
     /// it is in progress, and this call cannot wait for it.
     Busy,

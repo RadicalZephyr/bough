@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Cell, Graph, Input, IoError, NowError, Owner, Source};
+use bough::{Cell, Graph, Input, Io, IoError, NowError, Owner, Source};
 
 type Log = Rc<RefCell<Vec<String>>>;
 
@@ -197,4 +197,46 @@ fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_fo
     let (bumps_in, count) = counter;
     io.send(bumps_in, 5).unwrap(); // this one collects first
     assert_eq!(io.with_sample(count, |n| *n), Ok(15));
+}
+
+/// Graph code gets the handle as an event, since the handle exists only
+/// once the graph does. A `map` function and a `construct` closure each
+/// try a call that could wait and one that could not.
+#[test]
+fn a_call_from_graph_code_is_refused() {
+    let log: Log = Rc::default();
+    let (map_log, construct_log) = (log.clone(), log.clone());
+    let (graph, (ios_in, _roots)) = Graph::build(move |b| {
+        let (ios, ios_in) = b.input::<Io>();
+        let ios = ios.share(b);
+        let (numbers, numbers_in) = b.input::<u32>();
+        let latest = numbers.hold(b, 0);
+        let mapped = ios
+            .map(move |io: Io| {
+                let sent = io.send(numbers_in, 1);
+                let read = io.with_sample(latest, |n| *n);
+                map_log.borrow_mut().push(format!("map: {sent:?} {read:?}"));
+            })
+            .hold(b, ());
+        let built = ios.construct(b, move |_, io: Io| {
+            let sent = io.transaction(move |tx| tx.send(numbers_in, 2));
+            let graph = io.with_graph(|_| ());
+            construct_log
+                .borrow_mut()
+                .push(format!("construct: {sent:?} {graph:?}"));
+        });
+        (ios_in, (mapped, built.hold(b, ()), latest, numbers_in))
+    });
+    let owner = Owner::new(graph);
+    let io = owner.io();
+    io.send(ios_in, io.clone()).unwrap();
+    let mut log = log.borrow().clone();
+    log.sort();
+    assert_eq!(
+        log,
+        [
+            "construct: Err(FromGraphCode) Err(FromGraphCode)",
+            "map: Err(FromGraphCode) Err(FromGraphCode)",
+        ]
+    );
 }

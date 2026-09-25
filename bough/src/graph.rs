@@ -154,7 +154,8 @@ impl Graph<Threaded> {
 /// cannot borrow while the graph is busy.
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 impl Graph<Local> {
-    /// The inbox: its poison mirror, read while the graph is busy.
+    /// The inbox: its poison mirror and its guard, read while the graph is
+    /// busy.
     pub(crate) fn inbox(&self) -> Arc<Inbox> {
         self.build.edge.inbox.clone()
     }
