@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! The I/O side (RFD 2, RFD 5, RFD 6, RFD 7).
 
 #[cfg(target_has_atomic = "ptr")]

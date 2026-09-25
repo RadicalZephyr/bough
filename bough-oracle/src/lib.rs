@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! The Sodium denotational semantics (version 1.1) as an executable oracle
 //! over lists of time-stamped values.
 //!

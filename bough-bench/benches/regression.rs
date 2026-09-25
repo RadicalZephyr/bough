@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Instruction-count benchmarks, run in CI as the regression gate.
 //!
 //! CI runs this twice in one job, first on the base commit and then on the

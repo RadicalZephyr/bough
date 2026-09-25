@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Errors of the `try_` variants (RFD 5).
 //!
 //! Each family of operations with the same failure modes has its own type,

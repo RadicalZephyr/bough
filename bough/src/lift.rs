@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `lift` over a tuple of cells (RFD 4).
 
 use crate::Build;

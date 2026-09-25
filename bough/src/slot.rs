@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Input slots: the path from an interrupt handler into a graph (RFD 7).
 
 use core::marker::PhantomData;

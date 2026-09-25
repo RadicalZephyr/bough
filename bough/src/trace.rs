@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! `Trace`: how the collector finds tokens inside values (RFD 3).
 //!
 //! Every type held in a cell implements `Trace`. It is a safe trait: a wrong

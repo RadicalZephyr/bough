@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Benchmark shapes and baselines.
 //!
 //! The UI, frame and shallow shapes and their hand-written imperative

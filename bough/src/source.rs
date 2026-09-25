@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Streams as chains and nodes (RFD 4).
 //!
 //! Adapters transform events and take no context; each returns its adapter

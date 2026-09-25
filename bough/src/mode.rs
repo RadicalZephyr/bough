@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Threading modes (RFD 6).
 //!
 //! A [`Graph`](crate::Graph) is `Local` by default. In `Threaded` mode every

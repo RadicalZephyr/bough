@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Derive macros for bough.
 //!
 //! `#[derive(Trace)]` lands with the memory model increment; until then this

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Tokens: the names I/O code and graph code hold for nodes.
 //!
 //! A token is an index, a generation and a graph id. It has no method that

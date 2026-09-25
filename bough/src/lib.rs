@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Lightweight FRP rooted in Rust.
 //!
 //! Bough implements the Sodium FRP denotational semantics with an API that
