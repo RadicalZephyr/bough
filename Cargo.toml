@@ -3,7 +3,7 @@ resolver = "3"
 members = ["bough", "bough-derive", "bough-oracle", "bough-bench"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 authors = ["Zefira Shannon"]
 edition = "2024"
 rust-version = "1.85"
@@ -11,9 +11,9 @@ license = "MPL-2.0"
 repository = "https://github.com/bough-frp/bough"
 
 [workspace.dependencies]
-bough = { path = "bough", version = "0.1.0" }
-bough-derive = { path = "bough-derive", version = "0.1.0" }
-bough-oracle = { path = "bough-oracle", version = "0.1.0" }
+bough = { path = "bough", version = "0.0.1" }
+bough-derive = { path = "bough-derive", version = "0.0.1" }
+bough-oracle = { path = "bough-oracle", version = "0.0.1" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
