@@ -32,7 +32,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use bough::{
-    Anchor, Build, Cell, Input, Local, PoisonedError, Runtime, SendError, Shared, Source, Stream,
+    Anchored, Build, Cell, Input, Local, PoisonedError, Runtime, SendError, Shared, Source, Stream,
     TokenError, Trace, Transaction,
 };
 
@@ -142,20 +142,6 @@ fn drive<S>(
             observe(graph)
         })
         .collect()
-}
-
-/// Anchors what a listener received since the last call, one anchor per
-/// value: tokens a closure built reach I/O code as data, which nothing in
-/// the graph names, so they are collected unless anchored before the next
-/// transaction (RFD 3: anchor it or lose it).
-fn anchor_received<T: Trace + Clone>(
-    graph: &mut Runtime,
-    received: &RefCell<Vec<T>>,
-    anchors: &mut Vec<Anchor>,
-) {
-    for value in &received.borrow()[anchors.len()..] {
-        anchors.push(graph.anchor(value.clone()).into_parts().1);
-    }
 }
 
 /// Observations after transactions 1, 2, ... of the things closures had
@@ -297,7 +283,8 @@ fn r1_a_loop_in_a_construct_closure_with_readers_built_before_its_definition() {
                 let seen = s.snapshot(label, |_, l| *l).hold(b, 99u32);
                 let next = s.snapshot(total, |x, t| t + x).hold(b, 0u32);
                 total_loop.close(b, next);
-                ([total, label, seen], log_steps(b, label))
+                let log = log_steps(b, label);
+                b.anchor(([total, label, seen], log))
             });
             (s_in, made)
         });
@@ -305,10 +292,8 @@ fn r1_a_loop_in_a_construct_closure_with_readers_built_before_its_definition() {
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         let schedule = [vec![send(s_in, 5)], vec![send(s_in, 7)]];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
-            let (cells, log) = received.borrow()[0];
+            let (cells, log) = *received.borrow()[0];
             (cells.map(|c| *graph.sample(c)), graph.sample(log).clone())
         });
         let values: Vec<[u32; 3]> = observed.iter().map(|(v, _)| *v).collect();
@@ -344,19 +329,17 @@ fn r2(definition_is_a_node: bool) -> Vec<(usize, Vec<u32>)> {
                 } else {
                     forward_loop.close(b, s.map(move |x| x + n * 20));
                 }
-                held
+                b.anchor(held)
             });
             (s_in, made)
         });
         let (s_in, made) = edge.keep();
-        let (received, on) = recorder::<Cell<u32>>();
+        let (received, on) = recorder::<Anchored<Cell<u32>>>();
         graph.listen(made, on).keep();
         let schedule = [vec![send(s_in, 5)], vec![send(s_in, 7)]];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let held = received.borrow();
-            held.iter().map(|h| *graph.sample(*h)).collect::<Vec<_>>()
+            held.iter().map(|h| *graph.sample(**h)).collect::<Vec<_>>()
         });
         per_item(&observed)
     })
@@ -422,7 +405,8 @@ fn everything_a_closure_builds_exists_from_its_instant() {
                     snap,
                     quiet,
                 ];
-                (*c.sample(b), cells)
+                let inside = *c.sample(b);
+                b.anchor((inside, cells))
             });
             b.depends(&made, &[&s, &c, &q]);
             ((s_in, c_in, q_in, go_in), made)
@@ -435,13 +419,14 @@ fn everything_a_closure_builds_exists_from_its_instant() {
             vec![send(s_in, 2), send(c_in, 12), send(go_in, ())],
             vec![send(s_in, 3), send(c_in, 13), send(q_in, 43)],
         ];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
-                .map(|(inside, cells)| (*inside, cells.map(|c| *graph.sample(c))))
+                .map(|row| {
+                    let (inside, cells) = **row;
+                    (inside, cells.map(|c| *graph.sample(c)))
+                })
                 .collect::<Vec<_>>()
         });
         let items = per_item(&observed);
@@ -495,12 +480,13 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
             let outs = outs.share(b);
             let made = s
                 .construct(b, move |b, v| {
-                    (v * 10, outs.map(move |o| o + v).hold(b, 0u32))
+                    let held = outs.map(move |o| o + v).hold(b, 0u32);
+                    b.anchor((v * 10, held))
                 })
                 .share(b);
-            outs_loop.close(b, made.map(|(n, _)| n));
+            outs_loop.close(b, made.map(|row| row.0));
             let c0 = b.constant(0u32);
-            let shown = made.map(|(_, h)| h).hold(b, c0).switch_cell(b);
+            let shown = made.map(|row| row.1).hold(b, c0).switch_cell(b);
             (s_in, made, (log_events(b, outs), log_steps(b, shown)))
         });
         let (s_in, made, (outs, shown)) = edge.keep();
@@ -508,11 +494,9 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
         graph.listen(made, on).keep();
         let at_build = graph.sample(shown).clone();
         let schedule = [vec![send(s_in, 1)], vec![send(s_in, 2)]];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
-            let holds: Vec<u32> = received.iter().map(|(_, h)| *graph.sample(*h)).collect();
+            let holds: Vec<u32> = received.iter().map(|row| *graph.sample(row.1)).collect();
             (
                 graph.sample(outs).clone(),
                 graph.sample(shown).clone(),
@@ -536,9 +520,9 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
 
 /// An input built by a closure reaches I/O code as data: a listener on
 /// the construct's stream receives its token by value, with a cell and a
-/// linear stream built over it, and after `send` returns, I/O code
-/// listens to them and sends to the input (RFD 2, RFD 4: receive, then
-/// wire). Stage6.hs:
+/// linear stream built over it, anchored where the closure built them,
+/// and after `send` returns, I/O code listens to them and sends to the
+/// input (RFD 3: anchor it at the edge). Stage6.hs:
 ///
 /// ```text
 /// input inside: samples total after [1], [2], [3]: [100,105,111]
@@ -554,7 +538,7 @@ fn an_input_built_by_a_closure_is_received_by_a_listener_and_wired_after_send() 
                 let sends = sends.share(b);
                 let total = sends.accumulate(b, k, |x, t| t + x);
                 let doubled = sends.map(|x| x * 2).node(b);
-                (sends_in, total, doubled)
+                b.anchor((sends_in, total, doubled))
             });
             (go_in, made)
         });
@@ -563,9 +547,13 @@ fn an_input_built_by_a_closure_is_received_by_a_listener_and_wired_after_send() 
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         graph.send(go_in, 100);
-        // Receive: the tokens, a linear stream's among them, by value.
-        let (sends_in, total, doubled) =
-            received.borrow_mut().pop().expect("the closure ran at [1]");
+        // Receive: the row, anchored, with a linear stream's token among its
+        // tokens.
+        let ((sends_in, total, doubled), _row) = received
+            .borrow_mut()
+            .pop()
+            .expect("the closure ran at [1]")
+            .into_parts();
         // Then wire.
         let (events, on_event) = recorder();
         graph.listen(doubled, on_event).keep();
@@ -603,26 +591,25 @@ fn a_construct_built_by_a_closure_runs_at_its_creation_instant_and_after() {
                     let inner = s.construct(b, move |b, m| {
                         s.map(move |x| x + 10 * m + 100 * n).hold(b, 0u32)
                     });
-                    inner.hold(b, c0).switch_cell(b)
+                    let sw = inner.hold(b, c0).switch_cell(b);
+                    b.anchor(sw)
                 })
                 .share(b);
-            let top = made.hold(b, c0).switch_cell(b);
+            let top = made.map(|sw| *sw).hold(b, c0).switch_cell(b);
             (s_in, made, log_steps(b, top))
         });
         let (s_in, made, top) = edge.keep();
-        let (received, on) = recorder::<Cell<u32>>();
+        let (received, on) = recorder::<Anchored<Cell<u32>>>();
         graph.listen(made, on).keep();
         let at_build = graph.sample(top).clone();
-        let mut anchors = Vec::new();
         let schedule = [
             vec![send(s_in, 1)],
             vec![send(s_in, 2)],
             vec![send(s_in, 3)],
         ];
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
-            let bodies: Vec<u32> = received.iter().map(|sw| *graph.sample(*sw)).collect();
+            let bodies: Vec<u32> = received.iter().map(|sw| *graph.sample(**sw)).collect();
             (graph.sample(top).clone(), bodies)
         });
         let mut tops = vec![at_build];
@@ -667,11 +654,11 @@ fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
                 .construct(b, move |b, v| {
                     let held = items.map(move |x| x * 10 + v).hold(b, 0u32);
                     let later = items.map(move |x| x + v * 100).defer(b).hold(b, 0u32);
-                    (held, later)
+                    b.anchor((held, later))
                 })
                 .share(b);
-            let top = made.map(|(h, _)| h).hold(b, c0).switch_cell(b);
-            let later = made.map(|(_, l)| l).hold(b, c0).switch_cell(b);
+            let top = made.map(|row| row.0).hold(b, c0).switch_cell(b);
+            let later = made.map(|row| row.1).hold(b, c0).switch_cell(b);
             let seed = b.constant(vec![5u32, 6]).steps_with_current(b).split(b);
             let made0 = seed.construct(b, move |b, v| items.map(move |x| x + v).hold(b, v));
             let top0 = made0.hold(b, c0).switch_cell(b);
@@ -679,18 +666,16 @@ fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
             (lists_in, made, logs)
         });
         let (lists_in, made, logs) = edge.keep();
-        let (received, on) = recorder::<(Cell<u32>, Cell<u32>)>();
+        let (received, on) = recorder::<Anchored<(Cell<u32>, Cell<u32>)>>();
         graph.listen(made, on).keep();
         let at_build = logs.map(|l| graph.sample(l).clone());
         let schedule = [
             vec![send(lists_in, vec![1, 2, 3])],
             vec![send(lists_in, vec![4])],
         ];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
-            let holds: Vec<u32> = received.iter().map(|(h, _)| *graph.sample(*h)).collect();
+            let holds: Vec<u32> = received.iter().map(|row| *graph.sample(row.0)).collect();
             (logs.map(|l| graph.sample(l).clone()), holds)
         });
         let steps: Vec<ByInstant<u32>> = (0..3)
@@ -758,7 +743,9 @@ fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
                 let fresh = xs.map(|v| v * 3).hold(b, 1u32);
                 let outer = go.map(move |_| fresh).hold(b, c0);
                 let sw = outer.switch_cell(b);
-                (sw.steps(b).hold(b, 99u32), log_steps(b, sw))
+                let held = sw.steps(b).hold(b, 99u32);
+                let log = log_steps(b, sw);
+                b.anchor((held, log))
             });
             b.depends(&made, &[&xs]);
             (go_in, xs_in, made)
@@ -767,10 +754,8 @@ fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         let schedule = [vec![send(xs_in, 4), send(go_in, ())], vec![send(xs_in, 5)]];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
-            let (h, log) = received.borrow()[0];
+            let (h, log) = *received.borrow()[0];
             (*graph.sample(h), graph.sample(log).clone())
         });
         let held: Vec<u32> = observed.iter().map(|(h, _)| *h).collect();
@@ -807,7 +792,9 @@ fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
             let made = go.construct(b, move |b, ()| {
                 let sw = outer.switch_cell(b);
                 let inside = *sw.sample(b);
-                (inside, sw.steps(b).hold(b, 99u32), log_steps(b, sw))
+                let seen = sw.steps(b).hold(b, 99u32);
+                let log = log_steps(b, sw);
+                b.anchor((inside, seen, log))
             });
             b.depends(&made, &[&outer]);
             b.depends(&outer, &[&c2]);
@@ -821,13 +808,12 @@ fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
             vec![send(go_in, ())],
             vec![send(x_in, 30)],
         ];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
-                .map(|&(inside, seen, log)| {
+                .map(|row| {
+                    let (inside, seen, log) = **row;
                     (inside, *graph.sample(seen), graph.sample(log).clone())
                 })
                 .collect::<Vec<_>>()
@@ -868,13 +854,14 @@ fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
             b.depends(&outer, &[&z, &a]);
             let made = go.construct(b, move |b, ()| {
                 let events = outer.switch_stream(b);
-                log_events(b, events)
+                let log = log_events(b, events);
+                b.anchor(log)
             });
             b.depends(&made, &[&outer]);
             ((a_in, z_in, sel_in, go_in), made)
         });
         let ((a_in, z_in, sel_in, go_in), made) = edge.keep();
-        let (received, on) = recorder::<Cell<Vec<char>>>();
+        let (received, on) = recorder::<Anchored<Cell<Vec<char>>>>();
         graph.listen(made, on).keep();
         let schedule = [
             vec![send(a_in, 'a'), send(z_in, 'X')],
@@ -888,13 +875,11 @@ fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
             vec![send(a_in, 'd'), send(z_in, 'W'), send(sel_in, false)],
             vec![send(a_in, 'e'), send(z_in, 'V')],
         ];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
-                .map(|l| graph.sample(*l).clone())
+                .map(|l| graph.sample(**l).clone())
                 .collect::<Vec<_>>()
         });
         per_item(&observed)
@@ -956,7 +941,7 @@ fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t(
                 let switches = [sw_before, sw_at, sw_after, via_fresh, top];
                 let inside = switches.map(|sw| *sw.sample(b));
                 let logs = switches.map(|sw| log_steps(b, sw));
-                (inside, switches, logs)
+                b.anchor((inside, switches, logs))
             });
             b.depends(&made, &[&before, &at, &after, &x, &c3, &sel3]);
             ((x_in, y_in, sel1_in, sel2_in, sel3_in, go_in), made)
@@ -975,15 +960,14 @@ fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t(
             ],
             vec![send(x_in, 30), send(y_in, 300), send(sel3_in, ())],
         ];
-        let mut anchors = Vec::new();
         let observed = drive(&mut graph, order, &schedule, |graph| {
-            anchor_received(graph, &received, &mut anchors);
             let received = received.borrow();
             received
                 .iter()
-                .map(|(inside, switches, logs)| {
+                .map(|row| {
+                    let (inside, switches, logs) = **row;
                     (
-                        *inside,
+                        inside,
                         switches.map(|sw| *graph.sample(sw)),
                         logs.map(|log| graph.sample(log).clone()),
                     )

@@ -569,9 +569,11 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// node's own events, through a loop.
     ///
     /// Tokens created inside `f` flow out as data. An input built there
-    /// reaches I/O code as an event, and since a listener has no graph
-    /// access, I/O code attaches listeners and sends to it after
-    /// [`Runtime::send`](crate::Runtime::send) returns: receive, then wire.
+    /// reaches I/O code as an event, and a collection runs after each unit,
+    /// so `f` anchors what it sends out with
+    /// [`Build::anchor`](crate::Build::anchor). Since a listener has no graph
+    /// access, I/O code attaches listeners and sends to the input after
+    /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the edge.
     ///
     /// ```
     /// use std::cell::RefCell;
@@ -585,7 +587,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
     ///         let count = bumps.accumulate(b, start, |n, c| c + n);
-    ///         (bumps_in, count)
+    ///         b.anchor((bumps_in, count))
     ///     });
     ///     (open_in, opened)
     /// });
@@ -593,8 +595,8 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// let received = Rc::new(RefCell::new(Vec::new()));
     /// let log = received.clone();
     /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
-    /// graph.send(open_in, 10); // receive
-    /// let (bumps_in, count) = received.borrow()[0];
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
     /// graph.send(bumps_in, 5); // then wire
     /// assert_eq!(*graph.sample(count), 15);
     /// ```

@@ -68,10 +68,11 @@ use crate::trace::{Trace, Tracer};
 /// the cells a chain snapshots or gates on, and what
 /// [`Build::depends`](crate::Build::depends) declares. Collection frees
 /// every node no root reaches, and a token naming a freed node is stale:
-/// its next use is an error, never a read of another node. So a token I/O
-/// code keeps, received as data from a listener, must be anchored or
-/// listened to before the next transaction, or it may be lost. Collection
-/// is automatic by default, and never runs inside a transaction; see
+/// its next use is an error, never a read of another node. So a token that
+/// leaves a transaction as data lives only while the graph reaches it or it
+/// left anchored: a construct that sends a row out anchors it with
+/// [`Build::anchor`](crate::Build::anchor). Collection is automatic by
+/// default, runs after each whole unit, and never inside a transaction; see
 /// [`CollectionPolicy`].
 pub struct Runtime<M: Mode = Local> {
     build: Build<M>,
@@ -362,12 +363,12 @@ impl<M: Mode> Runtime<M> {
             .wrapping_sub(self.released_before)
     }
 
-    /// Runs a collection if one is due, as a transaction opens: under the
-    /// automatic policy when the nodes allocated and the handles released
-    /// since the last collection exceed the live count it left, and always
-    /// under the stress setting. Before the transaction rather than after
-    /// it, so that I/O code can anchor a token a listener handed it in the
-    /// transaction before (RFD 2's receive, then wire).
+    /// Runs a collection if one is due, after a whole unit, its children
+    /// included: under the automatic policy when the nodes allocated and the
+    /// guards released since the last collection exceed the live count it
+    /// left, and always under the stress setting. After the unit rather than
+    /// before the next one, so that what a unit made and nothing anchored is
+    /// gone by the time I/O code sees it (RFD 3: anchor it at the edge).
     pub(crate) fn collect_if_due(&mut self) {
         let due = self.stress
             || (self.policy == CollectionPolicy::Automatic
@@ -402,17 +403,18 @@ impl<M: Mode> Runtime<M> {
     /// no-op in release builds, which [`stale_operations`](Runtime::stale_operations)
     /// counts.
     ///
-    /// A collection that is due runs first, before the transaction opens.
+    /// A collection that is due runs after it, once its child transactions
+    /// have run.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A)
     where
         M: Accepts<A>,
     {
         self.enter();
-        self.collect_if_due();
         self.send_without_collecting(input, value);
+        self.collect_if_due();
     }
 
-    /// [`send`](Runtime::send) without the collection that may run first. The
+    /// [`send`](Runtime::send) without the collection that may run after it. The
     /// same-thread handle's queue sends this way: its sends are the I/O
     /// code a transaction's listeners asked for, and no collection runs
     /// between a transaction and that code.
@@ -441,7 +443,6 @@ impl<M: Mode> Runtime<M> {
         if self.poisoned() {
             return Err(SendError::Poisoned);
         }
-        self.collect_if_due();
         let i = self
             .build
             .lookup(input.token)
@@ -454,6 +455,7 @@ impl<M: Mode> Runtime<M> {
             .fire_start(i, value)
             .expect("bough engine: the only send of a transaction is not a double send");
         self.build.finish();
+        self.collect_if_due();
         Ok(())
     }
 
@@ -464,11 +466,13 @@ impl<M: Mode> Runtime<M> {
     /// transaction's listeners and its child transactions run before it
     /// returns. A panic inside `f`, including one from
     /// [`Transaction::send`], escapes the transaction and poisons the graph.
-    /// A collection that is due runs first, before the transaction opens.
+    /// A collection that is due runs after it, once its child transactions
+    /// have run.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
+        let r = self.transaction_without_collecting(f);
         self.collect_if_due();
-        self.transaction_without_collecting(f)
+        r
     }
 
     /// [`transaction`](Runtime::transaction) without the collection that may
@@ -660,36 +664,24 @@ impl<M: Mode> Runtime<M> {
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
     ///
-    /// A token a listener hands I/O code as data names a node that nothing
-    /// may reach, such as an input a closure built. Anchor it after the
-    /// transaction that delivered it and before the next one, when a
-    /// collection may run:
+    /// The build's edge is anchored as a whole. To let part of it go and keep
+    /// the rest, anchor the part to keep, then drop the edge:
     ///
     /// ```
-    /// use std::cell::RefCell;
-    /// use std::rc::Rc;
-    ///
-    /// use bough::{Runtime, Source};
+    /// use bough::{Runtime, Source, TokenError};
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
-    ///     let (open, open_in) = b.input::<u32>();
-    ///     let opened = open.construct(b, |b, start| {
-    ///         let (bumps, bumps_in) = b.input::<u32>();
-    ///         (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
-    ///     });
-    ///     (open_in, opened)
+    ///     let (n, n_in) = b.input::<u32>();
+    ///     let n = n.share(b);
+    ///     (n_in, n.hold(b, 0u32), n.map(|v| v * 2).hold(b, 0u32))
     /// });
-    /// let (open_in, opened) = edge.keep();
-    /// graph.set_collect_after_every_transaction(true); // a test setting
-    /// let received = Rc::new(RefCell::new(Vec::new()));
-    /// let log = received.clone();
-    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
-    /// graph.send(open_in, 10); // receive
-    /// let counter = received.borrow()[0];
-    /// let counter = graph.anchor(counter); // the input and the count
-    /// let (bumps_in, count) = *counter;
-    /// graph.send(bumps_in, 5); // then use
-    /// assert_eq!(*graph.sample(count), 15);
+    /// let (n_in, latest, doubled) = *edge;
+    /// let _kept = graph.anchor((n_in, latest)); // the part to keep
+    /// drop(edge);
+    /// graph.collect_garbage(); // what only the edge reached goes
+    /// graph.send(n_in, 1);
+    /// assert_eq!(*graph.sample(latest), 1);
+    /// assert_eq!(graph.try_sample(doubled).err(), Some(TokenError::Stale));
     /// ```
     ///
     /// Panics on a foreign token or a poisoned graph. Anchoring a collected
@@ -800,16 +792,15 @@ impl<M: Mode> Runtime<M> {
         self.policy = policy;
     }
 
-    /// With `true`, collects as every transaction opens, whatever the
-    /// policy, so that a closure capture that should have been declared
-    /// with [`depends`](crate::Build::depends), or a token I/O code kept
-    /// without anchoring it, is a stale-token error the first time the code
+    /// With `true`, collects after every transaction, whatever the policy,
+    /// so that a closure capture that should have been declared with
+    /// [`depends`](crate::Build::depends), or a token that left a transaction
+    /// without an anchor, is a stale-token error the first time the code
     /// runs rather than whenever the automatic policy happens to collect. A
     /// test setting: a transaction then costs a collection.
     ///
-    /// The collection runs when the next transaction opens, which is after
-    /// every transaction by the time another one runs, and never between a
-    /// transaction's listeners and the I/O code they report to.
+    /// The collection runs after the whole unit, its children and listeners
+    /// included, and never inside it.
     pub fn set_collect_after_every_transaction(&mut self, enabled: bool) {
         self.stress = enabled;
     }
@@ -889,10 +880,9 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// [`pump`](Runtime::pump), running `between` after each slot's and each
-    /// unit's transaction, before the next one opens and before the
-    /// collection that may run first. The same-thread handle runs its
-    /// queue there, so that a listener can wire what one unit built before
-    /// the next unit's collection.
+    /// unit's transaction, before the collection that may run after it. The
+    /// same-thread handle runs its queue there, so that a listener can wire
+    /// what one unit built before that unit's collection.
     pub(crate) fn pump_between(&mut self, between: &mut dyn FnMut(&mut Self)) {
         self.enter();
         if let Err(error) = self.pump_all(!cfg!(debug_assertions), between) {
@@ -954,7 +944,6 @@ impl<M: Mode> Runtime<M> {
             let Some(unit) = self.build.edge.inbox.pop() else {
                 break;
             };
-            self.collect_if_due();
             self.build.begin();
             let mut tx = RemoteTransaction {
                 build: &mut self.build,
@@ -975,6 +964,7 @@ impl<M: Mode> Runtime<M> {
             }
             self.build.finish();
             between(self);
+            self.collect_if_due();
         }
         Ok(())
     }
@@ -993,7 +983,6 @@ impl<M: Mode> Runtime<M> {
             let Connection { input, slot } = self.build.edge.slots[k];
             let mut live = true;
             slot.drain(&mut |event| {
-                self.collect_if_due();
                 match self.build.lookup(input) {
                     Ok(i) => {
                         self.build.begin();
@@ -1002,6 +991,7 @@ impl<M: Mode> Runtime<M> {
                             .expect("bough engine: a slot's event is its transaction's only send");
                         self.build.finish();
                         between(self);
+                        self.collect_if_due();
                     }
                     // `connect` checked the graph, so the input was collected.
                     Err(_) => live = false,
@@ -1084,13 +1074,13 @@ impl<M: Mode> Runtime<M> {
 /// When collection runs. It never runs inside a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionPolicy {
-    /// Amortized: as a transaction opens, when the nodes allocated plus the
+    /// Amortized: after each whole unit, when the nodes allocated plus the
     /// handles released since the last collection exceed the number of
     /// nodes that collection left alive. Garbage is made by unrooting as
     /// much as by allocating, so a graph that only drops listeners still
     /// collects, and a graph that neither allocates nor drops a handle
-    /// never pays. The first transaction after the build collects what the
-    /// build closure built and did not root.
+    /// never pays. The build is a unit too: what its closure built and
+    /// nothing reaches goes before `build` returns.
     Automatic,
     /// Only on [`Runtime::collect_garbage`]: for a frame loop that collects at
     /// the end of a frame, or a high-rate loop that chooses when it pays.

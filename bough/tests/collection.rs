@@ -526,7 +526,7 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
 /// A deselected inner that something still names is alive, so it keeps
 /// accumulating and is observed again when reselected (RFD 3). Three
 /// counters, named by a constant's value that a snapshot selects from, so
-/// no closure captures them; every transaction opens with a collection,
+/// no closure captures them; a collection runs after every transaction,
 /// and each counter counts every click, selected or not.
 #[test]
 fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
@@ -599,9 +599,9 @@ fn a_deselected_inner_that_nothing_names_is_collected() {
 /// whose definition is the map's own node, so `total` is downstream of
 /// it: a backward capture, which the map emits into a hold I/O code
 /// reads. Undeclared, nothing reaches `total` and the loop until the map
-/// has emitted it, so under the stress setting the first transaction
-/// opens with a collection that frees them, and the token the map emits
-/// is stale where I/O code uses it. Declared, the loop runs.
+/// has emitted it, so the collection after the build frees them, and the
+/// token the map emits is stale where I/O code uses it. Declared, the loop
+/// runs.
 #[test]
 fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
     let program = |declare: bool| {
@@ -733,39 +733,27 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
     }
 }
 
-/// RFD 2's receive, then wire, under the stress setting. An input a
-/// construct closure built reaches I/O code as data; anchored after the
-/// send that delivered it, it survives the collection that opens the
-/// next transaction. A collection right after the transaction, as a
-/// policy that collected at the end of each transaction would run, frees
-/// it before I/O code can anchor it.
+/// Anchor it at the edge, under the stress setting (RFD 3). A collection
+/// runs after each unit, so a row a construct closure sends out plain,
+/// which nothing else reaches, is gone by the time `send` returns: I/O code
+/// can't anchor it after the fact. The closure anchors it instead, as in
+/// `a_construct_can_anchor_what_it_sends_out`.
 #[test]
-fn a_token_a_listener_delivers_can_be_anchored_before_the_next_collection() {
-    let program = || {
-        let (mut graph, edge) = Runtime::build(|b| {
-            let (open, open_in) = b.input::<u32>();
-            let opened = open.construct(b, |b, start| {
-                let (bumps, bumps_in) = b.input::<u32>();
-                (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
-            });
-            (open_in, opened)
+fn a_token_a_listener_delivers_is_gone_after_its_unit_unless_anchored() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let opened = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
         });
-        let (open_in, opened) = edge.keep();
-        graph.set_collect_after_every_transaction(true);
-        let (received, on) = recorder::<(Input<u32>, Cell<u32>)>();
-        graph.listen(opened, on).keep();
-        graph.send(open_in, 10);
-        let counter = received.borrow()[0];
-        (graph, counter)
-    };
-    let (mut graph, counter) = program();
-    let _anchor = graph.anchor(counter);
-    let (bumps_in, count) = counter;
-    graph.send(bumps_in, 5);
-    assert_eq!(*graph.sample(count), 15);
-
-    let (mut graph, (bumps_in, count)) = program();
-    graph.collect_garbage();
+        (open_in, opened)
+    });
+    let (open_in, opened) = edge.keep();
+    graph.set_collect_after_every_transaction(true);
+    let (received, on) = recorder::<(Input<u32>, Cell<u32>)>();
+    graph.listen(opened, on).keep();
+    graph.send(open_in, 10);
+    let (bumps_in, count) = received.borrow()[0];
     assert_eq!(graph.try_send(bumps_in, 5), Err(SendError::Stale));
     assert_eq!(graph.try_anchor(count).err(), Some(TokenError::Stale));
 }
@@ -894,7 +882,7 @@ fn kept_handles_are_roots_for_the_graph_s_life() {
 /// automatic policy still collects it: a dropped handle counts as a
 /// released root, through the count of owners it shares, with no graph
 /// access, and when the handles released since the last collection exceed
-/// the live count it left, the next transaction opens with a collection.
+/// the live count it left, the next transaction ends with a collection.
 #[test]
 fn the_automatic_policy_collects_a_graph_that_only_drops_listeners() {
     collects_a_graph_that_only_releases(drop);
@@ -939,7 +927,7 @@ fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
         assert_eq!(graph.live_nodes(), 6, "{} released, 6 live", released - 1);
         release(vec![graph.listen(n, |_| ())]);
     }
-    graph.send(n_in, 8); // 7 released: the transaction opens with a collection
+    graph.send(n_in, 8); // 7 released: a collection runs after this transaction
     assert_eq!(graph.live_nodes(), 2);
     for c in cells {
         assert_eq!(graph.try_sample(c).err(), Some(TokenError::Stale));
@@ -1068,12 +1056,12 @@ fn a_construct_can_anchor_what_it_sends_out() {
         .listen(opened, move |row| log.borrow_mut().push(row))
         .keep();
     graph.send(open_in, 10);
-    graph.send(open_in, 20); // a collection opens this transaction
+    graph.send(open_in, 20); // a collection runs after each send
     let (bumps_in, count) = *received.borrow()[0];
     graph.send(bumps_in, 5);
     assert_eq!(*graph.sample(count), 15, "the row outlived two collections");
     received.borrow_mut().remove(0);
-    graph.send(open_in, 30); // the collection before it frees the row
+    graph.send(open_in, 30); // the collection after it frees the row
     assert_eq!(graph.try_sample(count).err(), Some(TokenError::Stale));
 }
 
