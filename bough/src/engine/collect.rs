@@ -32,6 +32,7 @@ use core::mem;
 
 use super::{Data, LISTENERS, LIVE, NOOP, WATCHED, cell, in_place, slot_mut};
 use crate::build::Build;
+use crate::io::IoQueue;
 use crate::mode::Mode;
 use crate::trace::{Trace, Tracer};
 
@@ -82,6 +83,15 @@ impl<M: Mode> Build<M> {
         for k in 0..self.anchors.len() {
             let i = self.anchors[k].0;
             self.shade(&mut gray, epoch, i);
+        }
+        // What the calls waiting in the `Io`s' queue name. A token that
+        // was stale when its call was made names nothing.
+        let mut waiting = Vec::new();
+        self.io.roots(&mut waiting);
+        for token in waiting {
+            if let Ok(i) = self.lookup(token) {
+                self.shade(&mut gray, epoch, i);
+            }
         }
         self.shade_listened(&mut gray, epoch);
         self.mark_reach(&mut gray, epoch);

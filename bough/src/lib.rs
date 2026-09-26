@@ -32,12 +32,13 @@
 //! context at each event of a stream, in the middle of its transaction:
 //! what the closure builds exists from that instant on, and each run is a
 //! scope that must close the loops it declares. Stage 7 adds collection
-//! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or a
-//! live [`Anchor`], and [`Runtime::build`] anchors what its closure returns;
-//! what it reaches is its dependencies, the tokens [`Trace`] finds in a
-//! stateful cell's value, and what [`Build::depends`] declares; and
-//! collection, automatic by default and never inside a transaction, frees
-//! the rest, so that a stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
+//! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
+//! [`Anchor`], or a call waiting in an [`Io`]'s queue, and
+//! [`Runtime::build`] anchors what its closure returns; what it reaches is
+//! its dependencies, the tokens [`Trace`] finds in a stateful cell's
+//! value, and what [`Build::depends`] declares; and collection, automatic
+//! by default and never inside a transaction, frees the rest, so that a
+//! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, in connection order; a [`Remote`] queues a send, or a remote

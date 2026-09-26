@@ -60,9 +60,11 @@ use crate::trace::{Trace, Tracer};
 /// # Memory
 ///
 /// Nodes live in an arena the graph owns, and a node is alive while a root
-/// reaches it (RFD 3). There are two kinds of root: every live
-/// [`Listener`], and every live [`Anchor`], which an [`Anchored`] holds.
-/// What the build closure returned comes back anchored, like anything else.
+/// reaches it (RFD 3). There are two kinds of root: a live guard, a
+/// [`Listener`] or an [`Anchor`], which an [`Anchored`] holds; and a call
+/// waiting in an [`Io`]'s queue, which keeps the tokens it names until the
+/// pump runs it. What the build closure returned comes back anchored, like
+/// anything else.
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
 /// the cells a chain snapshots or gates on, and what

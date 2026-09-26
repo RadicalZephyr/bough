@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Input, Io, IoError, PumpError, Runtime, SendError, Source, Stream, TokenError};
+use bough::{Cell, Input, Io, IoError, PumpError, Runtime, SendError, Source, Stream, TokenError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -209,10 +209,10 @@ fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
     assert_eq!(*steps.borrow(), [6]);
 }
 
-/// An anchor an `Io` asked for roots its value from the pump on, and the
-/// `Anchored` it handed out carries the value from the start.
+/// An anchor an `Io` asked for keeps its value alive until the `Anchored`
+/// drops, and the `Anchored` carries the value from the start.
 #[test]
-fn a_queued_anchor_roots_its_value_from_the_pump_on() {
+fn a_queued_anchor_keeps_its_value_alive_until_it_drops() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
@@ -266,6 +266,137 @@ fn a_queued_registration_with_a_stale_token_is_found_at_the_pump() {
         graph.pump();
         assert_eq!(graph.stale_operations(), 1);
     }
+}
+
+/// A row a construct sends out plain: its input, and the count of what
+/// was sent to it, starting at the event that opened it.
+type Row = (Input<u32>, Cell<u32>);
+
+/// Opens a row, hands it to `on_row` in a listener, with an `Io`, and
+/// returns it once its unit has run. The runtime collects after every
+/// transaction, so a row nothing keeps is gone by then.
+fn open_a_row(mut on_row: impl FnMut(&Io, Row) + 'static) -> (Runtime, Row) {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let rows = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
+        });
+        (open_in, rows)
+    });
+    let (open_in, rows) = edge.keep();
+    graph.set_collect_after_every_transaction(true);
+    let io = graph.io();
+    let seen = Rc::new(RefCell::new(None));
+    let sink = seen.clone();
+    graph
+        .listen(rows, move |row: Row| {
+            on_row(&io, row);
+            *sink.borrow_mut() = Some(row);
+        })
+        .keep();
+    graph.send(open_in, 10);
+    let row = seen.borrow().expect("the listener saw a row");
+    (graph, row)
+}
+
+/// Test 8: a listener handed a plain row queues a `listen_cell` on its
+/// count. The waiting call keeps the row alive through the collection
+/// after its unit, and from the pump on the listener keeps it.
+#[test]
+fn a_waiting_listen_keeps_a_plain_row_alive_until_the_pump() {
+    let counts = Rc::new(RefCell::new(Vec::new()));
+    let sink = counts.clone();
+    let (mut graph, (bumps_in, count)) = open_a_row(move |io, (_, count)| {
+        let sink = sink.clone();
+        io.listen_cell(count, move |c| sink.borrow_mut().push(*c))
+            .unwrap()
+            .keep();
+    });
+    assert_eq!(
+        *graph.sample(count),
+        10,
+        "alive after its unit's collection"
+    );
+    graph.pump();
+    assert_eq!(*counts.borrow(), [10]);
+    graph.send(bumps_in, 5);
+    assert_eq!(*counts.borrow(), [10, 15], "the listener keeps it now");
+}
+
+/// Test 8: the same with an anchor of the whole row.
+#[test]
+fn a_waiting_anchor_keeps_a_plain_row_alive_until_the_pump() {
+    let (mut graph, (bumps_in, count)) = open_a_row(|io, row| {
+        io.anchor(row).unwrap().keep();
+    });
+    assert_eq!(
+        *graph.sample(count),
+        10,
+        "alive after its unit's collection"
+    );
+    graph.pump();
+    graph.send(bumps_in, 5);
+    assert_eq!(*graph.sample(count), 15, "the anchor keeps it now");
+}
+
+/// Test 8: a waiting registration whose guard has gone keeps nothing
+/// alive, and the pump skips it.
+#[test]
+fn a_waiting_call_whose_guard_has_gone_keeps_nothing_alive() {
+    let (mut graph, (bumps_in, count)) = open_a_row(|io, (bumps_in, count)| {
+        drop(io.listen_cell(count, |_| ()).unwrap());
+        drop(io.anchor(bumps_in).unwrap());
+    });
+    assert_eq!(graph.try_sample(count).err(), Some(TokenError::Stale));
+    assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
+    assert_eq!(graph.try_pump(), Ok(()));
+}
+
+/// A waiting transaction keeps nothing alive, since its closure hides its
+/// tokens: its send to a plain row's input finds the input gone.
+#[test]
+fn a_waiting_transaction_keeps_nothing_alive() {
+    let (mut graph, _row) = open_a_row(|io, (bumps_in, _)| {
+        io.transaction(move |tx| tx.send(bumps_in, 5)).unwrap();
+    });
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
+}
+
+/// Test 8: a waiting send keeps its input alive, but not the value it
+/// carries. Once the send has run, nothing keeps the input.
+#[test]
+fn a_waiting_send_keeps_its_input_alive_but_not_the_value_it_carries() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let (_carried, carried_in) = b.input::<Cell<u32>>();
+        let rows = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
+        });
+        (open_in, carried_in, rows)
+    });
+    let (open_in, carried_in, rows) = edge.keep();
+    graph.set_collect_after_every_transaction(true);
+    let io = graph.io();
+    let row = Rc::new(RefCell::new(None));
+    let row_sink = row.clone();
+    graph
+        .listen(rows, move |(bumps_in, count): Row| {
+            io.send(bumps_in, 5).unwrap();
+            io.send(carried_in, count).unwrap();
+            *row_sink.borrow_mut() = Some((bumps_in, count));
+        })
+        .keep();
+    graph.send(open_in, 10);
+    let (bumps_in, count) = row.borrow().expect("the listener saw a row");
+    assert_eq!(
+        graph.try_sample(count).err(),
+        Some(TokenError::Stale),
+        "only a send's value carried the count"
+    );
+    assert_eq!(graph.try_pump(), Ok(()), "the send found its input alive");
+    assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
 }
 
 /// Test 5.

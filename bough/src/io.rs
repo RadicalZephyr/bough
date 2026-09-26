@@ -10,6 +10,8 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::{Rc, Weak};
+use alloc::vec;
+use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
 
@@ -21,13 +23,25 @@ use crate::mode::Threaded;
 use crate::mode::{Local, Mode};
 use crate::runtime::{Anchor, Anchored, IoTransaction, Listener, Runtime, Stop};
 use crate::source::Node;
-use crate::token::Input;
+use crate::token::{Input, Token};
 use crate::trace::{Trace, Tracer};
 
 /// A call a handle queued. The pump runs it with the runtime, and says
 /// whether a stale token is skipped, as in the panicking pump's release
 /// build, or stops the pump.
 pub(crate) type Call<M> = Box<dyn FnOnce(&mut Runtime<M>, bool) -> Result<(), Stop>>;
+
+/// A call waiting in the queue, and the tokens it roots until it runs.
+struct Waiting {
+    call: Call<Local>,
+    /// What collection keeps alive while the call waits: a send's input,
+    /// a registration's node, the tokens an anchor's value holds. A
+    /// transaction's closure hides its tokens, so it names none.
+    roots: Vec<Token>,
+    /// A registration's guard. Once the guard has gone, the call roots
+    /// nothing, and the pump skips it.
+    guard: Option<Liveness>,
+}
 
 /// What a runtime keeps for its same-thread handle: the queue its [`Io`]s
 /// share in `Local`, and nothing in `Threaded`, which has no `Io`.
@@ -47,13 +61,16 @@ pub trait IoQueue<M: Mode>: 'static {
     fn begin_pump(&self) -> usize;
     /// The oldest call.
     fn pop(&self) -> Option<Call<M>>;
+    /// Adds to `roots` the tokens the waiting calls name, but none of a
+    /// registration whose guard has gone.
+    fn roots(&self, roots: &mut Vec<Token>);
 }
 
 /// What a `Local` runtime shares with its [`Io`]s.
 #[doc(hidden)]
 pub struct IoState {
     /// The calls waiting for the next pump, in the order they were made.
-    calls: RefCell<VecDeque<Call<Local>>>,
+    calls: RefCell<VecDeque<Waiting>>,
     /// Set while graph code runs, from `arm` to `disarm`.
     graph_code: Cell<bool>,
     /// The runtime's poison, mirrored by the first entry that finds it.
@@ -118,7 +135,18 @@ impl IoQueue<Local> for Rc<IoState> {
     }
 
     fn pop(&self) -> Option<Call<Local>> {
-        self.calls.borrow_mut().pop_front()
+        self.calls
+            .borrow_mut()
+            .pop_front()
+            .map(|waiting| waiting.call)
+    }
+
+    fn roots(&self, roots: &mut Vec<Token>) {
+        for waiting in self.calls.borrow().iter() {
+            if waiting.guard.as_ref().is_none_or(Liveness::is_live) {
+                roots.extend_from_slice(&waiting.roots);
+            }
+        }
     }
 }
 
@@ -143,6 +171,7 @@ impl IoQueue<Threaded> for NoIo {
     fn pop(&self) -> Option<Call<Threaded>> {
         None
     }
+    fn roots(&self, _: &mut Vec<Token>) {}
 }
 
 /// A handle for I/O code that can't hold the runtime: a GTK signal
@@ -180,6 +209,14 @@ impl IoQueue<Threaded> for NoIo {
 /// [`set_waker`](Runtime::set_waker), unless another call has since the
 /// last pump began: one wake is enough for every call that pump will run.
 ///
+/// A waiting call keeps the tokens it names alive until the pump runs it,
+/// through any collection before then: a send's input, but not the value
+/// it carries; a registration's node; the tokens an anchor's value holds.
+/// So a listener handed a plain row can listen to it or anchor it, and the
+/// row lasts until the pump registers what keeps it. A transaction's
+/// closure hides its tokens, so a waiting transaction keeps none, and a
+/// registration whose guard has gone keeps none either.
+///
 /// An `Io` is `Clone + 'static`, so graph code can capture one: a `map`
 /// function, a `construct` closure, a split's iterator. A call from there
 /// would be I/O inside FRP logic, so it's refused with
@@ -206,7 +243,7 @@ impl Io {
     /// another graph is found there too, and panics in both builds.
     /// [`try_pump`](Runtime::try_pump) returns either.
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.transaction(move |tx| tx.send(input, value))
+        self.unit(vec![input.token], move |tx| tx.send(input, value))
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
@@ -216,17 +253,13 @@ impl Io {
     ///
     /// A unit whose send fails is dropped whole at the pump, with none of
     /// its sends run, as a remote's is. A panic in the closure poisons the
-    /// runtime.
+    /// runtime. While it waits it keeps no token alive, since its closure
+    /// hides them: anchor what it sends to.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
     {
-        let state = self.state()?;
-        push(
-            &state,
-            Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
-        );
-        Ok(())
+        self.unit(Vec::new(), f)
     }
 
     /// Listens to a materialized node, as [`Runtime::listen`] does, from the
@@ -243,9 +276,10 @@ impl Io {
         S::Event: 'static,
         F: FnMut(S::Event) + 'static,
     {
-        let flag = self.register(move |runtime, skip_stale, flag| {
-            runtime.listen_queued(skip_stale, flag, source, f)
-        })?;
+        let flag = self.register(
+            vec![source.node_token()],
+            move |runtime, skip_stale, flag| runtime.listen_queued(skip_stale, flag, source, f),
+        )?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -258,7 +292,7 @@ impl Io {
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
     {
-        let flag = self.register(move |runtime, skip_stale, flag| {
+        let flag = self.register(vec![cell.token()], move |runtime, skip_stale, flag| {
             runtime.listen_cell_queued(skip_stale, flag, cell, f)
         })?;
         Ok(Listener::new(Some(flag)))
@@ -272,21 +306,23 @@ impl Io {
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
     {
-        let flag = self.register(move |runtime, skip_stale, flag| {
+        let flag = self.register(vec![cell.token()], move |runtime, skip_stale, flag| {
             runtime.listen_steps_queued(skip_stale, flag, cell, f)
         })?;
         Ok(Listener::new(Some(flag)))
     }
 
-    /// Anchors what `value` holds, as [`Runtime::anchor`] does, from the
-    /// next pump. The [`Anchored`] comes back now, carrying the value, and
-    /// dropping it before that pump cancels the anchor. A stale or foreign
-    /// token is found at the pump, as for [`send`](Io::send).
+    /// Anchors what `value` holds, as [`Runtime::anchor`] does. The
+    /// [`Anchored`] comes back now, carrying the value. The waiting call
+    /// keeps the value's tokens alive until the next pump registers the
+    /// anchor, and the anchor keeps them after; dropping the `Anchored`
+    /// before that pump cancels both. A stale or foreign token is found at
+    /// the pump, as for [`send`](Io::send).
     pub fn anchor<T: Trace>(&self, value: T) -> Result<Anchored<T>, IoError> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
         let tokens = tracer.visited;
-        let flag = self.register(move |runtime, skip_stale, flag| {
+        let flag = self.register(tokens.clone(), move |runtime, skip_stale, flag| {
             runtime.anchor_queued(skip_stale, flag, tokens)
         })?;
         Ok(Anchored::new(value, Anchor::new(Some(flag))))
@@ -306,10 +342,30 @@ impl Io {
         Ok(state)
     }
 
+    /// Queues a unit that roots `roots` while it waits.
+    fn unit(
+        &self,
+        roots: Vec<Token>,
+        f: impl FnOnce(&mut IoTransaction<'_>) + 'static,
+    ) -> Result<(), IoError> {
+        let state = self.state()?;
+        push(
+            &state,
+            Waiting {
+                call: Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
+                roots,
+                guard: None,
+            },
+        );
+        Ok(())
+    }
+
     /// Makes the liveness a guard shares with its registration, and queues
-    /// the registration, which the pump skips if the guard has gone.
+    /// the registration, which roots `roots` while it waits and the guard
+    /// lives. The pump skips it if the guard has gone.
     fn register(
         &self,
+        roots: Vec<Token>,
         register: impl FnOnce(&mut Runtime<Local>, bool, Liveness) -> Result<(), Stop> + 'static,
     ) -> Result<Liveness, IoError> {
         let state = self.state()?;
@@ -317,14 +373,18 @@ impl Io {
         let shared = flag.clone();
         push(
             &state,
-            Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
+            Waiting {
+                call: Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
+                roots,
+                guard: Some(flag.clone()),
+            },
         );
         Ok(flag)
     }
 }
 
-/// Queues `call`, and wakes the driver.
-fn push(state: &IoState, call: Call<Local>) {
-    state.calls.borrow_mut().push_back(call);
+/// Queues a call, and wakes the driver.
+fn push(state: &IoState, waiting: Waiting) {
+    state.calls.borrow_mut().push_back(waiting);
     state.wake();
 }
