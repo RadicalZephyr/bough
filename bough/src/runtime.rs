@@ -11,7 +11,6 @@ use alloc::boxed::Box;
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use core::task::Waker;
 
 use crate::Build;
@@ -244,7 +243,7 @@ impl Runtime<Local> {
 /// The handles the same-thread handle gives out before the graph can
 /// register them.
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Listener<Local> {
+impl Listener {
     /// A listener whose registration shares `flag`, now or later.
     pub(crate) fn from_flag(flag: Liveness) -> Self {
         Listener::new(Some(flag))
@@ -252,7 +251,7 @@ impl Listener<Local> {
 }
 
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Anchor<Local> {
+impl Anchor {
     /// An anchor whose registration shares `flag`, now or later.
     pub(crate) fn from_flag(flag: Liveness) -> Self {
         Anchor::new(Some(flag))
@@ -518,7 +517,7 @@ impl<M: Mode> Runtime<M> {
     /// let _a = graph.listen(events, |n| println!("{n}"));
     /// let _b = graph.listen(events, |n| println!("{n}")); // error: use of moved value
     /// ```
-    pub fn listen<S, F>(&mut self, source: S, f: F) -> Listener<M>
+    pub fn listen<S, F>(&mut self, source: S, f: F) -> Listener
     where
         S: Node,
         S::Event: 'static,
@@ -533,7 +532,7 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// [`listen`](Runtime::listen), returning the error instead of panicking.
-    pub fn try_listen<S, F>(&mut self, source: S, f: F) -> Result<Listener<M>, TokenError>
+    pub fn try_listen<S, F>(&mut self, source: S, f: F) -> Result<Listener, TokenError>
     where
         S: Node,
         S::Event: 'static,
@@ -554,7 +553,7 @@ impl<M: Mode> Runtime<M> {
     /// in-place accumulator has then. The call at registration runs outside
     /// any transaction, so a panic in it leaves the graph usable. A step to
     /// an equal value is a step.
-    pub fn listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Listener<M>
+    pub fn listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Listener
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -570,7 +569,7 @@ impl<M: Mode> Runtime<M> {
 
     /// [`listen_cell`](Runtime::listen_cell), returning the error instead of
     /// panicking.
-    pub fn try_listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Result<Listener<M>, TokenError>
+    pub fn try_listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Result<Listener, TokenError>
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -586,7 +585,7 @@ impl<M: Mode> Runtime<M> {
     /// [`steps`](crate::Cell::steps), Sodium's `updates`. The cell is a
     /// [`Cell`](crate::Cell) or a [`State`](crate::State), as for
     /// [`listen_cell`](Runtime::listen_cell).
-    pub fn listen_steps<C, F>(&mut self, cell: C, f: F) -> Listener<M>
+    pub fn listen_steps<C, F>(&mut self, cell: C, f: F) -> Listener
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -601,7 +600,7 @@ impl<M: Mode> Runtime<M> {
 
     /// [`listen_steps`](Runtime::listen_steps), returning the error instead of
     /// panicking.
-    pub fn try_listen_steps<C, F>(&mut self, cell: C, f: F) -> Result<Listener<M>, TokenError>
+    pub fn try_listen_steps<C, F>(&mut self, cell: C, f: F) -> Result<Listener, TokenError>
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -619,7 +618,7 @@ impl<M: Mode> Runtime<M> {
         i: u32,
         f: F,
         call: fn(&mut M::Carrier, &mut Build<M>, u32),
-    ) -> Listener<M>
+    ) -> Listener
     where
         M: Accepts<F>,
     {
@@ -691,7 +690,7 @@ impl<M: Mode> Runtime<M> {
     /// node is a panic in a debug build and, in a release build, a no-op
     /// that [`stale_operations`](Runtime::stale_operations) counts: the handle
     /// anchors the value's other nodes.
-    pub fn anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Anchor<M> {
+    pub fn anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Anchor {
         self.enter();
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
@@ -711,7 +710,7 @@ impl<M: Mode> Runtime<M> {
 
     /// [`anchor`](Runtime::anchor), returning the error instead of panicking.
     /// A value with a stale or foreign token anchors nothing.
-    pub fn try_anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Result<Anchor<M>, TokenError> {
+    pub fn try_anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Result<Anchor, TokenError> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
         let start = self.anchors.len();
@@ -1143,27 +1142,22 @@ impl<M: Mode> Transaction<'_, M> {
 /// A listener handle. Dropping it unlistens; it borrows nothing from the
 /// graph and shares a count of its owners with its node's entry instead, so
 /// it can be dropped inside a listener, and on any thread where the target
-/// has pointer atomics. The parameter is defaulted, so `Local` code never
-/// writes it.
+/// has pointer atomics. Every mode returns the same type.
 ///
 /// A live listener is a root: its node, and everything the node reaches,
 /// stays alive. Dropping the last one lets collection free them; a linear
 /// stream is consumed by `listen`, so once its listener is dropped nothing
 /// can observe it again. The drop counts as a released root for the
 /// automatic policy, through the shared count, with no graph access.
-pub struct Listener<M: Mode = Local> {
+pub struct Listener {
     /// The handle's share of the state its node's entry holds; `None` once
     /// kept.
     alive: Option<Liveness>,
-    mode: PhantomData<fn() -> M>,
 }
 
-impl<M: Mode> Listener<M> {
+impl Listener {
     fn new(alive: Option<Liveness>) -> Self {
-        Listener {
-            alive,
-            mode: PhantomData,
-        }
+        Listener { alive }
     }
 
     /// Stops listening now, the same as dropping the handle.
@@ -1179,7 +1173,7 @@ impl<M: Mode> Listener<M> {
     }
 }
 
-impl<M: Mode> Drop for Listener<M> {
+impl Drop for Listener {
     fn drop(&mut self) {
         if let Some(flag) = self.alive.take() {
             flag.release();
@@ -1195,18 +1189,14 @@ impl<M: Mode> Drop for Listener<M> {
 ///
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
 /// which is the concept this is one kind of.
-pub struct Anchor<M: Mode = Local> {
+pub struct Anchor {
     /// The handle's share of the state its entries hold; `None` once kept.
     alive: Option<Liveness>,
-    mode: PhantomData<fn() -> M>,
 }
 
-impl<M: Mode> Anchor<M> {
+impl Anchor {
     fn new(alive: Option<Liveness>) -> Self {
-        Anchor {
-            alive,
-            mode: PhantomData,
-        }
+        Anchor { alive }
     }
 
     /// Removes the root now, the same as dropping the handle.
@@ -1222,7 +1212,7 @@ impl<M: Mode> Anchor<M> {
     }
 }
 
-impl<M: Mode> Drop for Anchor<M> {
+impl Drop for Anchor {
     fn drop(&mut self) {
         if let Some(flag) = self.alive.take() {
             flag.release();

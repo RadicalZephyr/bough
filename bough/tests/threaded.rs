@@ -10,7 +10,7 @@ use bough::{Lift, Listener, Runtime, Source, State, Threaded};
 fn a_threaded_graph_is_send_and_runs_on_another_thread() {
     fn assert_send<T: Send>() {}
     assert_send::<Runtime<Threaded>>();
-    assert_send::<Listener<Threaded>>();
+    assert_send::<Listener>();
 
     let (mut graph, (numbers_in, words_in, doubled, sentence)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u64>();

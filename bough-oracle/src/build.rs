@@ -357,23 +357,19 @@ pub trait EngineMode: bough::Mode {
         cell: Cell<A>,
     ) -> Stream<A>;
     /// `graph.listen(node, f)`.
-    fn listen<S: Node<Event = i64>>(
-        graph: &mut Runtime<Self>,
-        node: S,
-        f: StreamSink,
-    ) -> Listener<Self>;
+    fn listen<S: Node<Event = i64>>(graph: &mut Runtime<Self>, node: S, f: StreamSink) -> Listener;
     /// `graph.listen_cell(cell, f)`.
     fn listen_cell<C: CellRef>(
         graph: &mut Runtime<Self>,
         cell: C,
         f: CellSink<C::Value>,
-    ) -> Listener<Self>;
+    ) -> Listener;
     /// `graph.listen_steps(cell, f)`.
     fn listen_steps<C: CellRef>(
         graph: &mut Runtime<Self>,
         cell: C,
         f: CellSink<C::Value>,
-    ) -> Listener<Self>;
+    ) -> Listener;
     /// `tx.send(input, value)`.
     fn send<A: Send + 'static>(tx: &mut Transaction<'_, Self>, input: bough::Input<A>, value: A);
 
@@ -548,21 +544,21 @@ macro_rules! engine_mode {
                 graph: &mut Runtime<Self>,
                 node: S,
                 f: StreamSink,
-            ) -> Listener<Self> {
+            ) -> Listener {
                 graph.listen(node, f)
             }
             fn listen_cell<C: CellRef>(
                 graph: &mut Runtime<Self>,
                 cell: C,
                 f: CellSink<C::Value>,
-            ) -> Listener<Self> {
+            ) -> Listener {
                 graph.listen_cell(cell, f)
             }
             fn listen_steps<C: CellRef>(
                 graph: &mut Runtime<Self>,
                 cell: C,
                 f: CellSink<C::Value>,
-            ) -> Listener<Self> {
+            ) -> Listener {
                 graph.listen_steps(cell, f)
             }
             fn send<A: Send + 'static>(
@@ -3842,7 +3838,7 @@ impl Recorder {
         position: usize,
         observed: Observed,
         log: &Log,
-        listeners: &mut Vec<Listener<M>>,
+        listeners: &mut Vec<Listener>,
     ) -> Recorder {
         match observed {
             Observed::Stream(stream) => {

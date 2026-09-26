@@ -13,7 +13,7 @@
 //! | --- | --- | --- |
 //! | `Runtime<Local>` | everywhere | no |
 //! | `Input`, `Stream`, `Cell`, `State`, `Shared` | everywhere | yes, whatever they carry |
-//! | `Listener`, `Anchor`, in either mode | everywhere | with pointer atomics |
+//! | `Listener`, `Anchor` | everywhere | with pointer atomics |
 //! | `Runtime<Threaded>` | with pointer atomics | yes |
 //! | `InputSlot` | with a lock | `Sync`, since it lives in a `static` |
 //! | `Remote` | with pointer atomics and a lock | yes |
@@ -90,23 +90,17 @@ mod everywhere {
 /// Where the target has pointer atomics.
 #[cfg(target_has_atomic = "ptr")]
 mod with_atomics {
-    use crate::{Anchor, Listener, Local, Runtime, Threaded};
+    use crate::{Anchor, Listener, Runtime, Threaded};
 
-    send!(
-        Runtime<Threaded>,
-        Listener<Local>,
-        Anchor<Local>,
-        Listener<Threaded>,
-        Anchor<Threaded>,
-    );
+    send!(Runtime<Threaded>, Listener, Anchor);
 }
 
 /// Where the target has no pointer atomics.
 #[cfg(not(target_has_atomic = "ptr"))]
 mod without_atomics {
-    use crate::{Anchor, Listener, Local};
+    use crate::{Anchor, Listener};
 
-    not_send!(Listener<Local>, Anchor<Local>);
+    not_send!(Listener, Anchor);
 }
 
 /// Where there's a lock: `std` or `critical-section`.
