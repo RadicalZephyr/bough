@@ -858,8 +858,8 @@ impl<M: Mode> Runtime<M> {
     /// the pump reaches them; one queued later, by a listener feeding back
     /// or by another thread, waits for the next pump, whose wake it has
     /// already made, so a listener that always sends cannot keep a pump
-    /// from returning. A collection that is due runs before each
-    /// transaction opens, as for [`send`](Runtime::send).
+    /// from returning. A collection that is due runs after each unit, as
+    /// for [`send`](Runtime::send).
     ///
     /// A unit runs as a transaction the driver opens, and its closure sends
     /// into it. A unit whose send fails is dropped whole, with none of its
