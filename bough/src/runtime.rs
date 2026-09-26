@@ -24,7 +24,8 @@ use crate::engine::edge::Connection;
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::engine::edge::{Fault, Inbox, Start};
+use crate::engine::edge::Inbox;
+use crate::engine::edge::{Fault, Start};
 use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(all(
@@ -797,14 +798,14 @@ impl<M: Mode> Runtime<M> {
                 break;
             };
             self.build.begin();
-            let mut tx = RemoteTransaction {
+            let mut tx = IoTransaction {
                 build: &mut self.build,
                 skip_stale,
                 skipped: 0,
                 fault: None,
             };
             unit(&mut tx);
-            let RemoteTransaction { skipped, fault, .. } = tx;
+            let IoTransaction { skipped, fault, .. } = tx;
             self.stale_operations += skipped;
             if let Some(fault) = fault {
                 self.build.cancel();
@@ -1246,14 +1247,14 @@ impl Remote {
             return Err(RemoteSendError::InsideTransaction);
         }
         self.inbox
-            .push(Box::new(move |tx: &mut RemoteTransaction<'_>| {
+            .push(Box::new(move |tx: &mut IoTransaction<'_>| {
                 tx.send(input, value)
             }))
             .map_err(|_| RemoteSendError::GraphDropped)
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
-    /// on the driver, at its next pump, with a [`RemoteTransaction`] whose
+    /// on the driver, at its next pump, with an [`IoTransaction`] whose
     /// sends are simultaneous. The closure is I/O code: it has no graph
     /// access, and its order of sends does not matter.
     ///
@@ -1262,7 +1263,7 @@ impl Remote {
     /// in a release build.
     pub fn transaction<F>(&self, f: F)
     where
-        F: FnOnce(&mut RemoteTransaction<'_>) + Send + 'static,
+        F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
     {
         match self.try_transaction(f) {
             Ok(()) => {}
@@ -1276,7 +1277,7 @@ impl Remote {
     /// panicking.
     pub fn try_transaction<F>(&self, f: F) -> Result<(), RemoteTransactionError>
     where
-        F: FnOnce(&mut RemoteTransaction<'_>) + Send + 'static,
+        F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
     {
         if self.inbox.is_poisoned() {
             return Err(RemoteTransactionError::Poisoned);
@@ -1318,17 +1319,13 @@ fn dropped_graph() {
     }
 }
 
-/// The sends of one remote unit, run on the driver inside the transaction
-/// it opened for the unit, so they are simultaneous.
+/// The sends of one unit a handle queued, run on the driver inside the
+/// transaction it opened for the unit, so they are simultaneous.
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
 /// failed send here is found at [`Runtime::pump`], which drops the whole unit
 /// and reports it; the closure's later sends are ignored.
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-pub struct RemoteTransaction<'a> {
+pub struct IoTransaction<'a> {
     /// The driver's build context, with the mode out of sight.
     build: &'a mut dyn Start,
     /// The panicking pump's release build: a stale send is skipped and
@@ -1339,13 +1336,10 @@ pub struct RemoteTransaction<'a> {
     fault: Option<Fault>,
 }
 
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-impl RemoteTransaction<'_> {
-    /// Sends one value in this unit.
-    pub fn send<A: Send + 'static>(&mut self, input: Input<A>, value: A) {
+impl IoTransaction<'_> {
+    /// Sends one value in this unit. The value needn't be `Send`: the
+    /// closure that sends it runs on the driver.
+    pub fn send<A: 'static>(&mut self, input: Input<A>, value: A) {
         if self.fault.is_some() {
             return;
         }

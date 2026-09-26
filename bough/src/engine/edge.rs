@@ -41,10 +41,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Waker;
 
 use super::DoubleSend;
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
 use super::TokenFault;
 use crate::build::Build;
 use crate::mode::Mode;
@@ -52,8 +48,7 @@ use crate::mode::Mode;
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::runtime::RemoteTransaction;
-#[cfg(any(feature = "std", feature = "critical-section"))]
+use crate::runtime::IoTransaction;
 use crate::token::Token;
 
 /// The lock under the edge's shared state: the standard mutex.
@@ -202,7 +197,7 @@ impl Drop for Edge {
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-pub(crate) type Unit = Box<dyn FnOnce(&mut RemoteTransaction<'_>) + Send>;
+pub(crate) type Unit = Box<dyn FnOnce(&mut IoTransaction<'_>) + Send>;
 
 /// The queue of units every `Remote` of one graph shares (RFD 6).
 #[cfg(all(
@@ -337,10 +332,6 @@ impl Inbox {
 }
 
 /// Why a send inside a unit failed, found by the driver at `pump`.
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
     Stale,
@@ -348,22 +339,14 @@ pub(crate) enum Fault {
     DoubleSend,
 }
 
-/// The build context as a unit's sends see it: with no mode, since a
-/// `Remote` has none, and with the event's type behind `dyn Any`.
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
+/// The build context as a unit's sends see it: with no mode, since an
+/// `IoTransaction` has none, and with the event's type behind `dyn Any`.
 pub(crate) trait Start {
     /// Starts `input` with the event in `event`, an `&mut Option<A>`, in
     /// the transaction the driver opened for the unit.
     fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault>;
 }
 
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
 impl<M: Mode> Start for Build<M> {
     fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault> {
         let i = self.lookup(input).map_err(|fault| match fault {
