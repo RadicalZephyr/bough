@@ -162,6 +162,95 @@ fn listen_cell_once_fires_now_with_the_current_value_and_borrows_what_it_likes()
 }
 
 #[test]
+fn a_tied_listen_once_hears_its_stream_in_a_child_transaction_of_its_unit() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.defer(b).share(b))
+    });
+    let (numbers_in, later) = edge.keep();
+    let (seen, on) = recorder();
+    graph.transaction(|tx| {
+        tx.send(numbers_in, 1);
+        tx.listen_once(later, on);
+    });
+    graph.send(numbers_in, 2);
+    assert_eq!(*seen.borrow(), [1]);
+}
+
+#[test]
+fn a_tied_listen_once_that_heard_nothing_panics_in_a_debug_build_and_ends_with_its_unit() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.filter(|n| *n > 5).share(b))
+    });
+    let (numbers_in, big) = edge.keep();
+    let (seen, on) = recorder();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        graph.transaction(|tx| {
+            tx.send(numbers_in, 3);
+            tx.listen_once(big, on);
+        })
+    }));
+    if cfg!(debug_assertions) {
+        assert!(panic_text(result).contains("heard nothing"));
+    } else {
+        assert!(result.is_ok(), "a release build drops it");
+    }
+    graph.send(numbers_in, 9);
+    assert!(seen.borrow().is_empty(), "it ended with its unit");
+}
+
+#[test]
+fn a_tied_listen_cell_once_hears_the_value_once_its_unit_is_done() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.defer(b).hold(b, 0u32))
+    });
+    let (numbers_in, later) = edge.keep();
+    let (seen, mut on) = recorder();
+    graph.transaction(|tx| {
+        tx.send(numbers_in, 7);
+        tx.listen_cell_once(later, move |v| on(*v));
+    });
+    assert_eq!(*seen.borrow(), [7], "after the child transaction");
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        graph.transaction(|tx| tx.listen_cell_once(later, |_| panic!("tied")))
+    }));
+    assert_eq!(panic_text(result), "tied");
+    assert_eq!(
+        graph.try_send(numbers_in, 1),
+        Ok(()),
+        "outside the transaction"
+    );
+}
+
+#[test]
+fn a_tied_listener_s_token_is_checked_when_it_is_tied() {
+    let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().1);
+    edge.keep();
+    let (_other, edge) = Runtime::build(|b| {
+        let shared = b.input::<u32>().0.share(b);
+        (shared, b.constant(1u32))
+    });
+    let (shared, level) = edge.keep();
+    graph.transaction(|tx| {
+        assert_eq!(
+            tx.try_listen_once(shared, |_| ()),
+            Err(TokenError::ForeignGraph)
+        );
+        assert_eq!(
+            tx.try_listen_cell_once(level, |_| ()),
+            Err(TokenError::ForeignGraph)
+        );
+    });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        graph.transaction(|tx| tx.listen_once(shared, |_| ()))
+    }));
+    assert!(panic_text(result).contains("a token from another graph"));
+    assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
+}
+
+#[test]
 fn a_listener_on_a_constant_fires_only_at_registration() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();

@@ -1,9 +1,5 @@
 //! The I/O side (RFD 2, RFD 5, RFD 6, RFD 7).
 
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
 use alloc::boxed::Box;
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -391,15 +387,42 @@ impl<M: Mode> Runtime<M> {
     /// transaction's listeners and its child transactions run before it
     /// returns. A panic inside `f`, including one from
     /// [`Transaction::send`], escapes the transaction and poisons the graph.
-    /// A collection that is due runs after it, once its child transactions
-    /// have run.
+    /// Once-listeners tied to the transaction end with it, as
+    /// [`Transaction::listen_once`] says. A collection that is due runs after
+    /// it, once its child transactions have run.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
         self.build.begin();
-        let r = f(&mut Transaction { graph: self });
+        let mut tx = Transaction {
+            graph: self,
+            tied: Tied::new(),
+        };
+        let r = f(&mut tx);
+        let Transaction { tied, .. } = tx;
         self.build.finish();
+        let silent = self.end_tied(tied);
         self.collect_if_due();
+        debug_assert!(
+            !silent,
+            "bough: a listener tied to a transaction heard nothing: its stream fired in neither \
+             the transaction nor its child transactions. In a release build it is dropped"
+        );
         r
+    }
+
+    /// Ends what was tied to a unit, once the unit is done: gives up each
+    /// stream once-listener's guard, which drops the listener if it never
+    /// fired, then runs each cell one's call with the value now. Returns
+    /// whether a stream one never fired.
+    fn end_tied(&mut self, tied: Tied<M>) -> bool {
+        let mut silent = false;
+        for flag in tied.streams {
+            silent |= flag.release();
+        }
+        for call in tied.cells {
+            call(&self.build);
+        }
+        silent
     }
 
     /// [`transaction`](Runtime::transaction), returning the error instead of
@@ -1301,6 +1324,29 @@ pub enum CollectionPolicy {
 /// Several sends in one instant; the only I/O-side use of the word.
 pub struct Transaction<'g, M: Mode> {
     graph: &'g mut Runtime<M>,
+    /// The once-listeners tied to this unit.
+    tied: Tied<M>,
+}
+
+/// The once-listeners tied to a unit, which end with it: each stream
+/// one's guard, which the unit holds, and each cell one's call, which runs
+/// when the unit is done.
+struct Tied<M: Mode> {
+    streams: Vec<Liveness>,
+    cells: Vec<TiedCall<M>>,
+}
+
+/// A cell once-listener's call, tied to the end of a unit, which reads the
+/// cell's value then.
+type TiedCall<M> = Box<dyn FnOnce(&Build<M>)>;
+
+impl<M: Mode> Tied<M> {
+    fn new() -> Self {
+        Tied {
+            streams: Vec::new(),
+            cells: Vec::new(),
+        }
+    }
 }
 
 impl<M: Mode> Transaction<'_, M> {
@@ -1344,6 +1390,96 @@ impl<M: Mode> Transaction<'_, M> {
         build
             .fire_start(i, value)
             .map_err(|_| TransactionSendError::DoubleSend)
+    }
+
+    /// Listens to a stream's next event in this unit: this transaction and
+    /// its child transactions. `f` runs as a listener does, after the
+    /// commit of the first instant the stream fires in, and not again.
+    /// There's no guard: the unit holds the listener, and it ends with the
+    /// unit. One whose stream stayed silent is a panic in a debug build,
+    /// once the unit is done and a collection that is due has run, and in a
+    /// release build it is dropped.
+    ///
+    /// Panics on a foreign token, and on a collected node in a debug build,
+    /// where a release build counts it, as [`send`](Transaction::send)
+    /// does; either panic poisons the graph.
+    pub fn listen_once<S, F>(&mut self, source: S, f: F)
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        if let Some(i) = self.graph.checked(source.node_token(), LISTEN) {
+            self.tie_once(i, f, call_stream_once::<M, S, F>);
+        }
+    }
+
+    /// [`listen_once`](Transaction::listen_once), returning the error
+    /// instead of panicking.
+    pub fn try_listen_once<S, F>(&mut self, source: S, f: F) -> Result<(), TokenError>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        let i = self.lookup(source.node_token())?;
+        self.tie_once(i, f, call_stream_once::<M, S, F>);
+        Ok(())
+    }
+
+    /// Hears a cell's value once this unit is done: after its last child
+    /// transaction, with the value then, not the value now. `f` runs
+    /// outside the transaction, so a panic in it leaves the graph usable.
+    /// The token is checked now, as for
+    /// [`listen_once`](Transaction::listen_once).
+    pub fn listen_cell_once<C, F>(&mut self, cell: C, f: F)
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value) + 'static,
+    {
+        if let Some(i) = self.graph.checked(cell.token(), LISTEN) {
+            self.tie_cell_once(i, f);
+        }
+    }
+
+    /// [`listen_cell_once`](Transaction::listen_cell_once), returning the
+    /// error instead of panicking.
+    pub fn try_listen_cell_once<C, F>(&mut self, cell: C, f: F) -> Result<(), TokenError>
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value) + 'static,
+    {
+        let i = self.lookup(cell.token())?;
+        self.tie_cell_once(i, f);
+        Ok(())
+    }
+
+    /// A token's node, for a listener tied to this unit.
+    fn lookup(&self, token: Token) -> Result<u32, TokenError> {
+        self.graph.build.lookup(token).map_err(|fault| match fault {
+            TokenFault::Foreign => TokenError::ForeignGraph,
+            TokenFault::Stale => TokenError::Stale,
+        })
+    }
+
+    /// Ties a once-listener on node `i` to this unit, which holds its
+    /// guard.
+    fn tie_once<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>)
+    where
+        M: Accepts<F>,
+    {
+        let flag = Liveness::new(&self.graph.build.released);
+        self.graph.attach_once_flag(i, f, call, flag.clone());
+        self.tied.streams.push(flag);
+    }
+
+    /// Ties a call with cell `i`'s value to the end of this unit.
+    fn tie_cell_once<A: 'static>(&mut self, i: u32, f: impl FnOnce(&A) + 'static) {
+        self.tied
+            .cells
+            .push(Box::new(move |b: &Build<M>| f(b.value::<A>(i))));
     }
 }
 

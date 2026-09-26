@@ -183,12 +183,15 @@ impl Liveness {
         self.0.owners.get() > 0
     }
 
-    /// Gives up an owner's share. The last one counts a released guard.
+    /// Gives up an owner's share, and returns whether it was the last. The
+    /// last one counts a released guard.
     #[inline]
-    pub(crate) fn release(self) {
-        if self.0.owners.decrement() {
+    pub(crate) fn release(self) -> bool {
+        let last = self.0.owners.decrement();
+        if last {
             self.0.released.0.increment();
         }
+        last
     }
 
     /// A state with no owner, which is never live: the one a runtime's
