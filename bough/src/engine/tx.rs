@@ -161,7 +161,7 @@ impl<M: Mode> Build<M> {
         if self.s.levels.first().is_some_and(|l| !l.is_empty()) {
             self.children();
         }
-        self.edge.disarm();
+        self.disarm();
         self.in_tx = false;
     }
 
@@ -171,12 +171,12 @@ impl<M: Mode> Build<M> {
     /// (RFD 6); the sends before the instant are I/O code.
     pub(super) fn instant(&mut self) {
         count!(self.s, transactions);
-        self.edge.arm();
+        self.arm();
         self.mark();
         self.evaluate();
         self.new_nodes();
         self.commit();
-        self.edge.disarm();
+        self.disarm();
         self.dispatch();
     }
 

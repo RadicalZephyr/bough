@@ -16,6 +16,10 @@
 //! compiler from the field types, with no `unsafe impl`, and a materializer
 //! that forgets an `Accepts` bound fails to compile inside the engine.
 //!
+//! A `Local` runtime also keeps the queue its [`Io`](crate::Io)s share,
+//! behind an `Rc`. A `Threaded` one keeps nothing there, since it has no
+//! `Io`, so the `Rc` doesn't stop it being `Send`.
+//!
 //! A `Local` graph is not `Send`, and nothing in the crate says so by hand:
 //!
 //! ```compile_fail,E0277
@@ -39,10 +43,14 @@
 //! ```
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::engine::{CellValue, Memo};
+#[cfg(target_has_atomic = "ptr")]
+use crate::io::NoIo;
+use crate::io::{IoQueue, IoState};
 
 mod sealed {
     pub trait Sealed {}
@@ -54,6 +62,11 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     /// `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
     #[doc(hidden)]
     type Carrier: Carrier;
+
+    /// What the runtime keeps for its same-thread handle: the queue its
+    /// `Io`s share in `Local`, and nothing in `Threaded`.
+    #[doc(hidden)]
+    type IoQueue: IoQueue<Self>;
 
     /// Erases a value the engine makes that is `Send` whatever the user's
     /// types are, such as a token inside `input_cell`'s chain or `or_else`'s
@@ -181,6 +194,7 @@ pub struct Local;
 impl sealed::Sealed for Local {}
 impl Mode for Local {
     type Carrier = Box<dyn Any>;
+    type IoQueue = Rc<IoState>;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
         Box::new(value)
     }
@@ -205,6 +219,7 @@ impl sealed::Sealed for Threaded {}
 #[cfg(target_has_atomic = "ptr")]
 impl Mode for Threaded {
     type Carrier = Box<dyn Any + Send>;
+    type IoQueue = NoIo;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
         Box::new(value)
     }

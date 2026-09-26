@@ -34,6 +34,7 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
 use crate::guard::Liveness;
+use crate::io::{Io, IoQueue};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, Local, Mode};
@@ -136,6 +137,14 @@ impl Runtime<Local> {
     ) -> (Runtime<Local>, Anchored<R>) {
         build_graph(f)
     }
+
+    /// A handle for I/O code that can't hold the runtime, such as a GTK
+    /// signal handler: every call through it queues for the next
+    /// [`pump`](Runtime::pump). Every `Io` of a runtime shares its one
+    /// queue, made with the runtime, so this takes `&self`.
+    pub fn io(&self) -> Io {
+        Io::new(&self.build.io)
+    }
 }
 
 #[cfg(target_has_atomic = "ptr")]
@@ -154,6 +163,11 @@ impl Runtime<Threaded> {
 }
 
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
+
+/// Why a pump stopped: the error [`Runtime::try_pump`] returns, and what the
+/// refused operation was, for the panic [`Runtime::pump`] makes of a stale
+/// token.
+pub(crate) type Stop = (PumpError, &'static str);
 
 /// What the operations on collected nodes that the semantics cannot
 /// observe were asked to do, for the debug-build panic.
@@ -188,16 +202,17 @@ where
 
 impl<M: Mode> Runtime<M> {
     /// Whether a transaction never finished. Every entry checks this, and
-    /// one that finds it set mirrors it into the inbox, so that remote
-    /// sends fail from then on (RFD 6).
+    /// one that finds it set mirrors it into the inbox and the `Io`s'
+    /// queue, so that remote sends and `Io` calls fail from then on (RFD 6).
     pub(crate) fn poisoned(&self) -> bool {
         let poisoned = self.build.in_tx;
-        #[cfg(all(
-            target_has_atomic = "ptr",
-            any(feature = "std", feature = "critical-section")
-        ))]
         if poisoned {
+            #[cfg(all(
+                target_has_atomic = "ptr",
+                any(feature = "std", feature = "critical-section")
+            ))]
             self.build.edge.inbox.poison();
+            self.build.io.poison();
         }
         poisoned
     }
@@ -716,24 +731,26 @@ impl<M: Mode> Runtime<M> {
 
     /// Runs every pending input slot as a transaction of its own, in
     /// connection order, then every queued remote unit as one transaction
-    /// each, in arrival order (RFD 6, RFD 7). Two slots are never
-    /// simultaneous; a unit is exactly as simultaneous as its sends.
+    /// each, in arrival order, then the calls an [`Io`] made before the pump
+    /// began, in the order they were made (RFD 6, RFD 7). Two slots are
+    /// never simultaneous; a unit is exactly as simultaneous as its sends.
     ///
     /// Called by the driver from wherever it sits: a thread the waker wakes,
     /// a future's `poll`, or a bare-metal main loop. Latency is the distance
     /// from a send to the next pump. A slot written while the pump runs, by
     /// a listener or by another thread, is drained now if its turn has not
     /// come and at the next pump otherwise. The units are those queued when
-    /// the pump reaches them; one queued later, by a listener feeding back
-    /// or by another thread, waits for the next pump, whose wake it has
-    /// already made, so a listener that always sends cannot keep a pump
-    /// from returning. A collection that is due runs after each unit, as
-    /// for [`send`](Runtime::send).
+    /// the pump reaches them, and the `Io`'s calls those made before it
+    /// began; one made later, by a listener feeding back or by another
+    /// thread, waits for the next pump, whose wake it has already made, so
+    /// a listener that always sends cannot keep a pump from returning. A
+    /// collection that is due runs after each unit, as for
+    /// [`send`](Runtime::send).
     ///
-    /// A unit runs as a transaction the driver opens, and its closure sends
-    /// into it. A unit whose send fails is dropped whole, with none of its
-    /// sends run, and the graph stays usable: the transaction closes
-    /// without running.
+    /// A unit, a remote's or an `Io`'s, runs as a transaction the driver
+    /// opens, and its closure sends into it. A unit whose send fails is
+    /// dropped whole, with none of its sends run, and the graph stays
+    /// usable: the transaction closes without running.
     ///
     /// Panics on a poisoned graph; a panic in a unit's closure or in the
     /// transaction it runs poisons it. A send to an input collected before
@@ -741,16 +758,16 @@ impl<M: Mode> Runtime<M> {
     /// panic in a debug build, and in a release build a no-op that
     /// [`stale_operations`](Runtime::stale_operations) counts, and the unit's
     /// other sends run. A stale slot is disconnected and its event dropped.
-    /// A double send inside a unit, or a remote transaction's token from
-    /// another graph, panics in both builds. A panic leaves the rest pending
-    /// for the next pump.
+    /// A double send inside a unit, or a token from another graph in one,
+    /// panics in both builds. A panic leaves the rest pending for the next
+    /// pump.
     pub fn pump(&mut self) {
         self.enter();
-        if let Err(error) = self.pump_all(!cfg!(debug_assertions)) {
+        if let Err((error, what)) = self.pump_all(!cfg!(debug_assertions)) {
             match error {
-                PumpError::Stale => self.stale_operation(SEND),
+                PumpError::Stale => self.stale_operation(what),
                 PumpError::DoubleSend => {
-                    panic!("bough: a second send to a non-coalescing input in one remote unit")
+                    panic!("bough: a second send to a non-coalescing input in one queued unit")
                 }
                 PumpError::ForeignGraph => panic!("bough: a token from another graph"),
                 PumpError::Poisoned => unreachable!("bough engine: pump checks the poison first"),
@@ -759,21 +776,21 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// [`pump`](Runtime::pump), returning the error instead of panicking. The
-    /// first slot or unit that fails is dropped, and the error returned;
-    /// the rest stay pending for the next call.
+    /// first slot, unit or call that fails is dropped, and the error
+    /// returned; the rest stay pending for the next call.
     pub fn try_pump(&mut self) -> Result<(), PumpError> {
         if self.poisoned() {
             return Err(PumpError::Poisoned);
         }
-        self.pump_all(false)
+        self.pump_all(false).map_err(|(error, _)| error)
     }
 
-    /// The slots, then the units. With `skip_stale`, the panicking pump's
-    /// release build, a stale send is counted and skipped rather than
-    /// returned.
-    fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
-        // Without a lock there are no slots and no units to pump.
-        let _ = skip_stale;
+    /// The slots, then the units, then the `Io`'s calls. With `skip_stale`,
+    /// the panicking pump's release build, a stale send is counted and
+    /// skipped rather than returned.
+    fn pump_all(&mut self, skip_stale: bool) -> Result<(), Stop> {
+        // Only the calls made before the pump began.
+        let calls = self.build.io.begin_pump();
         #[cfg(any(feature = "std", feature = "critical-section"))]
         self.pump_slots(skip_stale)?;
         #[cfg(all(
@@ -781,7 +798,7 @@ impl<M: Mode> Runtime<M> {
             any(feature = "std", feature = "critical-section")
         ))]
         self.pump_units(skip_stale)?;
-        Ok(())
+        self.pump_io(calls, skip_stale)
     }
 
     /// The units queued when the pump reached them, in arrival order, each
@@ -791,33 +808,57 @@ impl<M: Mode> Runtime<M> {
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    fn pump_units(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_units(&mut self, skip_stale: bool) -> Result<(), Stop> {
         let queued = self.build.edge.inbox.len();
         for _ in 0..queued {
             let Some(unit) = self.build.edge.inbox.pop() else {
                 break;
             };
-            self.build.begin();
-            let mut tx = IoTransaction {
-                build: &mut self.build,
-                skip_stale,
-                skipped: 0,
-                fault: None,
-            };
-            unit(&mut tx);
-            let IoTransaction { skipped, fault, .. } = tx;
-            self.stale_operations += skipped;
-            if let Some(fault) = fault {
-                self.build.cancel();
-                return Err(match fault {
-                    Fault::Stale => PumpError::Stale,
-                    Fault::ForeignGraph => PumpError::ForeignGraph,
-                    Fault::DoubleSend => PumpError::DoubleSend,
-                });
-            }
-            self.build.finish();
-            self.collect_if_due();
+            self.run_unit(skip_stale, unit)?;
         }
+        Ok(())
+    }
+
+    /// The first `n` calls an `Io` made, in the order it made them.
+    fn pump_io(&mut self, n: usize, skip_stale: bool) -> Result<(), Stop> {
+        for _ in 0..n {
+            let Some(call) = self.build.io.pop() else {
+                break;
+            };
+            call(self, skip_stale)?;
+        }
+        Ok(())
+    }
+
+    /// Runs one unit, a remote's or an `Io`'s, as one transaction. A unit
+    /// whose send fails is dropped whole: its transaction closes without
+    /// running.
+    pub(crate) fn run_unit(
+        &mut self,
+        skip_stale: bool,
+        unit: impl FnOnce(&mut IoTransaction<'_>),
+    ) -> Result<(), Stop> {
+        self.build.begin();
+        let mut tx = IoTransaction {
+            build: &mut self.build,
+            skip_stale,
+            skipped: 0,
+            fault: None,
+        };
+        unit(&mut tx);
+        let IoTransaction { skipped, fault, .. } = tx;
+        self.stale_operations += skipped;
+        if let Some(fault) = fault {
+            self.build.cancel();
+            let error = match fault {
+                Fault::Stale => PumpError::Stale,
+                Fault::ForeignGraph => PumpError::ForeignGraph,
+                Fault::DoubleSend => PumpError::DoubleSend,
+            };
+            return Err((error, SEND));
+        }
+        self.build.finish();
+        self.collect_if_due();
         Ok(())
     }
 
@@ -825,7 +866,7 @@ impl<M: Mode> Runtime<M> {
     /// The event leaves the slot under its lock, and the transaction runs
     /// after the lock is released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), Stop> {
         let mut k = 0;
         while k < self.build.edge.slots.len() {
             let Connection { input, slot } = self.build.edge.slots[k];
@@ -851,16 +892,16 @@ impl<M: Mode> Runtime<M> {
             self.build.edge.slots.remove(k);
             slot.disconnect();
             if !skip_stale {
-                return Err(PumpError::Stale);
+                return Err((PumpError::Stale, SEND));
             }
             self.stale_operations += 1;
         }
         Ok(())
     }
 
-    /// Registers the waker that a slot write or a remote send wakes, so the
-    /// driver knows to pump: it reaches every connected slot, and a slot
-    /// connected later.
+    /// Registers the waker that a slot write, a remote send or a call
+    /// through an [`Io`] wakes, so the driver knows to pump: it reaches every
+    /// connected slot, and a slot connected later.
     ///
     /// A driver that is a future stores `cx.waker().clone()` on each poll and
     /// returns pending after pumping; a thread driver builds one from an
@@ -868,22 +909,21 @@ impl<M: Mode> Runtime<M> {
     /// on the interrupt itself gives `Waker::noop()`. A waker that would
     /// wake the same task as the one registered changes nothing.
     pub fn set_waker(&mut self, waker: Waker) {
-        // Without a lock nothing can wake the driver, so it keeps no waker.
-        #[cfg(not(any(feature = "std", feature = "critical-section")))]
-        drop(waker);
-        #[cfg(any(feature = "std", feature = "critical-section"))]
-        {
-            let edge = &mut self.build.edge;
-            if edge.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
-                return;
-            }
-            for connection in &edge.slots {
-                connection.slot.set_waker(Some(waker.clone()));
-            }
-            #[cfg(target_has_atomic = "ptr")]
-            edge.inbox.set_waker(waker.clone());
-            edge.waker = Some(waker);
+        let Build { edge, io, .. } = &mut self.build;
+        if edge.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
+            return;
         }
+        #[cfg(any(feature = "std", feature = "critical-section"))]
+        for connection in &edge.slots {
+            connection.slot.set_waker(Some(waker.clone()));
+        }
+        #[cfg(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        ))]
+        edge.inbox.set_waker(waker.clone());
+        io.set_waker(&waker);
+        edge.waker = Some(waker);
     }
 
     /// An endpoint any thread uses to send into this graph: each send, or
@@ -1319,8 +1359,9 @@ fn dropped_graph() {
     }
 }
 
-/// The sends of one unit a handle queued, run on the driver inside the
-/// transaction it opened for the unit, so they are simultaneous.
+/// The sends of one unit a handle queued, a [`Remote`]'s or an [`Io`]'s, run
+/// on the driver inside the transaction it opened for the unit, so they are
+/// simultaneous.
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
 /// failed send here is found at [`Runtime::pump`], which drops the whole unit

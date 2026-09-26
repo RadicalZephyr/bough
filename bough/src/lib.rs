@@ -42,11 +42,13 @@
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, in connection order; a [`Remote`] queues a send, or a remote
 //! transaction's sends, as one unit from any thread, and `pump` then runs
-//! each unit as one transaction, in arrival order; a write or a remote
-//! send wakes the waker the driver registered with
-//! [`set_waker`](Runtime::set_waker). No body is `todo!()` any more. The
-//! examples in the documentation run, and the guarantees the RFDs make are
-//! fixed by `compile_fail` doc tests.
+//! each unit as one transaction, in arrival order; an [`Io`], the handle
+//! for I/O code on the runtime's thread that can't hold the runtime,
+//! queues its calls, and `pump` runs them last, in the order they were
+//! made; a write, a remote send or an `Io` call wakes the waker the driver
+//! registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
+//! any more. The examples in the documentation run, and the guarantees the
+//! RFDs make are fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!
@@ -59,8 +61,9 @@
 //! a web build keeps `std` (RFD 7). A slot and a remote's inbox need one of
 //! the two locks: with no `unsafe` in the crate there is none to build from
 //! atomics, so a `no_std` build without `critical-section` has neither
-//! slots nor `Remote`, and keeps [`pump`](Runtime::pump) and
-//! [`set_waker`](Runtime::set_waker).
+//! slots nor `Remote`, and keeps [`pump`](Runtime::pump),
+//! [`set_waker`](Runtime::set_waker) and the [`Io`], whose queue is the
+//! runtime's own and needs no lock.
 //!
 //! RFD 2's example: a click counter and its label, a listener that fires
 //! now and on every step, one send, and a transaction.
@@ -108,6 +111,7 @@ mod cell;
 mod engine;
 mod error;
 mod guard;
+mod io;
 mod lift;
 mod mode;
 #[cfg(doctest)]
@@ -129,12 +133,13 @@ pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
-pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
+pub use error::{IoError, PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 pub use error::{RemoteSendError, RemoteTransactionError};
+pub use io::Io;
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;

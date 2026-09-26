@@ -12,6 +12,7 @@
 //! | Type | Exists | `Send` |
 //! | --- | --- | --- |
 //! | `Runtime<Local>` | everywhere | no |
+//! | `Io` | everywhere | no |
 //! | `Input`, `Stream`, `Cell`, `State`, `Shared` | everywhere | yes, whatever they carry |
 //! | `Listener`, `Anchor` | everywhere | with pointer atomics |
 //! | `Anchored<T>` | everywhere | where `T` is, with pointer atomics |
@@ -20,7 +21,7 @@
 //! | `Remote` | with pointer atomics and a lock | yes |
 //!
 //! A lock is `std` or `critical-section`. The Cortex-M0 has no pointer
-//! atomics, so it has the first four rows, with guards that aren't `Send`,
+//! atomics, so it has the first five rows, with guards that aren't `Send`,
 //! and the slot with `critical-section`.
 //!
 //! Absence isn't checked: a type that exists where its row says it doesn't
@@ -74,9 +75,9 @@ macro_rules! not_send {
 mod everywhere {
     use alloc::rc::Rc;
 
-    use crate::{Cell, Input, Local, Runtime, Shared, State, Stream};
+    use crate::{Cell, Input, Io, Local, Runtime, Shared, State, Stream};
 
-    not_send!(Runtime<Local>);
+    not_send!(Runtime<Local>, Io);
     // A token is an integer, whatever it carries.
     send!(
         Input<Rc<u8>>,

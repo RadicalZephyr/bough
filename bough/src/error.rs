@@ -52,14 +52,31 @@ pub enum TokenError {
     Poisoned,
 }
 
+/// Failure modes of a call through an [`Io`](crate::Io). A call only
+/// queues, so these are what the handle knows without the runtime; what
+/// needs the graph, a stale token or one from another graph, is found at
+/// the pump, as [`PumpError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoError {
+    /// Called from graph code: a `map` function, a `construct` closure, a
+    /// split's iterator. That's I/O inside FRP logic. A listener is I/O
+    /// code, so its calls queue.
+    FromGraphCode,
+    /// The runtime was dropped.
+    Gone,
+    /// The runtime is poisoned: a previous transaction never finished. The
+    /// handle knows once an entry on the runtime has found the poison.
+    Poisoned,
+}
+
 /// Failure modes of [`Runtime::try_pump`](crate::Runtime::try_pump).
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
 /// send inside a queued unit, or a slot connected to an input since
 /// collected, can only fail when the driver pumps. The offending unit or
 /// slot is dropped whole and the error returned; the rest stay pending for
-/// the next pump. Where the target has no `Remote` only `Poisoned` and
-/// `Stale` can occur; the variants stay, so that a match is portable.
+/// the next pump. An [`Io`](crate::Io) queues units on every target, so
+/// every variant can occur everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PumpError {
     /// A previous transaction never finished: a panic escaped it.
@@ -69,9 +86,9 @@ pub enum PumpError {
     Stale,
     /// A queued unit sent twice to a non-coalescing input.
     DoubleSend,
-    /// A remote transaction sent with a token from another graph. Its
-    /// closure runs on the driver, so this is found there; a single remote
-    /// send is checked when it is queued.
+    /// A queued unit sent with a token from another graph. A unit's
+    /// closure runs on the driver, so this is found there; only a single
+    /// remote send is checked when it is queued.
     ForeignGraph,
 }
 
@@ -130,6 +147,7 @@ display_error!(
     "the token is stale, foreign, or the graph is poisoned"
 );
 display_error!(PumpError, "pump failed");
+display_error!(IoError, "the runtime refused a call through its handle");
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")

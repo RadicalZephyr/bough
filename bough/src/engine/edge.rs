@@ -37,12 +37,12 @@ use core::sync::atomic::AtomicUsize;
     any(feature = "std", feature = "critical-section")
 ))]
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "std", feature = "critical-section"))]
 use core::task::Waker;
 
 use super::DoubleSend;
 use super::TokenFault;
 use crate::build::Build;
+use crate::io::IoQueue;
 use crate::mode::Mode;
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -124,7 +124,6 @@ pub(crate) struct Connection {
 /// [`connect`](crate::Build::connect) takes one.
 pub(crate) struct Edge {
     /// The waker the driver registered; a slot connected later gets it too.
-    #[cfg(any(feature = "std", feature = "critical-section"))]
     pub(crate) waker: Option<Waker>,
     /// The connected slots, in connection order.
     #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -139,8 +138,7 @@ pub(crate) struct Edge {
 }
 
 impl Edge {
-    /// Graph code starts running on this thread: evaluation, commit, a
-    /// construct closure, a split's iterator. A remote send from this
+    /// The remote's half of [`Build::arm`]: a remote send from this
     /// thread is refused until [`disarm`](Edge::disarm) (RFD 6).
     #[inline]
     pub(crate) fn arm(&self) {
@@ -148,8 +146,7 @@ impl Edge {
         self.inbox.running.store(thread_token(), Ordering::Relaxed);
     }
 
-    /// Graph code has stopped: before listeners run, and when a
-    /// transaction ends.
+    /// The remote's half of [`Build::disarm`].
     #[inline]
     pub(crate) fn disarm(&self) {
         #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
@@ -159,7 +156,6 @@ impl Edge {
     pub(crate) fn new(graph: u32) -> Self {
         let _ = graph;
         Edge {
-            #[cfg(any(feature = "std", feature = "critical-section"))]
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
             slots: Vec::new(),
@@ -358,11 +354,25 @@ impl<M: Mode> Start for Build<M> {
     }
 }
 
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
 impl<M: Mode> Build<M> {
+    /// Graph code starts running: evaluation, commit, a construct closure,
+    /// a split's iterator. A remote send from this thread, and a call
+    /// through an `Io`, are refused until [`disarm`](Build::disarm)
+    /// (RFD 6).
+    #[inline]
+    pub(crate) fn arm(&self) {
+        self.edge.arm();
+        self.io.graph_code(true);
+    }
+
+    /// Graph code has stopped: before listeners run, and when a
+    /// transaction ends.
+    #[inline]
+    pub(crate) fn disarm(&self) {
+        self.edge.disarm();
+        self.io.graph_code(false);
+    }
+
     /// Drops a unit that failed after the driver opened its transaction:
     /// empties the slots its sends filled and closes the transaction
     /// without running it. Nothing ran, so there is nothing to undo, and

@@ -13,6 +13,7 @@ use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::guard::{Liveness, Released};
+use crate::io::IoQueue;
 use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::runtime::{Anchor, Anchored};
 #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -58,6 +59,8 @@ pub struct Build<M: Mode = Local> {
     pub(crate) s: Sched,
     /// The I/O edge: connected slots, the inbox and the driver's waker.
     pub(crate) edge: Edge,
+    /// The queue the runtime's `Io`s share, in `Local`.
+    pub(crate) io: M::IoQueue,
     /// The anchored nodes, each with the liveness its anchor shares. A
     /// released anchor is taken out at the next collection.
     pub(crate) anchors: Vec<(u32, Liveness)>,
@@ -76,6 +79,7 @@ impl<M: Mode> Build<M> {
             in_tx: false,
             s: Sched::default(),
             edge: Edge::new(graph_id),
+            io: M::IoQueue::new(),
             anchors: Vec::new(),
             released: Released::new(),
         }
