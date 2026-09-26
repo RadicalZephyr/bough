@@ -112,6 +112,41 @@ pub enum RemoteTransactionError {
     GraphDropped,
 }
 
+/// Failure modes of the calls on an [`Io`](crate::Io) that can wait for
+/// the graph: [`send`](crate::Io::send),
+/// [`transaction`](crate::Io::transaction), the listens and
+/// [`anchor`](crate::Io::anchor).
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoError {
+    /// Called from graph code, such as a `map` function or a `construct`
+    /// closure: I/O from inside FRP logic. A listener is I/O code, and its
+    /// calls wait instead.
+    FromGraphCode,
+    /// The [`Owner`](crate::Owner) was dropped, and the graph with it.
+    Gone,
+    /// A previous transaction never finished: a panic escaped it.
+    Poisoned,
+}
+
+/// Failure modes of the calls on an [`Io`](crate::Io) that cannot wait
+/// for the graph: [`with_sample`](crate::Io::with_sample),
+/// [`with_graph`](crate::Io::with_graph) and [`pump`](crate::Io::pump).
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowError {
+    /// Called from graph code, such as a `map` function or a `construct`
+    /// closure: I/O from inside FRP logic.
+    FromGraphCode,
+    /// The graph is busy: a transaction, its listeners, or another call on
+    /// it is in progress, and this call cannot wait for it.
+    Busy,
+    /// The [`Owner`](crate::Owner) was dropped, and the graph with it.
+    Gone,
+    /// A previous transaction never finished: a panic escaped it.
+    Poisoned,
+}
+
 macro_rules! display_error {
     ($ty:ty, $text:literal) => {
         impl fmt::Display for $ty {
@@ -140,3 +175,7 @@ display_error!(RemoteSendError, "remote send failed");
     any(feature = "std", feature = "critical-section")
 ))]
 display_error!(RemoteTransactionError, "remote transaction failed");
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+display_error!(IoError, "the graph refused a call through its handle");
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+display_error!(NowError, "the graph refused a call that cannot wait");

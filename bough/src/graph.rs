@@ -5,12 +5,16 @@
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::boxed::Box;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use alloc::rc::Rc;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use core::cell::Cell as CoreCell;
 use core::task::Waker;
 
 use crate::Build;
@@ -31,6 +35,8 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use crate::mode::LocalFlag;
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
@@ -150,6 +156,113 @@ impl Graph<Threaded> {
     }
 }
 
+/// What the same-thread handle needs of the graph it shares, which it
+/// cannot borrow while the graph is busy.
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Graph<Local> {
+    /// The inbox: its poison mirror, its guard and the driver's waker,
+    /// read while the graph is busy.
+    pub(crate) fn inbox(&self) -> Arc<Inbox> {
+        self.build.edge.inbox.clone()
+    }
+
+    /// The count of released handles, for the flag of a handle made while
+    /// the graph is busy.
+    pub(crate) fn released(&self) -> Rc<CoreCell<usize>> {
+        self.released.clone()
+    }
+
+    /// [`listen`](Graph::listen), with the flag of a [`Listener`] the
+    /// handle gave out before the graph could register it. A cleared flag
+    /// means the listener was dropped first, and nothing registers.
+    pub(crate) fn listen_flagged<S, F>(&mut self, flag: LocalFlag, source: S, f: F)
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        if let Some(i) = self.checked(source.node_token(), LISTEN) {
+            self.attach_flag(i, f, call_stream::<Local, S, F>, flag);
+        }
+    }
+
+    /// [`listen_cell`](Graph::listen_cell), with a flag, as
+    /// [`listen_flagged`](Graph::listen_flagged). The first call runs now,
+    /// when the listener is registered.
+    pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, mut f: F)
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        let Some(i) = self.checked(cell.token(), LISTEN) else {
+            return;
+        };
+        f(self.build.value::<C::Value>(i));
+        self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
+    }
+
+    /// [`listen_steps`](Graph::listen_steps), with a flag, as
+    /// [`listen_flagged`](Graph::listen_flagged).
+    pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, f: F)
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        if let Some(i) = self.checked(cell.token(), LISTEN) {
+            self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
+        }
+    }
+
+    /// [`anchor`](Graph::anchor), with the flag of an [`Anchor`] the
+    /// handle gave out, as [`listen_flagged`](Graph::listen_flagged).
+    pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: LocalFlag, value: &T) {
+        self.enter();
+        if !flag.is_live() {
+            return;
+        }
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let nodes: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .filter_map(|token| self.checked(token, ANCHOR))
+            .collect();
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+    }
+}
+
+/// The handles the same-thread handle gives out before the graph can
+/// register them.
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Listener<Local> {
+    /// A listener whose registration shares `flag`, now or later.
+    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
+        Listener { alive: Some(flag) }
+    }
+}
+
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+impl Anchor<Local> {
+    /// An anchor whose registration shares `flag`, now or later.
+    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
+        Anchor { alive: Some(flag) }
+    }
+}
+
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
 
 /// What the operations on collected nodes that the semantics cannot
@@ -187,7 +300,7 @@ impl<M: Mode> Graph<M> {
     /// Whether a transaction never finished. Every entry checks this, and
     /// one that finds it set mirrors it into the inbox, so that remote
     /// sends fail from then on (RFD 6).
-    fn poisoned(&self) -> bool {
+    pub(crate) fn poisoned(&self) -> bool {
         let poisoned = self.build.in_tx;
         #[cfg(all(
             target_has_atomic = "ptr",
@@ -257,7 +370,7 @@ impl<M: Mode> Graph<M> {
     /// under the stress setting. Before the transaction rather than after
     /// it, so that I/O code can anchor a token a listener handed it in the
     /// transaction before (RFD 2's receive, then wire).
-    fn collect_if_due(&mut self) {
+    pub(crate) fn collect_if_due(&mut self) {
         let due = self.stress
             || (self.policy == CollectionPolicy::Automatic
                 && self
@@ -298,6 +411,18 @@ impl<M: Mode> Graph<M> {
     {
         self.enter();
         self.collect_if_due();
+        self.send_without_collecting(input, value);
+    }
+
+    /// [`send`](Graph::send) without the collection that may run first. The
+    /// same-thread handle's queue sends this way: its sends are the I/O
+    /// code a transaction's listeners asked for, and no collection runs
+    /// between a transaction and that code.
+    pub(crate) fn send_without_collecting<A: 'static>(&mut self, input: Input<A>, value: A)
+    where
+        M: Accepts<A>,
+    {
+        self.enter();
         // The token is checked before the transaction opens, so a foreign
         // token is a panic that leaves the graph usable.
         let Some(i) = self.checked(input.token, SEND) else {
@@ -345,6 +470,17 @@ impl<M: Mode> Graph<M> {
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
         self.collect_if_due();
+        self.transaction_without_collecting(f)
+    }
+
+    /// [`transaction`](Graph::transaction) without the collection that may
+    /// run first, for the same-thread handle's queue, as
+    /// [`send_without_collecting`](Graph::send_without_collecting).
+    pub(crate) fn transaction_without_collecting<R>(
+        &mut self,
+        f: impl FnOnce(&mut Transaction<'_, M>) -> R,
+    ) -> R {
+        self.enter();
         self.build.begin();
         let r = f(&mut Transaction { graph: self });
         self.build.finish();
@@ -491,14 +627,27 @@ impl<M: Mode> Graph<M> {
         M: Accepts<F>,
     {
         let flag = <M::Flag as FlagOps>::live(&self.released);
+        self.attach_flag(i, f, call, flag.clone());
+        Listener { alive: Some(flag) }
+    }
+
+    /// Registers a listener on node `i` with the flag its handle shares.
+    fn attach_flag<F: 'static>(
+        &mut self,
+        i: u32,
+        f: F,
+        call: fn(&mut M::Carrier, &mut Build<M>, u32),
+        flag: M::Flag,
+    ) where
+        M: Accepts<F>,
+    {
         let store = &mut self.build.store;
         store.listeners[i as usize].push(Entry {
-            flag: flag.clone(),
+            flag,
             f: <M as Accepts<F>>::erase(Erase::Value(f)),
             call,
         });
         store.hot[i as usize].flags |= LISTENERS;
-        Listener { alive: Some(flag) }
     }
 
     /// Anchors what I/O code wants to hold without listening to it, and
@@ -733,8 +882,17 @@ impl<M: Mode> Graph<M> {
     /// another graph, panics in both builds. A panic leaves the rest pending
     /// for the next pump.
     pub fn pump(&mut self) {
+        self.pump_between(&mut |_| {});
+    }
+
+    /// [`pump`](Graph::pump), running `between` after each slot's and each
+    /// unit's transaction, before the next one opens and before the
+    /// collection that may run first. The same-thread handle runs its
+    /// queue there, so that a listener can wire what one unit built before
+    /// the next unit's collection.
+    pub(crate) fn pump_between(&mut self, between: &mut dyn FnMut(&mut Self)) {
         self.enter();
-        if let Err(error) = self.pump_all(!cfg!(debug_assertions)) {
+        if let Err(error) = self.pump_all(!cfg!(debug_assertions), between) {
             match error {
                 PumpError::Stale => self.stale_operation(SEND),
                 PumpError::DoubleSend => {
@@ -753,22 +911,26 @@ impl<M: Mode> Graph<M> {
         if self.poisoned() {
             return Err(PumpError::Poisoned);
         }
-        self.pump_all(false)
+        self.pump_all(false, &mut |_| {})
     }
 
     /// The slots, then the units. With `skip_stale`, the panicking pump's
     /// release build, a stale send is counted and skipped rather than
     /// returned.
-    fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_all(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         // Without a lock there are no slots and no units to pump.
-        let _ = skip_stale;
+        let _ = (skip_stale, &between);
         #[cfg(any(feature = "std", feature = "critical-section"))]
-        self.pump_slots(skip_stale)?;
+        self.pump_slots(skip_stale, between)?;
         #[cfg(all(
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        self.pump_units(skip_stale)?;
+        self.pump_units(skip_stale, between)?;
         Ok(())
     }
 
@@ -779,7 +941,11 @@ impl<M: Mode> Graph<M> {
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    fn pump_units(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_units(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         let queued = self.build.edge.inbox.len();
         for _ in 0..queued {
             let Some(unit) = self.build.edge.inbox.pop() else {
@@ -805,6 +971,7 @@ impl<M: Mode> Graph<M> {
                 });
             }
             self.build.finish();
+            between(self);
         }
         Ok(())
     }
@@ -813,7 +980,11 @@ impl<M: Mode> Graph<M> {
     /// The event leaves the slot under its lock, and the transaction runs
     /// after the lock is released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), PumpError> {
+    fn pump_slots(
+        &mut self,
+        skip_stale: bool,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), PumpError> {
         let mut k = 0;
         while k < self.build.edge.slots.len() {
             let Connection { input, slot } = self.build.edge.slots[k];
@@ -827,6 +998,7 @@ impl<M: Mode> Graph<M> {
                         fire(&mut self.build, i, event)
                             .expect("bough engine: a slot's event is its transaction's only send");
                         self.build.finish();
+                        between(self);
                     }
                     // `connect` checked the graph, so the input was collected.
                     Err(_) => live = false,

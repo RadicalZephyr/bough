@@ -1,4 +1,5 @@
 /target
+/bough-gtk/target
 # GHC's build products, should anyone build in bough-oracle/haskell without
 # -outputdir. The tests build under target/tmp.
 /bough-oracle/haskell/**/*.o

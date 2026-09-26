@@ -295,6 +295,16 @@ impl Inbox {
         self.state.with(|q| q.units.len())
     }
 
+    /// Wakes the driver's waker, if it registered one, outside the lock:
+    /// the same-thread handle has calls left over, or its owner is gone.
+    #[cfg(feature = "std")]
+    pub(crate) fn wake(&self) {
+        let waker = self.state.with(|q| q.waker.clone());
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
     /// Replaces the waker a push wakes.
     pub(crate) fn set_waker(&self, waker: Waker) {
         let old = self.state.with(|q| q.waker.replace(waker));
