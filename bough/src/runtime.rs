@@ -104,7 +104,7 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
     build.pop_scope();
     build.finish();
     let edge = build.anchor(r);
-    let graph = Runtime {
+    let mut graph = Runtime {
         build,
         released_before: 0,
         baseline: 0,
@@ -112,6 +112,9 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
         stress: false,
         stale_operations: 0,
     };
+    // Transaction zero is a unit like any other: a collection that is due
+    // runs after it, and frees what the build made that nothing reaches.
+    graph.collect_if_due();
     (graph, edge)
 }
 
@@ -125,7 +128,9 @@ impl Runtime<Local> {
     /// The build closure runs as transaction zero. Its child transactions,
     /// which a [`split`](crate::Source::split) or a
     /// [`defer`](crate::Source::defer) that fires in it starts, run before
-    /// `build` returns.
+    /// `build` returns, and so does the collection that is due after it, as
+    /// after any unit: what the build made that nothing reaches is gone
+    /// before I/O code sees the runtime.
     pub fn build<R: Trace>(
         f: impl FnOnce(&mut Build<Local>) -> R,
     ) -> (Runtime<Local>, Anchored<R>) {

@@ -3,7 +3,7 @@
 //! table is a cell of senders the collector must not look into.
 #![cfg(feature = "derive")]
 
-use std::cell::{Cell as StdCell, RefCell};
+use std::cell::Cell as StdCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -106,13 +106,11 @@ struct Tagged<T, U> {
 
 /// A hold of a derived enum keeps what its current variant names, and
 /// only that: a page no value names is collected, and so is the page the
-/// route has moved on from. The pages reach I/O code through a side
-/// channel, since what the build closure returns is a root.
+/// route has moved on from. The pages leave the build with the edge, and
+/// the test keeps the rest of the edge and lets the pages' share go.
 #[test]
 fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
-    let pages_out = Rc::new(RefCell::new(None));
-    let pages_in = pages_out.clone();
-    let (mut graph, edge) = Runtime::build(move |b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (routes, routes_in) = b.input::<Route>();
         let route = routes.hold(b, Route::Home);
         let pages = [b.constant(1u32), b.constant(2u32), b.constant(3u32)];
@@ -123,12 +121,12 @@ fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
         });
         let (numbers, _numbers_in) = b.input::<u32>();
         let pair = b.constant(Pair(pages[2], Opaque(1), numbers));
-        *pages_in.borrow_mut() = Some(pages);
-        (routes_in, route, tagged, pair)
+        ((routes_in, route, tagged, pair), pages)
     });
-    let (routes_in, route, tagged, pair) = edge.keep();
     graph.set_collection_policy(CollectionPolicy::Manual);
-    let [one, two, three] = pages_out.borrow().expect("the build ran");
+    let ((kept, [one, two, three]), edge) = edge.into_parts();
+    let (routes_in, route, tagged, pair) = graph.anchor(kept).keep();
+    drop(edge);
     graph.send(routes_in, Route::Page(one));
     graph.collect_garbage();
     assert_eq!(*graph.sample(one), 1);

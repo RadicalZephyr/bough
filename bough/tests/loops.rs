@@ -383,8 +383,9 @@ fn a_cell_loop_is_one_node_besides_its_definition() {
         let (ticks, _ticks_in) = b.input::<()>();
         let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
         count_loop.close(b, next);
+        next
     });
-    let () = edge.keep();
+    let _next = edge.keep();
     assert_eq!(graph.live_nodes(), 3, "the forward, the input, the hold");
 }
 
