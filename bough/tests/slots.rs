@@ -1,5 +1,6 @@
 //! Input slots (RFD 7): one pending event folded in place, drained by
-//! `pump` as one transaction per pending slot in connection order, never
+//! `pump` as one transaction per pending slot, higher priority first and
+//! connection order among equals, each at most once per pump and never
 //! simultaneous with another slot; a write wakes the driver's waker; a
 //! slot feeds one input of one graph and is let go with the graph.
 //!
@@ -57,7 +58,7 @@ fn a_burst_between_pumps_is_one_event_folded_left_to_right() {
     static WORDS: InputSlot<String> = InputSlot::new(concat);
     let (mut graph, edge) = Runtime::build(|b| {
         let (words, words_in) = b.input::<String>();
-        b.connect(words_in, &WORDS);
+        b.connect(words_in, &WORDS, 0);
         words.node(b)
     });
     let words = edge.keep();
@@ -83,7 +84,7 @@ fn keep_latest_drops_the_older_event() {
     static LEVEL: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (level, level_in) = b.input::<u32>();
-        b.connect(level_in, &LEVEL);
+        b.connect(level_in, &LEVEL, 0);
         level.hold(b, 0u32)
     });
     let level = edge.keep();
@@ -104,8 +105,8 @@ fn pending_slots_run_one_transaction_each_in_connection_order() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
-        b.connect(right_in, &FIRST);
-        b.connect(left_in, &SECOND);
+        b.connect(right_in, &FIRST, 0);
+        b.connect(left_in, &SECOND, 0);
         left.merge(b, right, |l, r| l * 1000 + r)
     });
     let merged = edge.keep();
@@ -116,6 +117,68 @@ fn pending_slots_run_one_transaction_each_in_connection_order() {
     assert_eq!(*seen.borrow(), [1, 2], "never combined; connection order");
 }
 
+/// Slots drain by priority, higher first, and equal priorities in
+/// connection order, whatever order they were connected or written in.
+#[test]
+fn slots_drain_by_priority_then_connection_order() {
+    static LOW: InputSlot<u32> = InputSlot::keep_latest();
+    static HIGH: InputSlot<u32> = InputSlot::keep_latest();
+    static ALSO_HIGH: InputSlot<u32> = InputSlot::keep_latest();
+    static MIDDLE: InputSlot<u32> = InputSlot::keep_latest();
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        b.connect(numbers_in, &LOW, 1);
+        b.connect(numbers_in, &HIGH, 3);
+        b.connect(numbers_in, &ALSO_HIGH, 3);
+        b.connect(numbers_in, &MIDDLE, 2);
+        numbers.node(b)
+    });
+    let numbers = edge.keep();
+    let seen = log(&mut graph, numbers);
+    MIDDLE.send(2);
+    LOW.send(1);
+    ALSO_HIGH.send(4);
+    HIGH.send(3);
+    graph.pump();
+    assert_eq!(*seen.borrow(), [3, 4, 2, 1]);
+}
+
+/// A slot drains once per pump, even when its own transaction connects a
+/// slot of higher priority ahead of it. Here ONCE's first event runs a
+/// construct that connects AHEAD, and ONCE's listener writes ONCE again:
+/// that write waits for the next pump.
+#[test]
+fn a_slot_drains_once_per_pump_even_when_a_slot_is_connected_ahead_of_it() {
+    static ONCE: InputSlot<u32> = InputSlot::keep_latest();
+    static AHEAD: InputSlot<u32> = InputSlot::keep_latest();
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        b.connect(numbers_in, &ONCE, 1);
+        let numbers = numbers.share(b);
+        let connected = numbers.once().construct(b, |b, _| {
+            let (_ahead, ahead_in) = b.input::<u32>();
+            b.connect(ahead_in, &AHEAD, 9);
+        });
+        (numbers, connected)
+    });
+    let (numbers, _connected) = edge.keep();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    graph
+        .listen(numbers, move |n| {
+            sink.borrow_mut().push(n);
+            if n == 1 {
+                ONCE.send(2);
+            }
+        })
+        .keep();
+    ONCE.send(1);
+    graph.pump();
+    assert_eq!(*seen.borrow(), [1], "the second write waits");
+    graph.pump();
+    assert_eq!(*seen.borrow(), [1, 2]);
+}
+
 /// Several slots feed one input, one per producer; each is a transaction
 /// of its own, so a non-coalescing input sees no double send.
 #[test]
@@ -124,8 +187,8 @@ fn two_slots_on_one_input_are_two_transactions() {
     static TWO: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &ONE);
-        b.connect(numbers_in, &TWO);
+        b.connect(numbers_in, &ONE, 0);
+        b.connect(numbers_in, &TWO, 0);
         numbers.node(b)
     });
     let numbers = edge.keep();
@@ -143,7 +206,7 @@ fn a_slot_never_makes_a_coalescing_input_coalesce() {
     static PARTS: InputSlot<u32> = InputSlot::new(|a, b| a * 10 + b);
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input_coalescing(|a: u32, b| a + b);
-        b.connect(numbers_in, &PARTS);
+        b.connect(numbers_in, &PARTS, 0);
         (numbers.node(b), numbers_in)
     });
     let (numbers, numbers_in) = edge.keep();
@@ -187,11 +250,11 @@ fn a_write_wakes_the_waker_the_driver_registered() {
     );
     let (mut graph, edge) = Runtime::build(|b| {
         let (early, early_in) = b.input::<u32>();
-        b.connect(early_in, &EARLY);
+        b.connect(early_in, &EARLY, 0);
         let (open, open_in) = b.input::<()>();
         let opened = open.construct(b, move |b, ()| {
             let (late, late_in) = b.input::<u32>();
-            b.connect(late_in, &LATE);
+            b.connect(late_in, &LATE, 0);
             late.hold(b, 0u32)
         });
         let none = b.constant(0u32);
@@ -226,7 +289,7 @@ fn registering_the_same_waker_again_changes_nothing() {
     static TICKS: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let (mut graph, edge) = Runtime::build(|b| {
         let (ticks, ticks_in) = b.input::<u32>();
-        b.connect(ticks_in, &TICKS);
+        b.connect(ticks_in, &TICKS, 0);
         ticks.accumulate(b, 0u32, |n, t| t + n)
     });
     let ticks = edge.keep();
@@ -247,14 +310,14 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
     static TWICE: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let (mut first, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &SHARED);
+        b.connect(numbers_in, &SHARED, 0);
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
     let (first_in, first_total) = edge.keep();
     let message = panic_message(|| {
         Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
-            b.connect(numbers_in, &SHARED);
+            b.connect(numbers_in, &SHARED, 0);
             numbers.hold(b, 0u32)
         })
     });
@@ -266,8 +329,8 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
         Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (other, other_in) = b.input::<u32>();
-            b.connect(numbers_in, &TWICE);
-            b.connect(other_in, &TWICE);
+            b.connect(numbers_in, &TWICE, 0);
+            b.connect(other_in, &TWICE, 0);
             numbers.or_else(b, other).hold(b, 0u32)
         })
     });
@@ -284,8 +347,8 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
     // The pending 5 was the dropped graph's; the next graph starts empty.
     let (mut second, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &SHARED);
-        b.connect(numbers_in, &TWICE);
+        b.connect(numbers_in, &SHARED, 0);
+        b.connect(numbers_in, &TWICE, 0);
         numbers.accumulate(b, 0u32, |n, t| t + n)
     });
     let second_total = edge.keep();
@@ -305,7 +368,7 @@ fn a_panicking_build_lets_its_slots_go() {
     let message = panic_message(|| {
         Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
-            b.connect(numbers_in, &AFTER_PANIC);
+            b.connect(numbers_in, &AFTER_PANIC, 0);
             let _ = numbers.hold(b, 0u32);
             if b.constant(true).sample(b) == &true {
                 panic!("the build closure failed");
@@ -315,7 +378,7 @@ fn a_panicking_build_lets_its_slots_go() {
     assert!(message.contains("the build closure failed"));
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &AFTER_PANIC);
+        b.connect(numbers_in, &AFTER_PANIC, 0);
         numbers.hold(b, 0u32)
     });
     let latest = edge.keep();
@@ -337,10 +400,10 @@ fn a_slot_whose_input_was_collected_is_stale_at_pump() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (lost, lost_in) = b.input::<u32>();
         let _unrooted = lost.hold(b, 0u32);
-        b.connect(lost_in, &ORPHAN);
-        b.connect(lost_in, &ORPHAN_TOO);
+        b.connect(lost_in, &ORPHAN, 0);
+        b.connect(lost_in, &ORPHAN_TOO, 0);
         let (kept, kept_in) = b.input::<u32>();
-        b.connect(kept_in, &KEPT);
+        b.connect(kept_in, &KEPT, 0);
         kept.hold(b, 0u32)
     });
     let kept = edge.keep();
@@ -368,8 +431,8 @@ fn a_slot_whose_input_was_collected_is_stale_at_pump() {
     // Both stale slots were let go.
     let (_other, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &ORPHAN);
-        b.connect(numbers_in, &ORPHAN_TOO);
+        b.connect(numbers_in, &ORPHAN, 0);
+        b.connect(numbers_in, &ORPHAN_TOO, 0);
         numbers.hold(b, 0u32)
     });
     edge.keep();
@@ -385,11 +448,11 @@ fn a_slot_written_during_a_pump_drains_when_its_turn_comes() {
     static AFTER: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (before, before_in) = b.input::<u32>();
-        b.connect(before_in, &BEFORE);
+        b.connect(before_in, &BEFORE, 0);
         let (source, source_in) = b.input::<u32>();
-        b.connect(source_in, &SOURCE);
+        b.connect(source_in, &SOURCE, 0);
         let (after, after_in) = b.input::<u32>();
-        b.connect(after_in, &AFTER);
+        b.connect(after_in, &AFTER, 0);
         (source.node(b), before.node(b), after.node(b))
     });
     let (source, before, after) = edge.keep();
@@ -416,7 +479,7 @@ fn a_panic_in_a_slot_s_transaction_poisons_the_graph() {
     static FRAGILE: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &FRAGILE);
+        b.connect(numbers_in, &FRAGILE, 0);
         numbers.node(b)
     });
     let numbers = edge.keep();
@@ -470,7 +533,7 @@ fn a_write_from_another_thread_wakes_a_driver_blocked_on_a_condition_variable() 
     let driver = thread::spawn(move || {
         let (mut graph, edge) = Runtime::build(|b| {
             let (readings, readings_in) = b.input::<u32>();
-            b.connect(readings_in, &SENSOR);
+            b.connect(readings_in, &SENSOR, 0);
             readings.node(b)
         });
         let readings = edge.keep();

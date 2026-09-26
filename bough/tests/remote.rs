@@ -131,7 +131,7 @@ fn slots_drain_before_units() {
     static SENSOR: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        b.connect(numbers_in, &SENSOR);
+        b.connect(numbers_in, &SENSOR, 0);
         (numbers_in, numbers.node(b))
     });
     let (numbers_in, numbers) = edge.keep();
@@ -379,7 +379,7 @@ fn a_remote_call_made_after_the_pump_began_waits_for_the_next_pump() {
     static TICKS: InputSlot<u32> = InputSlot::keep_latest();
     let (mut graph, edge) = Runtime::build(|b| {
         let (ticks, ticks_in) = b.input::<u32>();
-        b.connect(ticks_in, &TICKS);
+        b.connect(ticks_in, &TICKS, 0);
         let (echoes, echoes_in) = b.input::<u32>();
         (ticks, echoes_in, echoes.hold(b, 0u32))
     });

@@ -855,8 +855,9 @@ impl<M: Mode> Runtime<M> {
         self.stale_operations
     }
 
-    /// Runs every pending input slot as a transaction of its own, in
-    /// connection order, then the calls both handles, an [`Io`] and a
+    /// Runs every pending input slot as a transaction of its own, higher
+    /// priority first and each at most once, then the calls both handles,
+    /// an [`Io`] and a
     /// [`RemoteIo`], made before the pump began, in the order they were
     /// made: a send or a transaction as one transaction, and a
     /// registration (RFD 6, RFD 7). Two slots are never simultaneous; a
@@ -920,11 +921,16 @@ impl<M: Mode> Runtime<M> {
         self.pump_calls(limit, skip_stale)
     }
 
-    /// A pump begins: the next call through either handle wakes the driver
-    /// again. Returns the stamp the next call would take; the pump runs the
-    /// calls stamped before it. Where there is an inbox, it reads the stamp
+    /// A pump begins: it takes the next serial, so each slot drains once in
+    /// it, and the next call through either handle wakes the driver again.
+    /// Returns the stamp the next call would take; the pump runs the calls
+    /// stamped before it. Where there is an inbox, it reads the stamp
     /// under the lock a remote call stamps and wakes under.
-    fn begin_pump(&self) -> usize {
+    fn begin_pump(&mut self) -> usize {
+        #[cfg(any(feature = "std", feature = "critical-section"))]
+        {
+            self.build.edge.pumps += 1;
+        }
         self.build.io.begin_pump();
         #[cfg(all(
             target_has_atomic = "ptr",
@@ -1033,33 +1039,44 @@ impl<M: Mode> Runtime<M> {
         Ok(())
     }
 
-    /// Each pending slot, in connection order, as a transaction of its own.
-    /// The event leaves the slot under its lock, and the transaction runs
-    /// after the lock is released.
+    /// Each pending slot, higher priority first, as a transaction of its
+    /// own, and each at most once per pump. The event leaves the slot under
+    /// its lock, and the transaction runs after the lock is released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
     fn pump_slots(&mut self, skip_stale: bool) -> Result<(), Stop> {
+        let pump = self.build.edge.pumps;
         let mut k = 0;
         while k < self.build.edge.slots.len() {
-            let Connection { input, slot } = self.build.edge.slots[k];
-            let mut live = true;
-            slot.drain(&mut |event| {
-                match self.build.lookup(input) {
-                    Ok(i) => {
-                        self.build.begin();
-                        let fire = self.build.store.ops[i as usize].fire;
-                        fire(&mut self.build, i, event)
-                            .expect("bough engine: a slot's event is its transaction's only send");
-                        self.build.finish();
-                        self.collect_if_due();
-                    }
-                    // `connect` checked the graph, so the input was collected.
-                    Err(_) => live = false,
-                }
-            });
-            if live {
-                k += 1;
+            let Connection {
+                input,
+                slot,
+                drained,
+                ..
+            } = self.build.edge.slots[k];
+            k += 1;
+            if drained == pump {
                 continue;
             }
+            let mut live = true;
+            slot.drain(&mut |event| match self.build.lookup(input) {
+                Ok(i) => {
+                    // Marked before its transaction runs, which may connect
+                    // a slot ahead of it and move it.
+                    self.build.edge.slots[k - 1].drained = pump;
+                    self.build.begin();
+                    let fire = self.build.store.ops[i as usize].fire;
+                    fire(&mut self.build, i, event)
+                        .expect("bough engine: a slot's event is its transaction's only send");
+                    self.build.finish();
+                    self.collect_if_due();
+                }
+                // `connect` checked the graph, so the input was collected.
+                Err(_) => live = false,
+            });
+            if live {
+                continue;
+            }
+            k -= 1;
             self.build.edge.slots.remove(k);
             slot.disconnect();
             if !skip_stale {

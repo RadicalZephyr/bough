@@ -428,16 +428,18 @@ impl<M: Mode> Build<M> {
         self.store.cold[n as usize].reach.extend(reach);
     }
 
-    /// Connects an [`InputSlot`] to an input, so that
+    /// Connects an [`InputSlot`] to an input at `priority`, so that
     /// [`pump`](crate::Runtime::pump) drains it (RFD 7).
     ///
-    /// Callable more than once for one input, one slot per producer; the
-    /// driver drains slots in connection order, each pending one as a
-    /// transaction of its own, so two slots are never simultaneous, even
-    /// on one input. The slot's fold and the input's coalescing function
-    /// are independent: the fold combines a burst between two pumps, the
-    /// coalescing function combines two sends inside one transaction, which
-    /// slots never cause.
+    /// The pump drains higher priorities first, the order RTIC gives its
+    /// tasks and the opposite of the NVIC's numbers, and equal priorities
+    /// in connection order. It drains each pending slot as a transaction
+    /// of its own, and each at most once per pump, so two slots are never
+    /// simultaneous, even on one input. Callable more than once for one
+    /// input, one slot per producer. The slot's fold and the input's
+    /// coalescing function are independent: the fold combines a burst
+    /// between two pumps, the coalescing function combines two sends inside
+    /// one transaction, which slots never cause.
     ///
     /// A slot feeds one input of one graph, and panics if it is connected
     /// already; the graph disconnects it when it is dropped. A connection
@@ -448,17 +450,32 @@ impl<M: Mode> Build<M> {
     /// The slot exists where a lock for it does: under `std`, and with the
     /// `critical-section` feature.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    pub fn connect<A: Send + 'static>(&mut self, input: Input<A>, slot: &'static InputSlot<A>) {
+    pub fn connect<A: Send + 'static>(
+        &mut self,
+        input: Input<A>,
+        slot: &'static InputSlot<A>,
+        priority: u8,
+    ) {
         self.check(input.token);
         assert!(
             Drain::connect(slot, self.graph_id, self.edge.waker.as_ref()),
             "bough: an input slot connected twice: a slot feeds one input of one graph; \
              give a second producer or a second input a slot of its own"
         );
-        self.edge.slots.push(Connection {
-            input: input.token,
-            slot,
-        });
+        let slots = &mut self.edge.slots;
+        let at = slots
+            .iter()
+            .position(|connection| connection.priority < priority)
+            .unwrap_or(slots.len());
+        slots.insert(
+            at,
+            Connection {
+                input: input.token,
+                slot,
+                priority,
+                drained: 0,
+            },
+        );
     }
 }
 

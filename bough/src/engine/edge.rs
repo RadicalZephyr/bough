@@ -110,20 +110,26 @@ pub(crate) trait Drain: Sync {
     /// one. False if the slot is connected already.
     fn connect(&self, graph: u32, waker: Option<&Waker>) -> bool;
     /// Takes the pending event, if there is one, and hands it to `fire` as
-    /// an `&mut Option<A>`, after the lock is released.
-    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any));
+    /// an `&mut Option<A>`, after the lock is released. Returns whether
+    /// there was one.
+    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) -> bool;
     /// Replaces the waker a write wakes.
     fn set_waker(&self, waker: Option<Waker>);
     /// Forgets the graph and the waker, and drops a pending event.
     fn disconnect(&self);
 }
 
-/// A slot connected to an input, in connection order.
+/// A slot connected to an input.
 #[cfg(any(feature = "std", feature = "critical-section"))]
 #[derive(Clone, Copy)]
 pub(crate) struct Connection {
     pub(crate) input: Token,
     pub(crate) slot: &'static dyn Drain,
+    /// Higher drains first.
+    pub(crate) priority: u8,
+    /// The serial of the last pump that drained it, so that it drains
+    /// once per pump.
+    pub(crate) drained: u64,
 }
 
 /// The graph's side of the edge. It lives in the build context, since
@@ -131,9 +137,13 @@ pub(crate) struct Connection {
 pub(crate) struct Edge {
     /// The waker the driver registered; a slot connected later gets it too.
     pub(crate) waker: Option<Waker>,
-    /// The connected slots, in connection order.
+    /// The connected slots in the order the pump drains them: higher
+    /// priority first, and connection order among equals.
     #[cfg(any(feature = "std", feature = "critical-section"))]
     pub(crate) slots: Vec<Connection>,
+    /// The serial of the pump running now, or of the last one.
+    #[cfg(any(feature = "std", feature = "critical-section"))]
+    pub(crate) pumps: u64,
     /// The queue every `RemoteIo` of this graph shares. Made with the graph,
     /// so `Runtime::remote_io` takes `&self`.
     #[cfg(all(
@@ -165,6 +175,8 @@ impl Edge {
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
             slots: Vec::new(),
+            #[cfg(any(feature = "std", feature = "critical-section"))]
+            pumps: 0,
             #[cfg(all(
                 target_has_atomic = "ptr",
                 any(feature = "std", feature = "critical-section")

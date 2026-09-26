@@ -333,7 +333,7 @@ pub trait EngineMode: bough::Mode {
         node: S,
         f: ConstructFn<Self, B>,
     ) -> Stream<B>;
-    /// `b.connect(input, slot)`.
+    /// `b.connect(input, slot, 0)`.
     fn connect(b: &mut Build<Self>, input: bough::Input<i64>, slot: &'static InputSlot<i64>);
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
@@ -509,7 +509,7 @@ macro_rules! engine_mode {
                 input: bough::Input<i64>,
                 slot: &'static InputSlot<i64>,
             ) {
-                b.connect(input, slot)
+                b.connect(input, slot, 0)
             }
             fn map_cell<A: 'static, B: Send + 'static>(
                 b: &mut Build<Self>,

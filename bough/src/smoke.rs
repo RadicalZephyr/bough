@@ -283,7 +283,7 @@ macro_rules! smoke_edge {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
             let (mut graph, edge) = $build(|b| {
                 let (presses, presses_in) = b.input::<u32>();
-                b.connect(presses_in, &PRESSES);
+                b.connect(presses_in, &PRESSES, 0);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
             });
             let (presses_in, total) = edge.keep();

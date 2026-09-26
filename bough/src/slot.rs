@@ -13,7 +13,7 @@ use crate::engine::edge::{Drain, Lock};
 /// with the slot's fold, pending on the left, so the slot never grows and a
 /// write never allocates; a burst of writes between two pumps becomes one
 /// event. The driver's [`pump`](crate::Runtime::pump) runs each pending slot
-/// as one transaction of its own, in connection order, so two slots are
+/// as one transaction of its own, higher priority first, so two slots are
 /// never simultaneous: simultaneity means one external cause, which a
 /// tuple input or a remote transaction declares, never the timing of a
 /// drain.
@@ -40,7 +40,7 @@ use crate::engine::edge::{Drain, Lock};
 ///
 /// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (presses, presses_in) = b.input::<u32>();
-///     b.connect(presses_in, &PRESSES);
+///     b.connect(presses_in, &PRESSES, 0);
 ///     presses.accumulate(b, 0u32, |n, total| total + n)
 /// });
 /// let total = edge.keep();
@@ -142,11 +142,12 @@ impl<A: Send + 'static> Drain for InputSlot<A> {
         old.is_ok()
     }
 
-    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) {
-        if let Some(event) = self.state.with(|s| s.event.take()) {
-            let mut event = Some(event);
-            fire(&mut event);
-        }
+    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) -> bool {
+        let Some(event) = self.state.with(|s| s.event.take()) else {
+            return false;
+        };
+        fire(&mut Some(event));
+        true
     }
 
     fn set_waker(&self, waker: Option<Waker>) {

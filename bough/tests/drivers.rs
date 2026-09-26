@@ -146,7 +146,7 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
         let (mut graph, edge) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
-            b.connect(ticks_in, &TICKS);
+            b.connect(ticks_in, &TICKS, 0);
             let total = numbers.or_else(b, ticks).accumulate(b, 0u32, |n, t| t + n);
             (numbers_in, total)
         });
@@ -234,7 +234,7 @@ fn integrations_share_one_graph_through_remotes() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<(char, u32)>();
         let (sensor, sensor_in) = b.input::<Vec<(char, u32)>>();
-        b.connect(sensor_in, &SENSOR);
+        b.connect(sensor_in, &SENSOR, 0);
         let events = events.map(|e| vec![e]).or_else(b, sensor).node(b);
         (events_in, events)
     });

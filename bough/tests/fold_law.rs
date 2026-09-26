@@ -61,7 +61,7 @@ fn folded_runs<A: Clone>(steps: &[Step<A>], fold: fn(A, A) -> A) -> Vec<A> {
 fn delivered<A: Clone + Send + 'static>(slot: &'static InputSlot<A>, steps: &[Step<A>]) -> Vec<A> {
     let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<A>();
-        b.connect(events_in, slot);
+        b.connect(events_in, slot, 0);
         events.node(b)
     });
     let events = edge.keep();
@@ -134,7 +134,7 @@ fn runs_cut_by_timing_join_into_the_writes() {
     const WRITES: u32 = 20_000;
     let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<Vec<u32>>();
-        b.connect(events_in, &SLOT);
+        b.connect(events_in, &SLOT, 0);
         events.node(b)
     });
     let events = edge.keep();

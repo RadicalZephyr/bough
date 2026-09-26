@@ -537,9 +537,9 @@ fn slot_writes_and_pumps_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
     let (mut graph, edge) = Runtime::build(|b| {
         let (sensor, sensor_in) = b.input::<u64>();
-        b.connect(sensor_in, &SENSOR);
+        b.connect(sensor_in, &SENSOR, 0);
         let (level, level_in) = b.input::<u64>();
-        b.connect(level_in, &LEVEL);
+        b.connect(level_in, &LEVEL, 0);
         sensor
             .merge(b, level, |s, l| s + l)
             .accumulate(b, 0u64, |n, t| t + n)

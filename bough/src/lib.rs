@@ -41,7 +41,7 @@
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
-//! own, in connection order; two handles queue calls, an [`Io`] on the
+//! own, higher priority first; two handles queue calls, an [`Io`] on the
 //! runtime's thread for I/O code that can't hold the runtime and a
 //! [`RemoteIo`] on any thread, and `pump` then runs both handles' calls in
 //! the order they were made, a send or a transaction as one transaction;
