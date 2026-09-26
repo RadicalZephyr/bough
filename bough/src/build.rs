@@ -72,6 +72,7 @@ pub struct Build<M: Mode = Local> {
 impl<M: Mode> Build<M> {
     pub(crate) fn new() -> Self {
         let graph_id = next_graph_id();
+        let released = Released::new();
         Build {
             graph_id,
             store: Store::new(),
@@ -79,9 +80,9 @@ impl<M: Mode> Build<M> {
             in_tx: false,
             s: Sched::default(),
             edge: Edge::new(graph_id),
-            io: M::IoQueue::new(),
+            io: M::IoQueue::new(&released),
             anchors: Vec::new(),
-            released: Released::new(),
+            released,
         }
     }
 

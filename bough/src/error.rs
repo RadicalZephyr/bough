@@ -71,24 +71,24 @@ pub enum IoError {
 
 /// Failure modes of [`Runtime::try_pump`](crate::Runtime::try_pump).
 ///
-/// Whether an input is collected or coalesces is graph knowledge, so a
-/// send inside a queued unit, or a slot connected to an input since
-/// collected, can only fail when the driver pumps. The offending unit or
-/// slot is dropped whole and the error returned; the rest stay pending for
-/// the next pump. An [`Io`](crate::Io) queues units on every target, so
+/// Whether a node is collected or an input coalesces is graph knowledge,
+/// so a queued call, or a slot connected to an input since collected, can
+/// only fail when the driver pumps. The offending call or slot is dropped
+/// whole and the error returned; the rest stay pending for the next pump. An [`Io`](crate::Io) queues units on every target, so
 /// every variant can occur everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PumpError {
     /// A previous transaction never finished: a panic escaped it.
     Poisoned,
     /// A queued unit sends to an input that was collected before the driver
-    /// pumped, or a slot with a pending event is connected to one.
+    /// pumped, a queued registration names a collected node, or a slot
+    /// with a pending event is connected to a collected input.
     Stale,
     /// A queued unit sent twice to a non-coalescing input.
     DoubleSend,
-    /// A queued unit sent with a token from another graph. A unit's
-    /// closure runs on the driver, so this is found there; only a single
-    /// remote send is checked when it is queued.
+    /// A queued unit or registration named a token from another graph. A
+    /// queued call runs on the driver, so this is found there; only a
+    /// single remote send is checked when it is queued.
     ForeignGraph,
 }
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Input, Io, IoError, PumpError, Runtime, SendError, Source, Stream};
+use bough::{Input, Io, IoError, PumpError, Runtime, SendError, Source, Stream, TokenError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -111,6 +111,161 @@ fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
     assert_eq!(*graph.sample(second), 0, "made after the pump began");
     graph.pump();
     assert_eq!(*graph.sample(second), 7);
+}
+
+/// Test 2: a send, a listen, then a send. The listener hears only the
+/// second send.
+#[test]
+fn calls_run_in_the_order_they_were_made() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    io.send(numbers_in, 1).unwrap();
+    io.listen(numbers, move |n| sink.borrow_mut().push(n))
+        .unwrap()
+        .keep();
+    io.send(numbers_in, 2).unwrap();
+    graph.send(numbers_in, 3);
+    assert!(
+        heard.borrow().is_empty(),
+        "nothing registered before the pump"
+    );
+    graph.pump();
+    assert_eq!(*heard.borrow(), [2]);
+    graph.send(numbers_in, 4);
+    assert_eq!(*heard.borrow(), [2, 4], "kept, the listener stays");
+}
+
+/// Test 4: dropping a guard before the pump cancels its registration. The
+/// call's closure is dropped at the pump without running, a cancelled
+/// anchor roots nothing, and a cancelled call's stale token is never
+/// looked up.
+#[test]
+fn dropping_a_guard_before_the_pump_cancels_its_registration() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        (numbers_in, numbers, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, numbers, latest) = *edge;
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    let listener = io
+        .listen(numbers, move |n| sink.borrow_mut().push(n))
+        .unwrap();
+    let anchored = io.anchor(latest).unwrap();
+    drop(listener);
+    drop(anchored);
+    graph.pump();
+    assert_eq!(
+        Rc::strong_count(&heard),
+        1,
+        "the listener's closure is gone"
+    );
+    graph.send(numbers_in, 1);
+    assert!(heard.borrow().is_empty(), "the registration never ran");
+    let _kept = graph.anchor(numbers_in);
+    drop(edge);
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
+
+    drop(io.anchor(latest).unwrap());
+    drop(io.listen_steps(latest, |_| ()).unwrap());
+    assert_eq!(graph.try_pump(), Ok(()), "a cancelled call never fails");
+}
+
+/// `listen_cell`'s first call runs at the pump, with the value then;
+/// `listen_steps` makes none.
+#[test]
+fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = edge.keep();
+    let io = graph.io();
+    let cells = Rc::new(RefCell::new(Vec::new()));
+    let steps = Rc::new(RefCell::new(Vec::new()));
+    let (cell_sink, step_sink) = (cells.clone(), steps.clone());
+    io.listen_cell(latest, move |n| cell_sink.borrow_mut().push(*n))
+        .unwrap()
+        .keep();
+    io.listen_steps(latest, move |n| step_sink.borrow_mut().push(*n))
+        .unwrap()
+        .keep();
+    graph.send(numbers_in, 5);
+    assert!(cells.borrow().is_empty(), "nothing fires before the pump");
+    graph.pump();
+    assert_eq!(*cells.borrow(), [5], "the value at the pump");
+    assert!(steps.borrow().is_empty());
+    graph.send(numbers_in, 6);
+    assert_eq!(*cells.borrow(), [5, 6]);
+    assert_eq!(*steps.borrow(), [6]);
+}
+
+/// An anchor an `Io` asked for roots its value from the pump on, and the
+/// `Anchored` it handed out carries the value from the start.
+#[test]
+fn a_queued_anchor_roots_its_value_from_the_pump_on() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = *edge;
+    let io = graph.io();
+    let kept = io.anchor((numbers_in, latest)).unwrap();
+    assert_eq!(*kept, (numbers_in, latest));
+    graph.pump();
+    drop(edge);
+    graph.collect_garbage();
+    graph.send(kept.0, 3);
+    assert_eq!(*graph.sample(kept.1), 3, "the Io's anchor kept both");
+    drop(kept);
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
+}
+
+/// A registration that names a collected node is found at the pump, as a
+/// send to a collected input is: `try_pump` returns it and anchors
+/// nothing, and `pump` panics in a debug build, naming what was asked
+/// for, where a release build counts it.
+#[test]
+fn a_queued_registration_with_a_stale_token_is_found_at_the_pump() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        (numbers_in, numbers, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, numbers, latest) = *edge;
+    let _input = graph.anchor(numbers_in);
+    let shared = graph.anchor(numbers);
+    drop(edge);
+    graph.collect_garbage();
+    let io = graph.io();
+
+    let _anchored = io.anchor((numbers, latest)).unwrap();
+    drop(shared);
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
+    graph.collect_garbage();
+    assert_eq!(
+        graph.try_listen(numbers, |_| ()).err(),
+        Some(TokenError::Stale),
+        "the anchor that failed rooted nothing"
+    );
+    let _listener = io.listen_steps(latest, |_| ()).unwrap();
+    if cfg!(debug_assertions) {
+        let text = panic_text(catch_unwind(AssertUnwindSafe(|| graph.pump())));
+        assert!(text.contains("a listener on a collected node"), "{text}");
+    } else {
+        graph.pump();
+        assert_eq!(graph.stale_operations(), 1);
+    }
 }
 
 /// Test 5.

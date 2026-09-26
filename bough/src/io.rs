@@ -13,12 +13,16 @@ use alloc::rc::{Rc, Weak};
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
 
+use crate::cell::CellRef;
 use crate::error::IoError;
+use crate::guard::{Liveness, Released};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Local, Mode};
-use crate::runtime::{IoTransaction, Runtime, Stop};
+use crate::runtime::{Anchor, Anchored, IoTransaction, Listener, Runtime, Stop};
+use crate::source::Node;
 use crate::token::Input;
+use crate::trace::{Trace, Tracer};
 
 /// A call a handle queued. The pump runs it with the runtime, and says
 /// whether a stale token is skipped, as in the panicking pump's release
@@ -29,8 +33,8 @@ pub(crate) type Call<M> = Box<dyn FnOnce(&mut Runtime<M>, bool) -> Result<(), St
 /// share in `Local`, and nothing in `Threaded`, which has no `Io`.
 #[doc(hidden)]
 pub trait IoQueue<M: Mode>: 'static {
-    /// An empty queue.
-    fn new() -> Self;
+    /// An empty queue, whose guards count their releases on `released`.
+    fn new(released: &Released) -> Self;
     /// Graph code starts or stops running. A call is refused while it
     /// runs.
     fn graph_code(&self, running: bool);
@@ -58,6 +62,9 @@ pub struct IoState {
     waker: Cell<Option<Waker>>,
     /// A call has woken the driver since the last pump began.
     woken: Cell<bool>,
+    /// The runtime's count of released guards, which a guard made here
+    /// shares.
+    released: Released,
 }
 
 impl IoState {
@@ -79,13 +86,14 @@ impl IoState {
 }
 
 impl IoQueue<Local> for Rc<IoState> {
-    fn new() -> Self {
+    fn new(released: &Released) -> Self {
         Rc::new(IoState {
             calls: RefCell::new(VecDeque::new()),
             graph_code: Cell::new(false),
             poisoned: Cell::new(false),
             waker: Cell::new(None),
             woken: Cell::new(false),
+            released: released.clone(),
         })
     }
 
@@ -121,7 +129,7 @@ pub struct NoIo;
 
 #[cfg(target_has_atomic = "ptr")]
 impl IoQueue<Threaded> for NoIo {
-    fn new() -> Self {
+    fn new(_: &Released) -> Self {
         NoIo
     }
     #[inline]
@@ -147,7 +155,9 @@ impl IoQueue<Threaded> for NoIo {
 /// units, in the order they were made, taking only those made before it
 /// began. So a call a listener makes during a pump waits for the next
 /// one, and a listener that always sends can't keep a pump from
-/// returning.
+/// returning. A [`Listener`] or an [`Anchored`] comes back at once, and
+/// its registration waits like any call; dropping it first cancels the
+/// registration.
 ///
 /// ```
 /// use bough::{Runtime, Source};
@@ -211,13 +221,81 @@ impl Io {
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
     {
-        self.queue(Box::new(move |runtime, skip_stale| {
-            runtime.run_unit(skip_stale, f)
-        }))
+        let state = self.state()?;
+        push(
+            &state,
+            Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
+        );
+        Ok(())
     }
 
-    /// Queues `call`, and wakes the driver.
-    fn queue(&self, call: Call<Local>) -> Result<(), IoError> {
+    /// Listens to a materialized node, as [`Runtime::listen`] does, from the
+    /// next pump. The [`Listener`] comes back now, and dropping it before
+    /// that pump cancels the registration.
+    ///
+    /// A listener misses what ran before its registration: the
+    /// transactions before the pump, and those the pump ran before it. A
+    /// stale or foreign token is found at the pump, as for
+    /// [`send`](Io::send).
+    pub fn listen<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
+    {
+        let flag = self.register(move |runtime, skip_stale, flag| {
+            runtime.listen_queued(skip_stale, flag, source, f)
+        })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Listens to a cell, as [`Runtime::listen_cell`] does, from the next
+    /// pump: the first call, with the current value, runs at the pump.
+    /// The [`Listener`] comes back now, and dropping it before that pump
+    /// cancels the registration.
+    pub fn listen_cell<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        let flag = self.register(move |runtime, skip_stale, flag| {
+            runtime.listen_cell_queued(skip_stale, flag, cell, f)
+        })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Listens to a cell's steps, as [`Runtime::listen_steps`] does, from
+    /// the next pump. The [`Listener`] comes back now, and dropping it
+    /// before that pump cancels the registration.
+    pub fn listen_steps<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+    {
+        let flag = self.register(move |runtime, skip_stale, flag| {
+            runtime.listen_steps_queued(skip_stale, flag, cell, f)
+        })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Anchors what `value` holds, as [`Runtime::anchor`] does, from the
+    /// next pump. The [`Anchored`] comes back now, carrying the value, and
+    /// dropping it before that pump cancels the anchor. A stale or foreign
+    /// token is found at the pump, as for [`send`](Io::send).
+    pub fn anchor<T: Trace>(&self, value: T) -> Result<Anchored<T>, IoError> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let tokens = tracer.visited;
+        let flag = self.register(move |runtime, skip_stale, flag| {
+            runtime.anchor_queued(skip_stale, flag, tokens)
+        })?;
+        Ok(Anchored::new(value, Anchor::new(Some(flag))))
+    }
+
+    /// The state the handle shares with its runtime, if the runtime takes
+    /// calls: it hasn't dropped, isn't poisoned, and isn't running graph
+    /// code.
+    fn state(&self) -> Result<Rc<IoState>, IoError> {
         let state = self.0.upgrade().ok_or(IoError::Gone)?;
         if state.poisoned.get() {
             return Err(IoError::Poisoned);
@@ -225,8 +303,28 @@ impl Io {
         if state.graph_code.get() {
             return Err(IoError::FromGraphCode);
         }
-        state.calls.borrow_mut().push_back(call);
-        state.wake();
-        Ok(())
+        Ok(state)
     }
+
+    /// Makes the liveness a guard shares with its registration, and queues
+    /// the registration, which the pump skips if the guard has gone.
+    fn register(
+        &self,
+        register: impl FnOnce(&mut Runtime<Local>, bool, Liveness) -> Result<(), Stop> + 'static,
+    ) -> Result<Liveness, IoError> {
+        let state = self.state()?;
+        let flag = Liveness::new(&state.released);
+        let shared = flag.clone();
+        push(
+            &state,
+            Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
+        );
+        Ok(flag)
+    }
+}
+
+/// Queues `call`, and wakes the driver.
+fn push(state: &IoState, call: Call<Local>) {
+    state.calls.borrow_mut().push_back(call);
+    state.wake();
 }

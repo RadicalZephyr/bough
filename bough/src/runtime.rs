@@ -539,6 +539,125 @@ impl<M: Mode> Runtime<M> {
         store.hot[i as usize].flags |= LISTENERS;
     }
 
+    /// The node a call an `Io` queued names, looked up at the pump. A
+    /// foreign token stops the pump, and so does a stale one, unless
+    /// `skip_stale`, which counts it and skips the call.
+    fn queued_lookup(
+        &mut self,
+        skip_stale: bool,
+        token: Token,
+        what: &'static str,
+    ) -> Result<Option<u32>, Stop> {
+        match self.build.lookup(token) {
+            Ok(i) => Ok(Some(i)),
+            Err(TokenFault::Foreign) => Err((PumpError::ForeignGraph, what)),
+            Err(TokenFault::Stale) if skip_stale => {
+                self.stale_operations += 1;
+                Ok(None)
+            }
+            Err(TokenFault::Stale) => Err((PumpError::Stale, what)),
+        }
+    }
+
+    /// [`listen`](Runtime::listen), as an `Io` asked for it, at the pump:
+    /// the entry shares the liveness of the guard the `Io` handed out, and
+    /// isn't made if that guard has gone.
+    pub(crate) fn listen_queued<S, F>(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        source: S,
+        f: F,
+    ) -> Result<(), Stop>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnMut(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        if let Some(i) = self.queued_lookup(skip_stale, source.node_token(), LISTEN)? {
+            self.attach_flag(i, f, call_stream::<M, S, F>, flag);
+        }
+        Ok(())
+    }
+
+    /// [`listen_cell`](Runtime::listen_cell), as an `Io` asked for it, at
+    /// the pump, as [`listen_queued`](Runtime::listen_queued) says. The
+    /// first call runs here, with the value at the pump.
+    pub(crate) fn listen_cell_queued<C, F>(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        cell: C,
+        mut f: F,
+    ) -> Result<(), Stop>
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+        M: Accepts<F>,
+    {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        if let Some(i) = self.queued_lookup(skip_stale, cell.token(), LISTEN)? {
+            f(self.build.value::<C::Value>(i));
+            self.attach_flag(i, f, call_cell::<M, C::Value, F>, flag);
+        }
+        Ok(())
+    }
+
+    /// [`listen_steps`](Runtime::listen_steps), as an `Io` asked for it, at
+    /// the pump, as [`listen_queued`](Runtime::listen_queued) says.
+    pub(crate) fn listen_steps_queued<C, F>(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        cell: C,
+        f: F,
+    ) -> Result<(), Stop>
+    where
+        C: CellRef,
+        F: FnMut(&C::Value) + 'static,
+        M: Accepts<F>,
+    {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        if let Some(i) = self.queued_lookup(skip_stale, cell.token(), LISTEN)? {
+            self.attach_flag(i, f, call_cell::<M, C::Value, F>, flag);
+        }
+        Ok(())
+    }
+
+    /// [`anchor`](Runtime::anchor), as an `Io` asked for it, at the pump,
+    /// for the tokens its value's [`Trace`] found when it was asked for.
+    /// Every token is checked before any is rooted, so a token that stops
+    /// the pump anchors nothing; a stale one that `skip_stale` skips leaves
+    /// the rest rooted, as a release build's `anchor` does.
+    pub(crate) fn anchor_queued(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        tokens: Vec<Token>,
+    ) -> Result<(), Stop> {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        let mut nodes = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            if let Some(i) = self.queued_lookup(skip_stale, token, ANCHOR)? {
+                nodes.push(i);
+            }
+        }
+        for i in nodes {
+            self.build.anchors.push((i, flag.clone()));
+        }
+        Ok(())
+    }
+
     /// Anchors what I/O code wants to hold without listening to it: one of
     /// the two kinds of root. `value` is a token, or any value that holds
     /// tokens, such as the tuple or struct of tokens a
@@ -1040,7 +1159,7 @@ pub struct Listener {
 }
 
 impl Listener {
-    fn new(alive: Option<Liveness>) -> Self {
+    pub(crate) fn new(alive: Option<Liveness>) -> Self {
         Listener { alive }
     }
 
