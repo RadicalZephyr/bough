@@ -12,7 +12,7 @@ use crate::engine::edge::{Connection, Drain};
 use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
-use crate::guard::{Liveness, Released};
+use crate::guard::{Liveness, Released, Stamps};
 use crate::io::IoQueue;
 use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::runtime::{Anchor, Anchored};
@@ -67,22 +67,26 @@ pub struct Build<M: Mode = Local> {
     /// The count of released guards, which every guard's state shares, so
     /// that a release needs no graph access.
     pub(crate) released: Released,
+    /// What every call a handle queues takes its stamp from.
+    pub(crate) stamps: Stamps,
 }
 
 impl<M: Mode> Build<M> {
     pub(crate) fn new() -> Self {
         let graph_id = next_graph_id();
         let released = Released::new();
+        let stamps = Stamps::new();
         Build {
             graph_id,
             store: Store::new(),
             tx: 0,
             in_tx: false,
             s: Sched::default(),
-            edge: Edge::new(graph_id, &released),
-            io: M::IoQueue::new(graph_id, &released),
+            edge: Edge::new(graph_id, &released, &stamps),
+            io: M::IoQueue::new(graph_id, &released, &stamps),
             anchors: Vec::new(),
             released,
+            stamps,
         }
     }
 

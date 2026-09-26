@@ -46,6 +46,11 @@ mod count {
         pub(super) fn decrement(&self) -> bool {
             self.0.fetch_sub(1, Relaxed) == 1
         }
+        /// Adds one, wrapping, and returns what it was.
+        #[inline]
+        pub(super) fn take(&self) -> usize {
+            self.0.fetch_add(1, Relaxed)
+        }
     }
 }
 
@@ -77,6 +82,13 @@ mod count {
             self.0.set(n);
             n == 0
         }
+        /// Adds one, wrapping, and returns what it was.
+        #[inline]
+        pub(super) fn take(&self) -> usize {
+            let n = self.0.get();
+            self.0.set(n.wrapping_add(1));
+            n
+        }
     }
 }
 
@@ -98,6 +110,40 @@ impl Released {
     pub(crate) fn count(&self) -> usize {
         self.0.get()
     }
+}
+
+/// The counter every call a handle queues takes its stamp from, so that a
+/// pump runs both handles' calls in the order they were made. It only
+/// grows, and wraps. A remote call takes its stamp under the inbox's lock,
+/// so the inbox is in stamp order too.
+#[derive(Clone)]
+pub(crate) struct Stamps(Ptr<Count>);
+
+impl Stamps {
+    pub(crate) fn new() -> Self {
+        Stamps(Ptr::new(Count::new(0)))
+    }
+
+    /// The next stamp.
+    #[inline]
+    pub(crate) fn take(&self) -> usize {
+        self.0.take()
+    }
+
+    /// The stamp the next call will take: a pump runs the calls stamped
+    /// before it.
+    #[inline]
+    pub(crate) fn next(&self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Whether stamp `a` was taken before stamp `b`: then `a - b`, wrapping,
+/// lands in the top half of the range. Stamps wrap, so this holds while
+/// fewer than half the counter's range of calls wait.
+#[inline]
+pub(crate) fn before(a: usize, b: usize) -> bool {
+    a.wrapping_sub(b) > usize::MAX / 2
 }
 
 /// A guard's state: the count of its owners, and its runtime's count of
@@ -142,5 +188,21 @@ impl Liveness {
         if self.0.owners.decrement() {
             self.0.released.0.increment();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::before;
+
+    /// A stamp taken before another compares before it, across a wrap too.
+    #[test]
+    fn a_stamp_is_before_a_later_one_across_a_wrap() {
+        assert!(before(1, 2));
+        assert!(!before(2, 1));
+        assert!(!before(5, 5));
+        assert!(before(usize::MAX, 0), "the stamp before the wrap");
+        assert!(!before(0, usize::MAX));
+        assert!(before(usize::MAX - 3, 3));
     }
 }

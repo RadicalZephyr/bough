@@ -1,6 +1,6 @@
 //! The I/O edge's engine side (RFD 6, RFD 7): the lock the edge's shared
 //! state lives behind, the input slots connected to the graph, the inbox of
-//! remote units, and the waker the driver registered.
+//! remote calls, and the waker the driver registered.
 //!
 //! A slot and the inbox are shared between the code that writes them, an
 //! interrupt handler or another thread, and the driver, so their state
@@ -42,7 +42,7 @@ use core::task::Waker;
 use super::DoubleSend;
 use super::TokenFault;
 use crate::build::Build;
-use crate::guard::Released;
+use crate::guard::{Released, Stamps};
 use crate::io::IoQueue;
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -159,8 +159,8 @@ impl Edge {
         self.inbox.running.store(0, Ordering::Relaxed);
     }
 
-    pub(crate) fn new(graph: u32, released: &Released) -> Self {
-        let _ = (graph, released);
+    pub(crate) fn new(graph: u32, released: &Released, stamps: &Stamps) -> Self {
+        let _ = (graph, released, stamps);
         Edge {
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -169,7 +169,7 @@ impl Edge {
                 target_has_atomic = "ptr",
                 any(feature = "std", feature = "critical-section")
             ))]
-            inbox: Arc::new(Inbox::new(graph, released)),
+            inbox: Arc::new(Inbox::new(graph, released, stamps)),
         }
     }
 }
@@ -235,6 +235,8 @@ pub(crate) struct Inbox {
     /// The graph's count of released guards, which a guard a `RemoteIo`
     /// makes shares.
     pub(crate) released: Released,
+    /// What a call takes its stamp from, shared with the `Io`s' queue.
+    stamps: Stamps,
     state: Lock<Queue>,
 }
 
@@ -255,10 +257,13 @@ fn thread_token() -> usize {
     any(feature = "std", feature = "critical-section")
 ))]
 struct Queue {
-    /// Calls in arrival order: the total order the semantics need.
+    /// Calls in arrival order, which is stamp order: a call takes its stamp
+    /// under the lock.
     calls: VecDeque<Waiting<RemoteCall>>,
     /// What a push wakes.
     waker: Option<Waker>,
+    /// A call has woken the driver since the last pump began.
+    woken: bool,
 }
 
 #[cfg(all(
@@ -266,7 +271,7 @@ struct Queue {
     any(feature = "std", feature = "critical-section")
 ))]
 impl Inbox {
-    fn new(graph: u32, released: &Released) -> Self {
+    fn new(graph: u32, released: &Released, stamps: &Stamps) -> Self {
         Inbox {
             graph,
             poisoned: AtomicBool::new(false),
@@ -274,22 +279,30 @@ impl Inbox {
             #[cfg(feature = "std")]
             running: AtomicUsize::new(0),
             released: released.clone(),
+            stamps: stamps.clone(),
             state: Lock::new(Queue {
                 calls: VecDeque::new(),
                 waker: None,
+                woken: false,
             }),
         }
     }
 
-    /// Queues a call and wakes the driver, after the lock is released.
-    /// Gives the call back if the graph was dropped, to be dropped outside
-    /// the lock, since its captures' `Drop` is user code.
-    pub(crate) fn push(&self, waiting: Waiting<RemoteCall>) -> Result<(), Waiting<RemoteCall>> {
+    /// Stamps a call and queues it, and wakes the driver after the lock is
+    /// released, unless a call has since the last pump began. Gives the call
+    /// back if the graph was dropped, to be dropped outside the lock, since
+    /// its captures' `Drop` is user code.
+    pub(crate) fn push(&self, mut waiting: Waiting<RemoteCall>) -> Result<(), Waiting<RemoteCall>> {
         let waker = self.state.with(|q| {
             if self.closed.load(Ordering::Relaxed) {
                 return Err(waiting);
             }
+            waiting.stamp = self.stamps.take();
             q.calls.push_back(waiting);
+            if q.woken || q.waker.is_none() {
+                return Ok(None);
+            }
+            q.woken = true;
             Ok(q.waker.clone())
         })?;
         if let Some(waker) = waker {
@@ -298,17 +311,29 @@ impl Inbox {
         Ok(())
     }
 
+    /// A pump begins: the next call wakes the driver again, and the pump
+    /// runs the calls stamped before the stamp `stamps` would give now.
+    /// Both happen under the lock a call stamps and wakes under, so a call
+    /// either is stamped in time to run or finds the wake still to make.
+    pub(crate) fn begin_pump(&self, stamps: &Stamps) -> usize {
+        self.state.with(|q| {
+            q.woken = false;
+            stamps.next()
+        })
+    }
+
+    /// The stamp of the oldest call.
+    pub(crate) fn front(&self) -> Option<usize> {
+        self.state
+            .with(|q| q.calls.front().map(|waiting| waiting.stamp))
+    }
+
     /// The oldest call. The lock is released before it runs, so a
     /// transaction never runs under it.
     pub(crate) fn pop(&self) -> Option<RemoteCall> {
         self.state
             .with(|q| q.calls.pop_front())
             .map(|waiting| waiting.call)
-    }
-
-    /// The calls queued now.
-    pub(crate) fn len(&self) -> usize {
-        self.state.with(|q| q.calls.len())
     }
 
     /// Adds to `roots` the tokens the waiting calls name, but none of a
@@ -321,9 +346,12 @@ impl Inbox {
         });
     }
 
-    /// Replaces the waker a push wakes.
+    /// Replaces the waker a push wakes. The next call wakes the new one.
     pub(crate) fn set_waker(&self, waker: Waker) {
-        let old = self.state.with(|q| q.waker.replace(waker));
+        let old = self.state.with(|q| {
+            q.woken = false;
+            q.waker.replace(waker)
+        });
         drop(old);
     }
 

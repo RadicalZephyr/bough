@@ -299,8 +299,11 @@ impl Wake for Counter {
     }
 }
 
+/// A remote call wakes the waker the driver registered, unless another
+/// has since the last pump began: one wake per burst. A call made before
+/// any waker was registered wakes nothing.
 #[test]
-fn a_remote_send_wakes_the_waker_the_driver_registered() {
+fn a_remote_call_wakes_the_driver_once_per_burst() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
@@ -309,13 +312,87 @@ fn a_remote_send_wakes_the_waker_the_driver_registered() {
     let remote = graph.remote_io();
     remote.send(numbers_in, 1).unwrap();
     let counter = Arc::new(Counter::default());
+    let wakes = || counter.0.load(Ordering::SeqCst);
     graph.set_waker(Waker::from(counter.clone()));
-    assert_eq!(counter.0.load(Ordering::SeqCst), 0, "no waker then");
+    assert_eq!(wakes(), 0, "no waker then");
     remote.send(numbers_in, 2).unwrap();
     remote
         .transaction(move |tx| tx.send(numbers_in, 3))
         .unwrap();
-    assert_eq!(counter.0.load(Ordering::SeqCst), 2);
+    assert_eq!(wakes(), 1, "one burst, one wake");
+    graph.pump();
+    let other = remote.clone();
+    thread::spawn(move || other.send(numbers_in, 4).unwrap())
+        .join()
+        .unwrap();
+    remote.send(numbers_in, 5).unwrap();
+    assert_eq!(wakes(), 2, "the pump let the next call wake");
+    let replacement = Arc::new(Counter::default());
+    graph.set_waker(Waker::from(replacement.clone()));
+    remote.send(numbers_in, 6).unwrap();
+    assert_eq!(
+        replacement.0.load(Ordering::SeqCst),
+        1,
+        "a new waker gets the next call's wake"
+    );
+}
+
+/// Both handles' calls run in one order, the order they were made, however
+/// they interleave: here an `Io` send, a remote send from a thread joined
+/// before the next call, a remote listener, and an `Io` send, which the
+/// listener registered before it hears.
+#[test]
+fn calls_through_both_handles_run_in_the_order_they_were_made() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    graph
+        .listen(numbers, move |n| sink.borrow_mut().push(n))
+        .keep();
+    let io = graph.io();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    io.send(numbers_in, 1).unwrap();
+    let listener = thread::spawn(move || {
+        remote.send(numbers_in, 2).unwrap();
+        remote
+            .listen(numbers, move |n| heard.send(n).unwrap())
+            .unwrap()
+    })
+    .join()
+    .unwrap();
+    io.send(numbers_in, 3).unwrap();
+    graph.pump();
+    assert_eq!(*seen.borrow(), [1, 2, 3]);
+    assert_eq!(hearing.try_iter().collect::<Vec<_>>(), [3]);
+    drop(listener);
+}
+
+/// A remote call made after the pump began waits for the next pump, even
+/// one a slot's listener makes before the pump reaches the calls.
+#[test]
+fn a_remote_call_made_after_the_pump_began_waits_for_the_next_pump() {
+    static TICKS: InputSlot<u32> = InputSlot::keep_latest();
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (ticks, ticks_in) = b.input::<u32>();
+        b.connect(ticks_in, &TICKS);
+        let (echoes, echoes_in) = b.input::<u32>();
+        (ticks, echoes_in, echoes.hold(b, 0u32))
+    });
+    let (ticks, echoes_in, echoes) = edge.keep();
+    let remote = graph.remote_io();
+    graph
+        .listen(ticks, move |t| remote.send(echoes_in, t).unwrap())
+        .keep();
+    TICKS.send(7);
+    graph.pump();
+    assert_eq!(*graph.sample(echoes), 0, "made after the pump began");
+    graph.pump();
+    assert_eq!(*graph.sample(echoes), 7);
 }
 
 /// A double send inside a unit is an error in both builds: `try_pump`

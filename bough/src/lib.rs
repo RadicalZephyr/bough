@@ -41,13 +41,12 @@
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
-//! own, in connection order; a [`RemoteIo`] queues a send, or a remote
-//! transaction's sends, as one unit from any thread, and `pump` then runs
-//! each unit as one transaction, in arrival order; an [`Io`], the handle
-//! for I/O code on the runtime's thread that can't hold the runtime,
-//! queues its calls, and `pump` runs them last, in the order they were
-//! made; a write or a call through either handle wakes the waker the
-//! driver registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
+//! own, in connection order; two handles queue calls, an [`Io`] on the
+//! runtime's thread for I/O code that can't hold the runtime and a
+//! [`RemoteIo`] on any thread, and `pump` then runs both handles' calls in
+//! the order they were made, a send or a transaction as one transaction;
+//! a write or a call through either handle wakes the waker the driver
+//! registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
 //! any more. The examples in the documentation run, and the guarantees the
 //! RFDs make are fixed by `compile_fail` doc tests.
 //!

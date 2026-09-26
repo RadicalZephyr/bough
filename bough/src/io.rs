@@ -4,8 +4,9 @@
 //! A GTK signal handler, a DOM closure or a listener is `'static`, and
 //! can't hold `&mut Runtime`. So it holds an `Io`, which reaches the
 //! runtime only through a queue the two share. The pump runs the queue
-//! after the input slots and the remote units, taking only the calls made
-//! before it began, in the order they were made.
+//! after the input slots, merged with a `RemoteIo`'s by the stamp every
+//! call takes, so both handles' calls run in the order they were made. It
+//! takes only the calls made before it began.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -17,7 +18,7 @@ use core::task::Waker;
 
 use crate::cell::CellRef;
 use crate::error::IoError;
-use crate::guard::{Liveness, Released};
+use crate::guard::{Liveness, Released, Stamps};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Local, Mode};
@@ -60,9 +61,22 @@ pub(crate) struct Waiting<C> {
     /// A registration's guard. Once the guard has gone, the call keeps
     /// nothing alive, and the pump skips it.
     pub(crate) guard: Option<Liveness>,
+    /// When the call was made, among both handles' calls. Taken as the call
+    /// is queued.
+    pub(crate) stamp: usize,
 }
 
 impl<C> Waiting<C> {
+    /// A call not yet stamped.
+    pub(crate) fn new(call: C, roots: Roots, guard: Option<Liveness>) -> Self {
+        Waiting {
+            call,
+            roots,
+            guard,
+            stamp: 0,
+        }
+    }
+
     /// Adds to `roots` the tokens this call keeps alive: none once a
     /// registration's guard has gone.
     pub(crate) fn roots(&self, roots: &mut Vec<Token>) {
@@ -77,8 +91,8 @@ impl<C> Waiting<C> {
 #[doc(hidden)]
 pub trait IoQueue<M: Mode>: 'static {
     /// An empty queue for graph `graph`, whose guards count their releases
-    /// on `released`.
-    fn new(graph: u32, released: &Released) -> Self;
+    /// on `released`, and whose calls take their stamps from `stamps`.
+    fn new(graph: u32, released: &Released, stamps: &Stamps) -> Self;
     /// Graph code starts or stops running. A call is refused while it
     /// runs.
     fn graph_code(&self, running: bool);
@@ -86,9 +100,10 @@ pub trait IoQueue<M: Mode>: 'static {
     fn poison(&self);
     /// Replaces the waker a call wakes.
     fn set_waker(&self, waker: &Waker);
-    /// A pump begins: the number of calls waiting, which it runs. The next
-    /// call wakes the driver again.
-    fn begin_pump(&self) -> usize;
+    /// A pump begins: the next call wakes the driver again.
+    fn begin_pump(&self);
+    /// The stamp of the oldest call.
+    fn front(&self) -> Option<usize>;
     /// The oldest call.
     fn pop(&self) -> Option<Call<M>>;
     /// Adds to `roots` the tokens the waiting calls name, but none of a
@@ -114,6 +129,8 @@ pub struct IoState {
     /// The runtime's count of released guards, which a guard made here
     /// shares.
     released: Released,
+    /// What a call takes its stamp from, shared with the inbox.
+    stamps: Stamps,
 }
 
 impl IoState {
@@ -135,7 +152,7 @@ impl IoState {
 }
 
 impl IoQueue<Local> for Rc<IoState> {
-    fn new(graph: u32, released: &Released) -> Self {
+    fn new(graph: u32, released: &Released, stamps: &Stamps) -> Self {
         Rc::new(IoState {
             graph,
             calls: RefCell::new(VecDeque::new()),
@@ -144,6 +161,7 @@ impl IoQueue<Local> for Rc<IoState> {
             waker: Cell::new(None),
             woken: Cell::new(false),
             released: released.clone(),
+            stamps: stamps.clone(),
         })
     }
 
@@ -162,9 +180,13 @@ impl IoQueue<Local> for Rc<IoState> {
     }
 
     #[inline]
-    fn begin_pump(&self) -> usize {
+    fn begin_pump(&self) {
         self.woken.set(false);
-        self.calls.borrow().len()
+    }
+
+    #[inline]
+    fn front(&self) -> Option<usize> {
+        self.calls.borrow().front().map(|waiting| waiting.stamp)
     }
 
     fn pop(&self) -> Option<Call<Local>> {
@@ -188,7 +210,7 @@ pub struct NoIo;
 
 #[cfg(target_has_atomic = "ptr")]
 impl IoQueue<Threaded> for NoIo {
-    fn new(_: u32, _: &Released) -> Self {
+    fn new(_: u32, _: &Released, _: &Stamps) -> Self {
         NoIo
     }
     #[inline]
@@ -196,8 +218,10 @@ impl IoQueue<Threaded> for NoIo {
     fn poison(&self) {}
     fn set_waker(&self, _: &Waker) {}
     #[inline]
-    fn begin_pump(&self) -> usize {
-        0
+    fn begin_pump(&self) {}
+    #[inline]
+    fn front(&self) -> Option<usize> {
+        None
     }
     fn pop(&self) -> Option<Call<Threaded>> {
         None
@@ -211,9 +235,9 @@ impl IoQueue<Threaded> for NoIo {
 ///
 /// Every call queues for the driver's next [`pump`](Runtime::pump) and
 /// returns at once, and nothing reads through it: only the `Runtime`
-/// reads. The pump runs the calls after the input slots and the remote
-/// units, in the order they were made, taking only those made before it
-/// began. So a call a listener makes during a pump waits for the next
+/// reads. The pump runs the calls after the input slots, in the order
+/// they were made, among a [`RemoteIo`](crate::RemoteIo)'s too, taking
+/// only those made before it began. So a call a listener makes during a pump waits for the next
 /// one, and a listener that always sends can't keep a pump from
 /// returning. A [`Listener`] or an [`Anchored`] comes back at once, and
 /// its registration waits like any call; dropping it first cancels the
@@ -237,8 +261,9 @@ impl IoQueue<Threaded> for NoIo {
 /// ```
 ///
 /// A call wakes the waker the driver registered with
-/// [`set_waker`](Runtime::set_waker), unless another call has since the
-/// last pump began: one wake is enough for every call that pump will run.
+/// [`set_waker`](Runtime::set_waker), unless another call through an `Io`
+/// has since the last pump began: one wake is enough for every call that
+/// pump will run. A `RemoteIo` keeps the same rule for its own calls.
 ///
 /// A waiting call keeps the tokens it names alive until the pump runs it,
 /// through any collection before then: a send's input, but not the value
@@ -391,11 +416,11 @@ impl Io {
         let state = self.state(roots.as_slice())?;
         push(
             &state,
-            Waiting {
-                call: Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
+            Waiting::new(
+                Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
                 roots,
-                guard: None,
-            },
+                None,
+            ),
         );
         Ok(())
     }
@@ -413,18 +438,19 @@ impl Io {
         let shared = flag.clone();
         push(
             &state,
-            Waiting {
-                call: Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
+            Waiting::new(
+                Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
                 roots,
-                guard: Some(flag.clone()),
-            },
+                Some(flag.clone()),
+            ),
         );
         Ok(flag)
     }
 }
 
-/// Queues a call, and wakes the driver.
-fn push(state: &IoState, waiting: Waiting<Call<Local>>) {
+/// Stamps a call, queues it, and wakes the driver.
+fn push(state: &IoState, mut waiting: Waiting<Call<Local>>) {
+    waiting.stamp = state.stamps.take();
     state.calls.borrow_mut().push_back(waiting);
     state.wake();
 }

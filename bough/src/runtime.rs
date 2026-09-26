@@ -33,7 +33,7 @@ use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 ))]
 use crate::error::IoError;
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
-use crate::guard::Liveness;
+use crate::guard::{Liveness, before};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -856,22 +856,21 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// Runs every pending input slot as a transaction of its own, in
-    /// connection order, then every queued remote unit as one transaction
-    /// each, in arrival order, then the calls an [`Io`] made before the pump
-    /// began, in the order they were made (RFD 6, RFD 7). Two slots are
-    /// never simultaneous; a unit is exactly as simultaneous as its sends.
+    /// connection order, then the calls both handles, an [`Io`] and a
+    /// [`RemoteIo`], made before the pump began, in the order they were
+    /// made: a send or a transaction as one transaction, and a
+    /// registration (RFD 6, RFD 7). Two slots are never simultaneous; a
+    /// unit is exactly as simultaneous as its sends.
     ///
     /// Called by the driver from wherever it sits: a thread the waker wakes,
     /// a future's `poll`, or a bare-metal main loop. Latency is the distance
     /// from a send to the next pump. A slot written while the pump runs, by
     /// a listener or by another thread, is drained now if its turn has not
-    /// come and at the next pump otherwise. The units are those queued when
-    /// the pump reaches them, and the `Io`'s calls those made before it
-    /// began; one made later, by a listener feeding back or by another
-    /// thread, waits for the next pump, whose wake it has already made, so
-    /// a listener that always sends cannot keep a pump from returning. A
-    /// collection that is due runs after each unit, as for
-    /// [`send`](Runtime::send).
+    /// come and at the next pump otherwise. A call made after the pump
+    /// began, by a listener feeding back or by another thread, waits for
+    /// the next pump, whose wake it has already made, so a listener that
+    /// always sends cannot keep a pump from returning. A collection that is
+    /// due runs after each unit, as for [`send`](Runtime::send).
     ///
     /// A unit, a remote's or an `Io`'s, runs as a transaction the driver
     /// opens, and its closure sends into it. A unit whose send fails is
@@ -911,53 +910,95 @@ impl<M: Mode> Runtime<M> {
         self.pump_all(false).map_err(|(error, _)| error)
     }
 
-    /// The slots, then the units, then the `Io`'s calls. With `skip_stale`,
-    /// the panicking pump's release build, a stale send is counted and
-    /// skipped rather than returned.
+    /// The slots, then both handles' calls, in the order they were made.
+    /// With `skip_stale`, the panicking pump's release build, a stale send
+    /// is counted and skipped rather than returned.
     fn pump_all(&mut self, skip_stale: bool) -> Result<(), Stop> {
-        // Only the calls made before the pump began.
-        let calls = self.build.io.begin_pump();
+        let limit = self.begin_pump();
         #[cfg(any(feature = "std", feature = "critical-section"))]
         self.pump_slots(skip_stale)?;
+        self.pump_calls(limit, skip_stale)
+    }
+
+    /// A pump begins: the next call through either handle wakes the driver
+    /// again. Returns the stamp the next call would take; the pump runs the
+    /// calls stamped before it. Where there is an inbox, it reads the stamp
+    /// under the lock a remote call stamps and wakes under.
+    fn begin_pump(&self) -> usize {
+        self.build.io.begin_pump();
         #[cfg(all(
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        self.pump_units(skip_stale)?;
-        self.pump_io(calls, skip_stale)
+        {
+            self.build.edge.inbox.begin_pump(&self.build.stamps)
+        }
+        #[cfg(not(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        )))]
+        {
+            self.build.stamps.next()
+        }
     }
 
-    /// The remote calls queued when the pump reached them, in arrival
-    /// order: each unit as one transaction, and each registration. A call a
-    /// listener queues runs at the next pump, so a listener that always
-    /// sends cannot keep one pump from returning.
+    /// The calls both handles made before `limit`, oldest first: a unit as
+    /// one transaction, a registration, or an `Io`'s call. A call made
+    /// during the pump, by a listener feeding back or by another thread,
+    /// waits for the next pump, so a listener that always sends cannot
+    /// keep one pump from returning.
+    fn pump_calls(&mut self, limit: usize, skip_stale: bool) -> Result<(), Stop> {
+        loop {
+            let io = self.build.io.front().filter(|&stamp| before(stamp, limit));
+            #[cfg(all(
+                target_has_atomic = "ptr",
+                any(feature = "std", feature = "critical-section")
+            ))]
+            let remote = self
+                .build
+                .edge
+                .inbox
+                .front()
+                .filter(|&stamp| before(stamp, limit));
+            #[cfg(not(all(
+                target_has_atomic = "ptr",
+                any(feature = "std", feature = "critical-section")
+            )))]
+            let remote: Option<usize> = None;
+            let io_first = match (io, remote) {
+                (None, None) => return Ok(()),
+                (Some(io), Some(remote)) => before(io, remote),
+                (io, _) => io.is_some(),
+            };
+            if io_first {
+                let call = self
+                    .build
+                    .io
+                    .pop()
+                    .expect("bough engine: the front call is there to pop");
+                call(self, skip_stale)?;
+                continue;
+            }
+            #[cfg(all(
+                target_has_atomic = "ptr",
+                any(feature = "std", feature = "critical-section")
+            ))]
+            self.pump_remote(skip_stale)?;
+        }
+    }
+
+    /// The remote call at the front of the inbox: a unit as one
+    /// transaction, or a registration.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    fn pump_units(&mut self, skip_stale: bool) -> Result<(), Stop> {
-        let queued = self.build.edge.inbox.len();
-        for _ in 0..queued {
-            match self.build.edge.inbox.pop() {
-                Some(RemoteCall::Unit(unit)) => self.run_unit(skip_stale, unit)?,
-                Some(RemoteCall::Register(registration)) => {
-                    M::register(self, registration, skip_stale)?;
-                }
-                None => break,
-            }
+    fn pump_remote(&mut self, skip_stale: bool) -> Result<(), Stop> {
+        match self.build.edge.inbox.pop() {
+            Some(RemoteCall::Unit(unit)) => self.run_unit(skip_stale, unit),
+            Some(RemoteCall::Register(registration)) => M::register(self, registration, skip_stale),
+            None => unreachable!("bough engine: the front call is there to pop"),
         }
-        Ok(())
-    }
-
-    /// The first `n` calls an `Io` made, in the order it made them.
-    fn pump_io(&mut self, n: usize, skip_stale: bool) -> Result<(), Stop> {
-        for _ in 0..n {
-            let Some(call) = self.build.io.pop() else {
-                break;
-            };
-            call(self, skip_stale)?;
-        }
-        Ok(())
     }
 
     /// Runs one unit, a remote's or an `Io`'s, as one transaction. A unit
@@ -1285,9 +1326,11 @@ impl<T: Clone> Clone for Anchored<T> {
 /// [`Io`]'s do on the runtime's own thread (RFD 6). From
 /// [`Runtime::remote_io`].
 ///
-/// A call pushes a unit into the runtime's inbox and wakes the driver. It
-/// never blocks on the runtime, and allocates on the calling thread. Each
-/// unit is one transaction, run by the pump in arrival order: a
+/// A call pushes a unit into the runtime's inbox, and wakes the driver
+/// unless another remote call has since the last pump began. It never
+/// blocks on the runtime, and allocates once on the calling thread. Each
+/// unit is one transaction, and the pump runs them in the order they were
+/// made, among an `Io`'s calls too: a
 /// [`transaction`](RemoteIo::transaction) makes its sends simultaneous, and
 /// two units are never merged. A `RemoteIo` works with a `Local` runtime;
 /// what it carries must be `Send`. The runtime's poison is mirrored into
@@ -1498,7 +1541,7 @@ impl RemoteIo {
     ) -> Result<(), IoError> {
         self.check(roots.as_slice())?;
         self.inbox
-            .push(Waiting { call, roots, guard })
+            .push(Waiting::new(call, roots, guard))
             .map_err(|_| IoError::Gone)
     }
 
@@ -1513,11 +1556,11 @@ impl RemoteIo {
         self.check(roots.as_slice())?;
         let flag = Liveness::new(&self.inbox.released);
         let registration = Box::new(make(flag.clone()));
-        let waiting = Waiting {
-            call: RemoteCall::Register(registration),
+        let waiting = Waiting::new(
+            RemoteCall::Register(registration),
             roots,
-            guard: Some(flag.clone()),
-        };
+            Some(flag.clone()),
+        );
         self.inbox.push(waiting).map_err(|_| IoError::Gone)?;
         Ok(flag)
     }
