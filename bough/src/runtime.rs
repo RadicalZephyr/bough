@@ -26,7 +26,7 @@ use crate::engine::edge::{Fault, Start};
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::engine::edge::{Inbox, RemoteCall, Unit};
-use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
+use crate::engine::{Cx, Entry, LISTENERS, ListenerCall, TokenFault, part};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -184,27 +184,47 @@ const ANCHOR: &str = "an anchor on a collected node";
 
 /// A stream listener's call: take the event from a linear stream, clone it
 /// from a shared one.
-fn call_stream<M, S, F>(f: &mut M::Carrier, b: &mut Build<M>, n: u32)
+fn call_stream<M, S, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
 where
     M: Mode,
     S: Node,
     F: FnMut(S::Event) + 'static,
 {
     if let Some(v) = S::pull_inner(&mut Cx { b }, n) {
-        part::<M, F>(f)(v)
+        part::<M, F>(&mut e.f)(v)
     }
+}
+
+/// A stream once-listener's call: as [`call_stream`], but it takes the
+/// closure out of its slot, and spends the entry before the closure runs,
+/// so that a closure that drops its own guard doesn't count a second
+/// release.
+fn call_stream_once<M, S, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
+where
+    M: Mode,
+    S: Node,
+    F: FnOnce(S::Event) + 'static,
+{
+    let Some(v) = S::pull_inner(&mut Cx { b }, n) else {
+        return;
+    };
+    let f = part::<M, Option<F>>(&mut e.f)
+        .take()
+        .expect("bough engine: a spent listener is not called");
+    e.spend(&b.ownerless);
+    f(v);
 }
 
 /// A cell listener's call: the committed value, which after commit is the
 /// value the step produced.
-fn call_cell<M, A, F>(f: &mut M::Carrier, b: &mut Build<M>, n: u32)
+fn call_cell<M, A, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
 where
     M: Mode,
     A: 'static,
     F: FnMut(&A) + 'static,
 {
     let v = b.value::<A>(n);
-    part::<M, F>(f)(v)
+    part::<M, F>(&mut e.f)(v)
 }
 
 impl<M: Mode> Runtime<M> {
@@ -510,15 +530,73 @@ impl<M: Mode> Runtime<M> {
         Ok(self.attach(i, f, call_cell::<M, C::Value, F>))
     }
 
+    /// Listens to a stream's next event only: `f` runs once, after the
+    /// commit of the first transaction the stream fires in, and that spends
+    /// the listener. Until then it is a listener like any other, a root,
+    /// which dropping its handle cancels and [`keep`](Listener::keep) keeps
+    /// until it fires. Once spent it roots nothing, and its handle does
+    /// nothing. A linear stream is moved in, as for
+    /// [`listen`](Runtime::listen).
+    pub fn listen_once<S, F>(&mut self, source: S, f: F) -> Listener
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        self.enter();
+        match self.checked(source.node_token(), LISTEN) {
+            Some(i) => self.attach_once(i, f, call_stream_once::<M, S, F>),
+            None => Listener::new(None),
+        }
+    }
+
+    /// [`listen_once`](Runtime::listen_once), returning the error instead of
+    /// panicking.
+    pub fn try_listen_once<S, F>(&mut self, source: S, f: F) -> Result<Listener, TokenError>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        let i = self.lookup(source.node_token())?;
+        Ok(self.attach_once(i, f, call_stream_once::<M, S, F>))
+    }
+
+    /// The once form of [`listen_cell`](Runtime::listen_cell): `f` runs now,
+    /// with the current value, and never again, so the handle it returns is
+    /// spent already. Nothing waits, so `f` needn't be `'static`, nor `Send`
+    /// in a `Threaded` graph. The call runs outside any transaction, so a
+    /// panic in it leaves the graph usable.
+    pub fn listen_cell_once<C, F>(&mut self, cell: C, f: F) -> Listener
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value),
+    {
+        self.enter();
+        if let Some(i) = self.checked(cell.token(), LISTEN) {
+            f(self.build.value::<C::Value>(i));
+        }
+        Listener::new(None)
+    }
+
+    /// [`listen_cell_once`](Runtime::listen_cell_once), returning the error
+    /// instead of panicking.
+    pub fn try_listen_cell_once<C, F>(&mut self, cell: C, f: F) -> Result<Listener, TokenError>
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value),
+    {
+        let i = self.lookup(cell.token())?;
+        f(self.build.value::<C::Value>(i));
+        Ok(Listener::new(None))
+    }
+
     /// Registers a listener on node `i`. Its entry and its guard share a
     /// liveness; dispatch skips an entry whose guard has no owner left, and
     /// then drops it.
-    fn attach<F: 'static>(
-        &mut self,
-        i: u32,
-        f: F,
-        call: fn(&mut M::Carrier, &mut Build<M>, u32),
-    ) -> Listener
+    fn attach<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>) -> Listener
     where
         M: Accepts<F>,
     {
@@ -528,21 +606,32 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// Registers a listener on node `i` with the liveness its guard shares.
-    fn attach_flag<F: 'static>(
-        &mut self,
-        i: u32,
-        f: F,
-        call: fn(&mut M::Carrier, &mut Build<M>, u32),
-        flag: Liveness,
-    ) where
+    fn attach_flag<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>, flag: Liveness)
+    where
         M: Accepts<F>,
     {
+        self.push_entry(i, <M as Accepts<F>>::erase(Erase::Value(f)), call, flag);
+    }
+
+    /// Registers a once-listener on node `i`, as [`attach`](Runtime::attach)
+    /// does a listener. Its closure waits in the slot shape, `Option<F>`,
+    /// for its call to take it out. `M: Accepts<F>` erases that shape too,
+    /// so `listen_once` needs no bound that `listen` doesn't.
+    fn attach_once<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>) -> Listener
+    where
+        M: Accepts<F>,
+    {
+        let mut slot = <M as Accepts<F>>::erase(Erase::Slot);
+        *part::<M, Option<F>>(&mut slot) = Some(f);
+        let flag = Liveness::new(&self.build.released);
+        self.push_entry(i, slot, call, flag.clone());
+        Listener::new(Some(flag))
+    }
+
+    /// Adds a listener's entry to node `i`, with its closure erased.
+    fn push_entry(&mut self, i: u32, f: M::Carrier, call: ListenerCall<M>, flag: Liveness) {
         let store = &mut self.build.store;
-        store.listeners[i as usize].push(Entry {
-            flag,
-            f: <M as Accepts<F>>::erase(Erase::Value(f)),
-            call,
-        });
+        store.listeners[i as usize].push(Entry { flag, f, call });
         store.hot[i as usize].flags |= LISTENERS;
     }
 
@@ -1207,7 +1296,10 @@ impl<M: Mode> Transaction<'_, M> {
 /// stays alive. Dropping the last one lets collection free them; a linear
 /// stream is consumed by `listen`, so once its listener is dropped nothing
 /// can observe it again. The drop counts as a released root for the
-/// automatic policy, through the shared count, with no graph access.
+/// automatic policy, through the shared count, with no graph access. A
+/// [`listen_once`](Runtime::listen_once) listener is spent when it fires:
+/// its root goes then, and counts as released then, and its handle does
+/// nothing after.
 pub struct Listener {
     /// The handle's share of the state its node's entry holds; `None` once
     /// kept.

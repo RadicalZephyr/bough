@@ -8,7 +8,8 @@
 //! policy reads. So releasing a guard needs no access to the runtime. The
 //! runtime's entries hold the state too, so a guard that
 //! [`keep`](crate::Listener::keep) gave up leaves the count raised, and the
-//! state is freed with the entries.
+//! state is freed with the entries. A once-listener's root ends when it
+//! fires, before its guard goes, so its entry counts the release then.
 //!
 //! Where the target has pointer atomics the state is an `Arc` of atomics,
 //! so a guard can be dropped on any thread, even a `Local` runtime's. On a
@@ -188,6 +189,27 @@ impl Liveness {
         if self.0.owners.decrement() {
             self.0.released.0.increment();
         }
+    }
+
+    /// A state with no owner, which is never live: the one a runtime's
+    /// spent entries share.
+    pub(crate) fn ownerless(released: &Released) -> Self {
+        Liveness(Ptr::new(State {
+            owners: Count::new(0),
+            released: released.clone(),
+        }))
+    }
+
+    /// Gives up an entry's share as its once-listener fires, while the
+    /// guard may still have its owner. That ends the root, so it counts a
+    /// released guard now, and adds an owner nothing gives up, so that the
+    /// guard's own release isn't the last and doesn't count another. A
+    /// guard dropped on another thread as the listener fires can count
+    /// twice, which only brings a collection forward.
+    #[inline]
+    pub(crate) fn spend(self) {
+        self.0.owners.increment();
+        self.0.released.0.increment();
     }
 }
 

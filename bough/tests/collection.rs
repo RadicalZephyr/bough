@@ -855,6 +855,44 @@ fn a_listener_dropped_inside_a_listener_lets_its_node_be_collected() {
     assert!(graph.try_listen(kept, |_| ()).is_ok());
 }
 
+/// A once-listener is a root until it fires, and not after: once both have
+/// fired, the nodes only they rooted are collected, the one whose handle
+/// was kept and the one whose handle is still held.
+#[test]
+fn a_once_listener_is_a_root_until_it_fires() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (n, n_in) = b.input::<u32>();
+        let n = n.share(b);
+        let kept = n.map(|v| v + 1).share(b);
+        let held = n.map(|v| v * 10).share(b);
+        (n_in, (kept, held))
+    });
+    graph.set_collection_policy(CollectionPolicy::Manual);
+    let ((n_in, (kept, held)), edge) = edge.into_parts();
+    let n_in = graph.anchor(n_in).keep();
+    let (seen_kept, on_kept) = recorder();
+    graph.listen_once(kept, on_kept).keep();
+    let (seen_held, on_held) = recorder();
+    let handle = graph.listen_once(held, on_held);
+    drop(edge);
+    graph.collect_garbage();
+    assert_eq!(graph.live_nodes(), 4, "rooted until they fire");
+    graph.send(n_in, 1);
+    graph.collect_garbage();
+    assert_eq!(graph.live_nodes(), 1, "the input alone");
+    assert_eq!(*seen_kept.borrow(), [2]);
+    assert_eq!(*seen_held.borrow(), [10]);
+    assert_eq!(
+        graph.try_listen(kept, |_| ()).err(),
+        Some(TokenError::Stale)
+    );
+    assert_eq!(
+        graph.try_listen(held, |_| ()).err(),
+        Some(TokenError::Stale)
+    );
+    drop(handle);
+}
+
 /// `keep` leaves a listener or an anchor live for the graph's life with no
 /// handle to hold, so their nodes survive every collection; a dropped or
 /// unanchored anchor roots nothing from the next collection on.
@@ -931,6 +969,49 @@ fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
     assert_eq!(graph.live_nodes(), 2);
     for c in cells {
         assert_eq!(graph.try_sample(c).err(), Some(TokenError::Stale));
+    }
+}
+
+/// A once-listener's root ends when it fires, so the automatic policy
+/// counts it released then, and only then: the graph of the tests above,
+/// rooted by once-listeners that fire, collects at the seventh release,
+/// though two of the handles were dropped by their own listeners as they
+/// fired, and two held and dropped after.
+#[test]
+fn the_automatic_policy_counts_a_once_listener_released_when_it_fires() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (n, n_in) = b.input::<u32>();
+        let n = n.share(b);
+        let streams: Vec<Shared<u32>> = (0..4).map(|k| n.map(move |v| v + k).share(b)).collect();
+        ((n_in, n), streams)
+    });
+    let (((n_in, n), streams), edge) = edge.into_parts();
+    let (n_in, n) = graph.anchor((n_in, n)).keep();
+    for s in &streams[..2] {
+        let own: Rc<RefCell<Option<Listener>>> = Rc::new(RefCell::new(None));
+        let taken = own.clone();
+        *own.borrow_mut() = Some(graph.listen_once(*s, move |_| drop(taken.borrow_mut().take())));
+    }
+    let held: Vec<Listener> = streams[2..]
+        .iter()
+        .map(|s| graph.listen_once(*s, |_| ()))
+        .collect();
+    drop(edge);
+    graph.collect_garbage(); // dropping the edge released a root: count from here
+    assert_eq!(graph.live_nodes(), 6);
+    graph.send(n_in, 1);
+    assert_eq!(graph.live_nodes(), 6, "4 released, 6 live");
+    drop(held); // spent, so their drops count nothing more
+    for released in 5..=6 {
+        graph.listen_once(n, |_| ()).keep();
+        graph.send(n_in, released);
+        assert_eq!(graph.live_nodes(), 6, "{released} released, 6 live");
+    }
+    graph.listen_once(n, |_| ()).keep();
+    graph.send(n_in, 7); // 7 released: a collection runs after this transaction
+    assert_eq!(graph.live_nodes(), 2);
+    for s in streams {
+        assert_eq!(graph.try_listen(s, |_| ()).err(), Some(TokenError::Stale));
     }
 }
 

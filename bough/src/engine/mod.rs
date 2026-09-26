@@ -45,6 +45,7 @@ mod tx;
 
 use core::any::Any;
 use core::cell::OnceCell;
+use core::mem;
 
 use alloc::vec::Vec;
 
@@ -358,12 +359,24 @@ pub(crate) trait NodeOps<M: Mode> {
     const OPS: Ops<M>;
 }
 
+/// A listener's monomorphized call on node `n`.
+pub(crate) type ListenerCall<M> = fn(&mut Entry<M>, &mut Build<M>, u32);
+
 /// One listener: the liveness its guard shares, its erased closure, and
-/// the monomorphized call.
+/// its call.
 pub(crate) struct Entry<M: Mode> {
     pub(crate) flag: Liveness,
     pub(crate) f: M::Carrier,
-    pub(crate) call: fn(&mut M::Carrier, &mut Build<M>, u32),
+    pub(crate) call: ListenerCall<M>,
+}
+
+impl<M: Mode> Entry<M> {
+    /// Spends a once-listener's entry as it fires. Its root ends, counted
+    /// as released now, and the entry shares `ownerless` from then on, so
+    /// dispatch and collection drop it as they drop one whose guard went.
+    pub(crate) fn spend(&mut self, ownerless: &Liveness) {
+        mem::replace(&mut self.flag, ownerless.clone()).spend();
+    }
 }
 
 /// The context of the hidden `Source::pull`: the build context, borrowed

@@ -115,6 +115,53 @@ fn listen_steps_does_not_fire_at_registration() {
 }
 
 #[test]
+fn listen_once_hears_the_next_event_the_stream_fires_and_no_other() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.filter(|n| *n > 5).node(b))
+    });
+    let (numbers_in, big) = edge.keep();
+    let (seen, on) = recorder();
+    graph.listen_once(big, on).keep();
+    graph.send(numbers_in, 3); // the stream doesn't fire
+    graph.send(numbers_in, 9);
+    graph.send(numbers_in, 10);
+    assert_eq!(*seen.borrow(), [9]);
+}
+
+#[test]
+fn dropping_a_once_listener_before_it_fires_cancels_it_and_after_does_nothing() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let (dropped, on_dropped) = recorder();
+    let (unlistened, on_unlistened) = recorder();
+    let (held, on_held) = recorder();
+    drop(graph.listen_once(numbers, on_dropped));
+    graph.listen_once(numbers, on_unlistened).unlisten();
+    let handle = graph.listen_once(numbers, on_held);
+    graph.send(numbers_in, 1);
+    drop(handle); // spent
+    graph.send(numbers_in, 2);
+    assert!(dropped.borrow().is_empty());
+    assert!(unlistened.borrow().is_empty());
+    assert_eq!(*held.borrow(), [1]);
+}
+
+#[test]
+fn listen_cell_once_fires_now_with_the_current_value_and_borrows_what_it_likes() {
+    let (mut graph, edge) = Runtime::build(|b| b.input_cell(5u32));
+    let (level, level_in) = edge.keep();
+    let mut seen = Vec::new();
+    graph.listen_cell_once(level, |v| seen.push(*v)).keep();
+    graph.send(level_in, 6);
+    graph.listen_cell_once(level, |v| seen.push(*v)).keep();
+    assert_eq!(seen, [5, 6]);
+}
+
+#[test]
 fn a_listener_on_a_constant_fires_only_at_registration() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();
@@ -285,6 +332,10 @@ fn assert_poisoned(graph: &mut Runtime, numbers_in: bough::Input<u32>, level: bo
         graph.try_listen_steps(level, |_| ()).err(),
         Some(TokenError::Poisoned)
     );
+    assert_eq!(
+        graph.try_listen_cell_once(level, |_| ()).err(),
+        Some(TokenError::Poisoned)
+    );
     assert!(
         panic_text(catch_unwind(AssertUnwindSafe(|| graph.send(numbers_in, 9))))
             .contains("poisoned")
@@ -365,10 +416,20 @@ fn a_foreign_token_is_an_error_from_the_listen_and_sample_entries() {
         Some(TokenError::ForeignGraph)
     );
     assert_eq!(
+        graph.try_listen_once(shared, |_| ()).err(),
+        Some(TokenError::ForeignGraph)
+    );
+    assert_eq!(
+        graph.try_listen_cell_once(level, |_| ()).err(),
+        Some(TokenError::ForeignGraph)
+    );
+    assert_eq!(
         graph.try_sample(level).err(),
         Some(TokenError::ForeignGraph)
     );
     let result = catch_unwind(AssertUnwindSafe(|| graph.listen(shared, |_| ())));
+    assert!(panic_text(result).contains("a token from another graph"));
+    let result = catch_unwind(AssertUnwindSafe(|| graph.listen_once(shared, |_| ())));
     assert!(panic_text(result).contains("a token from another graph"));
     let result = catch_unwind(AssertUnwindSafe(|| *graph.sample(level)));
     assert!(panic_text(result).contains("a token from another graph"));
@@ -395,4 +456,29 @@ fn listeners_of_a_threaded_graph_run_on_the_driving_thread() {
         .keep();
     graph.send(numbers_in, 4);
     assert_eq!(*seen.lock().unwrap(), [0, 4, 40]);
+}
+
+#[test]
+fn a_threaded_graph_takes_a_once_listener_that_is_send_and_a_cell_once_that_is_not() {
+    use std::sync::{Arc, Mutex};
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        let numbers = numbers.share(b);
+        (numbers_in, numbers, numbers.hold(b, 0u64))
+    });
+    let (numbers_in, numbers, latest) = edge.keep();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let writer = seen.clone();
+    graph
+        .listen_once(numbers, move |n| writer.lock().unwrap().push(n))
+        .keep();
+    graph.send(numbers_in, 4);
+    graph.send(numbers_in, 5);
+    assert_eq!(*seen.lock().unwrap(), [4]);
+    let local = Rc::new(RefCell::new(0));
+    let writer = local.clone();
+    graph
+        .listen_cell_once(latest, move |n| *writer.borrow_mut() = *n)
+        .keep();
+    assert_eq!(*local.borrow(), 5, "nothing waits, so nothing need be Send");
 }

@@ -399,7 +399,7 @@ impl<M: Mode> Build<M> {
                 let e = &mut list[at];
                 if e.flag.is_live() {
                     count!(self.s, listener_calls);
-                    (e.call)(&mut e.f, self, n);
+                    (e.call)(e, self, n);
                 }
             }
             list.retain(|e| e.flag.is_live());

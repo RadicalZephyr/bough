@@ -69,6 +69,8 @@ pub struct Build<M: Mode = Local> {
     pub(crate) released: Released,
     /// What every call a handle queues takes its stamp from.
     pub(crate) stamps: Stamps,
+    /// The state every spent listener's entry shares, which has no owner.
+    pub(crate) ownerless: Liveness,
 }
 
 impl<M: Mode> Build<M> {
@@ -85,6 +87,7 @@ impl<M: Mode> Build<M> {
             edge: Edge::new(graph_id, &released, &stamps),
             io: M::IoQueue::new(graph_id, &released, &stamps),
             anchors: Vec::new(),
+            ownerless: Liveness::ownerless(&released),
             released,
             stamps,
         }
