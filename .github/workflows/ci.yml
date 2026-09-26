@@ -53,6 +53,9 @@ jobs:
           - { target: thumbv7em-none-eabihf, features: "--no-default-features" }
           # The Cortex-M0 has no pointer atomics: no Threaded, no Remote.
           - { target: thumbv6m-none-eabi, features: "--no-default-features" }
+          # With a critical section it keeps input slots, its path from an
+          # interrupt handler into the graph (RFD 7).
+          - { target: thumbv6m-none-eabi, features: "--no-default-features --features critical-section" }
           # The web keeps std; the no_std build must still type-check there.
           - { target: wasm32-unknown-unknown, features: "" }
           - { target: wasm32-unknown-unknown, features: "--no-default-features" }

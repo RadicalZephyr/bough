@@ -108,6 +108,7 @@ extern crate alloc;
 extern crate std;
 
 mod build;
+mod capabilities;
 mod cell;
 mod engine;
 mod error;
