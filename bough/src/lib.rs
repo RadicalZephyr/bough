@@ -150,7 +150,7 @@ pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
-pub use runtime::{Anchor, CollectionPolicy, Listener, Runtime, Transaction};
+pub use runtime::{Anchor, Anchored, CollectionPolicy, Listener, Runtime, Transaction};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")

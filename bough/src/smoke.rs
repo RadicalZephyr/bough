@@ -254,12 +254,12 @@ macro_rules! smoke_graph {
         // policies, the stress setting, and collections that free what the
         // switches left behind. Nothing here changes a value.
         let length_before = *graph.sample(chosen_length);
-        let anchored = graph.anchor(&stage6);
-        let kept = graph.try_anchor(&(out, chosen_log));
+        let anchored = graph.anchor(stage6);
+        let kept = graph.try_anchor((out, chosen_log));
         graph.listen_steps(chosen_length, |_| ()).unlisten();
         graph.set_collection_policy(CollectionPolicy::Manual);
         graph.collect_garbage();
-        anchored.unanchor();
+        anchored.into_parts().1.unanchor();
         if let Ok(kept) = kept {
             kept.keep();
         }

@@ -62,10 +62,10 @@ use crate::engine::edge::Inbox;
 use crate::error::{IoError, NowError};
 use crate::guard::{Liveness, Released};
 use crate::mode::Local;
-use crate::runtime::{Anchor, Listener, Runtime, Transaction};
+use crate::runtime::{Anchor, Anchored, Listener, Runtime, Transaction};
 use crate::source::Node;
 use crate::token::Input;
-use crate::trace::Trace;
+use crate::trace::{Trace, Tracer};
 
 /// A call that waits for the graph.
 type Call = Box<dyn FnOnce(&mut Runtime<Local>)>;
@@ -244,9 +244,12 @@ impl Io {
     /// Anchors what `value` holds, as [`Runtime::anchor`], now or right after
     /// the call in progress. No collection runs in between, so a listener
     /// can anchor what it is handed.
-    pub fn anchor<T: Trace + 'static>(&self, value: T) -> Result<Anchor, IoError> {
-        self.register(move |graph, flag| graph.anchor_flagged(flag, &value))
-            .map(Anchor::from_flag)
+    pub fn anchor<T: Trace>(&self, value: T) -> Result<Anchored<T>, IoError> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let tokens = tracer.visited;
+        let flag = self.register(move |graph, flag| graph.anchor_flagged(flag, tokens))?;
+        Ok(Anchored::new(value, Anchor::from_flag(flag)))
     }
 
     /// Reads a cell's current value by reference, if the graph is not busy.

@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Deref;
 use core::task::Waker;
 
 use crate::Build;
@@ -221,16 +222,14 @@ impl Runtime<Local> {
     }
 
     /// [`anchor`](Runtime::anchor), with the liveness of an [`Anchor`] the
-    /// handle gave out, as [`listen_flagged`](Runtime::listen_flagged).
-    pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: Liveness, value: &T) {
+    /// handle gave out, as [`listen_flagged`](Runtime::listen_flagged), and
+    /// the tokens it traced when it was called.
+    pub(crate) fn anchor_flagged(&mut self, flag: Liveness, tokens: Vec<Token>) {
         self.enter();
         if !flag.is_live() {
             return;
         }
-        let mut tracer = Tracer::new();
-        value.trace(&mut tracer);
-        let nodes: Vec<u32> = tracer
-            .visited
+        let nodes: Vec<u32> = tokens
             .into_iter()
             .filter_map(|token| self.checked(token, ANCHOR))
             .collect();
@@ -646,14 +645,14 @@ impl<M: Mode> Runtime<M> {
         store.hot[i as usize].flags |= LISTENERS;
     }
 
-    /// Anchors what I/O code wants to hold without listening to it, and
-    /// returns the handle that keeps it alive: one of the three kinds of
-    /// root. `value` is a token, or any value that holds tokens, such as the
-    /// tuple or struct of tokens a [`construct`](crate::Source::construct)
-    /// closure made; the anchor roots every token its [`Trace`] finds, as
-    /// the build closure's return value roots its own. Dropping the handle,
-    /// or [`unanchor`](Anchor::unanchor), removes the root;
-    /// [`keep`](Anchor::keep) keeps it for the graph's life.
+    /// Anchors what I/O code wants to hold without listening to it: one of
+    /// the three kinds of root. `value` is a token, or any value that holds
+    /// tokens, such as the tuple or struct of tokens a
+    /// [`construct`](crate::Source::construct) closure made; the anchor roots
+    /// every token its [`Trace`] finds, as the build closure's return value
+    /// roots its own. The [`Anchored`] it returns carries the value and reads
+    /// as it. Dropping the last of its clones removes the root, and
+    /// [`keep`](Anchored::keep) keeps it for the graph's life.
     ///
     /// A token a listener hands I/O code as data names a node that nothing
     /// may reach, such as an input a closure built. Anchor it after the
@@ -680,17 +679,17 @@ impl<M: Mode> Runtime<M> {
     /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
     /// graph.send(open_in, 10); // receive
     /// let counter = received.borrow()[0];
-    /// let _counter = graph.anchor(&counter); // the input and the count
-    /// let (bumps_in, count) = counter;
+    /// let counter = graph.anchor(counter); // the input and the count
+    /// let (bumps_in, count) = *counter;
     /// graph.send(bumps_in, 5); // then use
     /// assert_eq!(*graph.sample(count), 15);
     /// ```
     ///
     /// Panics on a foreign token or a poisoned graph. Anchoring a collected
     /// node is a panic in a debug build and, in a release build, a no-op
-    /// that [`stale_operations`](Runtime::stale_operations) counts: the handle
-    /// anchors the value's other nodes.
-    pub fn anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Anchor {
+    /// that [`stale_operations`](Runtime::stale_operations) counts: the anchor
+    /// roots the value's other nodes.
+    pub fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
         self.enter();
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
@@ -705,12 +704,12 @@ impl<M: Mode> Runtime<M> {
         for i in nodes {
             self.anchors.push((i, flag.clone()));
         }
-        Anchor::new(Some(flag))
+        Anchored::new(value, Anchor::new(Some(flag)))
     }
 
     /// [`anchor`](Runtime::anchor), returning the error instead of panicking.
-    /// A value with a stale or foreign token anchors nothing.
-    pub fn try_anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Result<Anchor, TokenError> {
+    /// A value with a stale or foreign token anchors nothing, and is dropped.
+    pub fn try_anchor<T: Trace>(&mut self, value: T) -> Result<Anchored<T>, TokenError> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
         let start = self.anchors.len();
@@ -724,7 +723,7 @@ impl<M: Mode> Runtime<M> {
                 }
             }
         }
-        Ok(Anchor::new(Some(flag)))
+        Ok(Anchored::new(value, Anchor::new(Some(flag))))
     }
 
     /// The cell's current value, by reference. The cell is a
@@ -1199,6 +1198,11 @@ impl Anchor {
         Anchor { alive }
     }
 
+    /// Another owner of the same root.
+    fn add_owner(&self) -> Self {
+        Anchor::new(self.alive.as_ref().map(Liveness::add_owner))
+    }
+
     /// Removes the root now, the same as dropping the handle.
     pub fn unanchor(self) {
         drop(self);
@@ -1217,6 +1221,63 @@ impl Drop for Anchor {
         if let Some(flag) = self.alive.take() {
             flag.release();
         }
+    }
+}
+
+/// A value I/O code holds, with the [`Anchor`] that roots the tokens it
+/// holds, from [`Runtime::anchor`]. It reads as the value, through `Deref`.
+/// Its clones share one root, which goes when the last of them drops.
+/// [`into_parts`](Anchored::into_parts) splits it into the value and the
+/// anchor, and [`keep`](Anchored::keep) keeps the root for the graph's life
+/// and returns the value.
+///
+/// It isn't [`Trace`], so graph state can't hold one: a root inside graph
+/// state could keep itself alive through a cycle. A stream can carry one to
+/// the edge, but a hold of one doesn't compile:
+///
+/// ```compile_fail,E0277
+/// use bough::{Anchored, Input, Runtime, Source};
+///
+/// let (_graph, _) = Runtime::build(|b| {
+///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
+///     let _latest = rows.map(Some).hold(b, None); // error: Anchored is not Trace
+/// });
+/// ```
+pub struct Anchored<T> {
+    value: T,
+    anchor: Anchor,
+}
+
+impl<T> Anchored<T> {
+    pub(crate) fn new(value: T, anchor: Anchor) -> Self {
+        Anchored { value, anchor }
+    }
+
+    /// The value, and the anchor that keeps its root.
+    pub fn into_parts(self) -> (T, Anchor) {
+        (self.value, self.anchor)
+    }
+
+    /// Keeps the root for the life of the graph, without an anchor to hold,
+    /// and returns the value.
+    pub fn keep(self) -> T {
+        self.anchor.keep();
+        self.value
+    }
+}
+
+impl<T> Deref for Anchored<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+/// Another owner of the same root.
+impl<T: Clone> Clone for Anchored<T> {
+    fn clone(&self) -> Self {
+        Anchored::new(self.value.clone(), self.anchor.add_owner())
     }
 }
 

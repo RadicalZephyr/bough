@@ -14,13 +14,14 @@
 //! | `Runtime<Local>` | everywhere | no |
 //! | `Input`, `Stream`, `Cell`, `State`, `Shared` | everywhere | yes, whatever they carry |
 //! | `Listener`, `Anchor` | everywhere | with pointer atomics |
+//! | `Anchored<T>` | everywhere | where `T` is, with pointer atomics |
 //! | `Runtime<Threaded>` | with pointer atomics | yes |
 //! | `InputSlot` | with a lock | `Sync`, since it lives in a `static` |
 //! | `Remote` | with pointer atomics and a lock | yes |
 //! | `Io`, `Owner` | with `std` and pointer atomics | no |
 //!
 //! A lock is `std` or `critical-section`. The Cortex-M0 has no pointer
-//! atomics, so it has the first three rows, with guards that aren't `Send`,
+//! atomics, so it has the first four rows, with guards that aren't `Send`,
 //! and the slot with `critical-section`.
 //!
 //! Absence isn't checked: a type that exists where its row says it doesn't
@@ -90,17 +91,17 @@ mod everywhere {
 /// Where the target has pointer atomics.
 #[cfg(target_has_atomic = "ptr")]
 mod with_atomics {
-    use crate::{Anchor, Listener, Runtime, Threaded};
+    use crate::{Anchor, Anchored, Input, Listener, Runtime, Threaded};
 
-    send!(Runtime<Threaded>, Listener, Anchor);
+    send!(Runtime<Threaded>, Listener, Anchor, Anchored<Input<u8>>);
 }
 
 /// Where the target has no pointer atomics.
 #[cfg(not(target_has_atomic = "ptr"))]
 mod without_atomics {
-    use crate::{Anchor, Listener};
+    use crate::{Anchor, Anchored, Input, Listener};
 
-    not_send!(Listener, Anchor);
+    not_send!(Listener, Anchor, Anchored<Input<u8>>);
 }
 
 /// Where there's a lock: `std` or `critical-section`.

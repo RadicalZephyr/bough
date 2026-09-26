@@ -148,13 +148,13 @@ fn drive<S>(
 /// value: tokens a closure built reach I/O code as data, which nothing in
 /// the graph names, so they are collected unless anchored before the next
 /// transaction (RFD 3: anchor it or lose it).
-fn anchor_received<T: Trace>(
+fn anchor_received<T: Trace + Clone>(
     graph: &mut Runtime,
     received: &RefCell<Vec<T>>,
     anchors: &mut Vec<Anchor>,
 ) {
     for value in &received.borrow()[anchors.len()..] {
-        anchors.push(graph.anchor(value));
+        anchors.push(graph.anchor(value.clone()).into_parts().1);
     }
 }
 

@@ -489,7 +489,7 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
     });
     graph.set_collection_policy(CollectionPolicy::Manual);
     let (holder, seven) = out.borrow().expect("the build ran");
-    let anchor = graph.anchor(&holder);
+    let anchor = graph.anchor(holder);
     graph.collect_garbage();
     assert_eq!(graph.live_nodes(), 3);
     let named = *graph.sample(holder);
@@ -518,7 +518,7 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
     });
     graph.set_collection_policy(CollectionPolicy::Manual);
     let holder = out.borrow().expect("the build ran");
-    let anchor = graph.anchor(&holder);
+    let anchor = graph.anchor(holder);
     for k in 1..=3 {
         graph.send(go_in, k);
     }
@@ -763,7 +763,7 @@ fn a_token_a_listener_delivers_can_be_anchored_before_the_next_collection() {
         (graph, counter)
     };
     let (mut graph, counter) = program();
-    let _anchor = graph.anchor(&counter);
+    let _anchor = graph.anchor(counter);
     let (bumps_in, count) = counter;
     graph.send(bumps_in, 5);
     assert_eq!(*graph.sample(count), 15);
@@ -771,7 +771,7 @@ fn a_token_a_listener_delivers_can_be_anchored_before_the_next_collection() {
     let (mut graph, (bumps_in, count)) = program();
     graph.collect_garbage();
     assert_eq!(graph.try_send(bumps_in, 5), Err(SendError::Stale));
-    assert_eq!(graph.try_anchor(&count).err(), Some(TokenError::Stale));
+    assert_eq!(graph.try_anchor(count).err(), Some(TokenError::Stale));
 }
 
 /// `Trace` is a safe trait (RFD 3): an implementation that misses a token
@@ -881,9 +881,9 @@ fn kept_handles_are_roots_for_the_graph_s_life() {
     });
     let [listened, anchored, dropped, unanchored] = out.borrow().expect("the build ran");
     graph.listen_cell(listened, |_| ()).keep();
-    graph.anchor(&anchored).keep();
-    drop(graph.anchor(&dropped));
-    graph.anchor(&unanchored).unanchor();
+    graph.anchor(anchored).keep();
+    drop(graph.anchor(dropped));
+    graph.anchor(unanchored).into_parts().1.unanchor();
     for _ in 0..3 {
         graph.collect_garbage();
     }
@@ -961,13 +961,59 @@ fn an_anchor_dropped_on_another_thread_releases_its_root() {
         n_in
     });
     let held = out.borrow_mut().take().expect("the build ran");
-    let anchor = graph.anchor(&held);
+    let anchor = graph.anchor(held);
     graph.send(n_in, 1);
     graph.collect_garbage();
     assert_eq!(*graph.sample(held), 1);
     std::thread::spawn(move || drop(anchor)).join().unwrap();
     graph.collect_garbage();
     assert_eq!(graph.try_sample(held).err(), Some(TokenError::Stale));
+}
+
+/// An anchored value's clones share one root: it goes when the last clone
+/// drops, not the first.
+#[test]
+fn clones_of_an_anchored_value_share_one_root() {
+    let (out, inp) = side_channel::<Cell<u32>>();
+    let (mut graph, n_in) = Runtime::build(move |b| {
+        let (n, n_in) = b.input::<u32>();
+        *inp.borrow_mut() = Some(n.hold(b, 0u32));
+        n_in
+    });
+    let held = out.borrow_mut().take().expect("the build ran");
+    let anchored = graph.anchor(held);
+    let clone = anchored.clone();
+    graph.send(n_in, 1);
+    drop(anchored);
+    graph.collect_garbage();
+    assert_eq!(*graph.sample(*clone), 1, "the clone still roots it");
+    drop(clone);
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(held).err(), Some(TokenError::Stale));
+}
+
+/// `into_parts` splits an anchored value into the value and the anchor
+/// that keeps its root, and `keep` keeps the root for the graph's life and
+/// returns the value.
+#[test]
+fn into_parts_leaves_the_root_with_the_anchor_and_keep_keeps_it() {
+    let (out, inp) = side_channel::<(Cell<u32>, Cell<u32>)>();
+    let (mut graph, n_in) = Runtime::build(move |b| {
+        let (n, n_in) = b.input::<u32>();
+        let n = n.share(b);
+        *inp.borrow_mut() = Some((n.hold(b, 0u32), n.map(|v| v * 2).hold(b, 0u32)));
+        n_in
+    });
+    let (split, kept) = out.borrow_mut().take().expect("the build ran");
+    let (split, anchor) = graph.anchor(split).into_parts();
+    let kept = graph.anchor(kept).keep();
+    graph.send(n_in, 1);
+    graph.collect_garbage();
+    assert_eq!((*graph.sample(split), *graph.sample(kept)), (1, 2));
+    drop(anchor);
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(split).err(), Some(TokenError::Stale));
+    assert_eq!(*graph.sample(kept), 2, "kept for the graph's life");
 }
 
 // ----------------------------------------------------------- operations on collected nodes
@@ -1007,7 +1053,7 @@ fn operations_on_collected_nodes_follow_the_debug_release_rule() {
         graph.try_listen_steps(held, |_| ()).err(),
         Some(TokenError::Stale)
     );
-    assert_eq!(graph.try_anchor(&held).err(), Some(TokenError::Stale));
+    assert_eq!(graph.try_anchor(held).err(), Some(TokenError::Stale));
     assert_eq!(graph.try_sample(held).err(), Some(TokenError::Stale));
     let sent = graph.transaction(|tx| tx.try_send(numbers_in, 1));
     assert_eq!(sent, Err(TransactionSendError::Stale));
@@ -1038,7 +1084,7 @@ fn operations_on_collected_nodes_follow_the_debug_release_rule() {
         ),
         (
             "an anchor on a collected node",
-            Box::new(move |g| drop(g.anchor(&held))),
+            Box::new(move |g| drop(g.anchor(held))),
         ),
     ];
     for (k, (what, operation)) in unobservable.iter().enumerate() {
@@ -1153,7 +1199,7 @@ fn states_are_traced_declared_and_anchored_like_cells() {
         names_in
     });
     let (current, short) = out.borrow().expect("the build ran");
-    let _anchor = graph.anchor(&current);
+    let _anchor = graph.anchor(current);
     graph.set_collect_after_every_transaction(true);
     graph.send(names_in, "ada".to_string());
     graph.send(names_in, "grace".to_string());

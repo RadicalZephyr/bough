@@ -638,7 +638,7 @@ fn keeping_a_guard_leaks_nothing_once_the_runtime_drops() {
             (numbers_in, numbers.hold(b, 0u64))
         });
         graph.listen_cell(held, |_| ()).keep();
-        graph.anchor(&held).keep();
+        graph.anchor(held).keep();
         graph.send(numbers_in, 1);
         drop(graph);
     };

@@ -223,8 +223,7 @@ fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_fo
     // Receive, then wire.
     io.send(open_in, 10).unwrap();
     let counter = received.borrow()[0];
-    io.with_graph(|graph| graph.anchor(&counter).keep())
-        .unwrap();
+    io.with_graph(|graph| graph.anchor(counter).keep()).unwrap();
     let (bumps_in, count) = counter;
     io.send(bumps_in, 5).unwrap(); // this one collects first
     assert_eq!(io.with_sample(count, |n| *n), Ok(15));

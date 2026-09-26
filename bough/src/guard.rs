@@ -122,6 +122,14 @@ impl Liveness {
         }))
     }
 
+    /// Another owner's share of the same state. Only an owner makes one, so
+    /// the count is above zero when it does.
+    #[inline]
+    pub(crate) fn add_owner(&self) -> Self {
+        self.0.owners.increment();
+        Liveness(self.0.clone())
+    }
+
     /// Whether the guard still has an owner.
     #[inline]
     pub(crate) fn is_live(&self) -> bool {
