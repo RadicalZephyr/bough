@@ -1,0 +1,13 @@
+[package]
+name = "defer-paint-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Does GTK 4.14 paint a frame without a widget's text when the text is deferred to a default-priority driver future?"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+libc = "0.2"
+
+# Standalone: not part of any other workspace.
+[workspace]
