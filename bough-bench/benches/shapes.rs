@@ -5,7 +5,9 @@
 
 use std::hint::black_box;
 
-use bough_bench::{Frame, FrameBaseline, Shallow, ShallowBaseline, payload};
+use bough_bench::{
+    FanOut, FanOutBaseline, Frame, FrameBaseline, Shallow, ShallowBaseline, payload,
+};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn the_payload(c: &mut Criterion) {
@@ -67,5 +69,28 @@ fn frame(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, the_payload, shallow, frame);
+fn fan_out(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fan_out");
+    group.bench_function("bough", |b| {
+        let mut shape = FanOut::new();
+        let mut k = 0u64;
+        b.iter(|| {
+            k += 1;
+            shape.send(black_box(k));
+        });
+        black_box(shape.sum());
+    });
+    group.bench_function("baseline", |b| {
+        let mut base = FanOutBaseline::new();
+        let mut k = 0u64;
+        b.iter(|| {
+            k += 1;
+            base.send(black_box(k));
+        });
+        black_box(base.sum());
+    });
+    group.finish();
+}
+
+criterion_group!(benches, the_payload, shallow, frame, fan_out);
 criterion_main!(benches);

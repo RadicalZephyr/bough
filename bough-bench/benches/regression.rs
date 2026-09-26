@@ -10,7 +10,7 @@ use iai_callgrind::{
 };
 use std::hint::black_box;
 
-use bough_bench::{Frame, Shallow};
+use bough_bench::{FanOut, Frame, Shallow};
 
 // A thousand transactions of the shallow shape, build included.
 #[library_benchmark]
@@ -34,7 +34,17 @@ fn frame() -> u64 {
     black_box(shape.checksum())
 }
 
-library_benchmark_group!(name = shapes; benchmarks = shallow, frame);
+// A thousand transactions of the fan-out shape, build included.
+#[library_benchmark]
+fn fan_out() -> u64 {
+    let mut shape = FanOut::new();
+    for k in 0..1000 {
+        shape.send(black_box(k));
+    }
+    black_box(shape.sum())
+}
+
+library_benchmark_group!(name = shapes; benchmarks = shallow, frame, fan_out);
 
 main!(
     config = LibraryBenchmarkConfig::default()

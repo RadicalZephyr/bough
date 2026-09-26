@@ -6,9 +6,11 @@
 //! trivial-payload numbers are reported as information. The UI shape needs
 //! switches and lands with them.
 
+use std::cell::Cell as StdCell;
 use std::hint::black_box;
+use std::rc::Rc;
 
-use bough::{Cell, Input, Runtime, Source};
+use bough::{Cell, Input, Listener, Runtime, Shared, Source};
 
 /// Rounds of [`payload`]: about 55 ns of the user's own work on the machine
 /// the stage 1 bar was measured on.
@@ -196,6 +198,95 @@ impl Default for FrameBaseline {
     }
 }
 
+/// Listeners on the fan-out shape.
+pub const LISTENERS: usize = 64;
+
+/// The fan-out shape: one input, shared, and [`LISTENERS`] listeners on
+/// it, each adding the event to a sum. One send calls every listener, so
+/// the shape measures listener dispatch, which checks each listener's
+/// guard is live before its call and again after.
+pub struct FanOut {
+    pub graph: Runtime,
+    pub input: Input<u64>,
+    pub sum: Rc<StdCell<u64>>,
+    pub listeners: Vec<Listener>,
+}
+
+impl FanOut {
+    pub fn new() -> Self {
+        let (mut graph, (input, numbers)) = Runtime::build(|b| {
+            let (numbers, input) = b.input::<u64>();
+            let numbers: Shared<u64> = numbers.share(b);
+            (input, numbers)
+        });
+        let sum = Rc::new(StdCell::new(0u64));
+        let listeners = (0..LISTENERS)
+            .map(|_| {
+                let sum = sum.clone();
+                graph.listen(numbers, move |n| sum.set(sum.get().wrapping_add(n)))
+            })
+            .collect();
+        FanOut {
+            graph,
+            input,
+            sum,
+            listeners,
+        }
+    }
+
+    /// One transaction.
+    #[inline]
+    pub fn send(&mut self, x: u64) {
+        self.graph.send(self.input, x);
+    }
+
+    pub fn sum(&self) -> u64 {
+        self.sum.get()
+    }
+}
+
+impl Default for FanOut {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The fan-out baseline: the same closures, boxed, called in a loop.
+pub struct FanOutBaseline {
+    pub sum: Rc<StdCell<u64>>,
+    pub calls: Vec<Box<dyn FnMut(u64)>>,
+}
+
+impl FanOutBaseline {
+    pub fn new() -> Self {
+        let sum = Rc::new(StdCell::new(0u64));
+        let calls = (0..LISTENERS)
+            .map(|_| {
+                let sum = sum.clone();
+                Box::new(move |n: u64| sum.set(sum.get().wrapping_add(n))) as Box<dyn FnMut(u64)>
+            })
+            .collect();
+        FanOutBaseline { sum, calls }
+    }
+
+    #[inline]
+    pub fn send(&mut self, x: u64) {
+        for call in &mut self.calls {
+            call(x);
+        }
+    }
+
+    pub fn sum(&self) -> u64 {
+        self.sum.get()
+    }
+}
+
+impl Default for FanOutBaseline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +317,17 @@ mod tests {
             base.frame(k);
         }
         assert_eq!(frame.checksum(), base.checksum());
+    }
+
+    #[test]
+    fn the_fan_out_shape_agrees_with_its_baseline() {
+        let mut fan_out = FanOut::new();
+        let mut base = FanOutBaseline::new();
+        for x in 0..500 {
+            fan_out.send(x);
+            base.send(x);
+        }
+        assert_eq!(fan_out.sum(), base.sum());
+        assert_eq!(fan_out.sum(), LISTENERS as u64 * (0..500).sum::<u64>());
     }
 }
