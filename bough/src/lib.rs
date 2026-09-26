@@ -41,28 +41,28 @@
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
-//! own, in connection order; a [`Remote`] queues a send, or a remote
+//! own, in connection order; a [`RemoteIo`] queues a send, or a remote
 //! transaction's sends, as one unit from any thread, and `pump` then runs
 //! each unit as one transaction, in arrival order; an [`Io`], the handle
 //! for I/O code on the runtime's thread that can't hold the runtime,
 //! queues its calls, and `pump` runs them last, in the order they were
-//! made; a write, a remote send or an `Io` call wakes the waker the driver
-//! registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
+//! made; a write or a call through either handle wakes the waker the
+//! driver registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
 //! any more. The examples in the documentation run, and the guarantees the
 //! RFDs make are fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!
 //! The core is `no_std` over `alloc`. The `std` feature, on by default, adds
-//! the thread-id guard on [`Remote`], `Trace` for the standard collections and
-//! `Instant`, and the standard mutex under input slots. Where the target has
-//! no pointer atomics, on a Cortex-M0, `Threaded`, `Remote` and the unit queue
-//! do not exist, and the path from an interrupt handler into the graph is an
-//! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
+//! the thread-id guard on [`RemoteIo`], `Trace` for the standard collections
+//! and `Instant`, and the standard mutex under input slots. Where the target
+//! has no pointer atomics, on a Cortex-M0, `Threaded`, `RemoteIo` and the
+//! unit queue do not exist, and the path from an interrupt handler into the
+//! graph is an [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
 //! a web build keeps `std` (RFD 7). A slot and a remote's inbox need one of
 //! the two locks: with no `unsafe` in the crate there is none to build from
 //! atomics, so a `no_std` build without `critical-section` has neither
-//! slots nor `Remote`, and keeps [`pump`](Runtime::pump),
+//! slots nor `RemoteIo`, and keeps [`pump`](Runtime::pump),
 //! [`set_waker`](Runtime::set_waker) and the [`Io`], whose queue is the
 //! runtime's own and needs no lock.
 //!
@@ -135,11 +135,6 @@ pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
 pub use error::{IoError, PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-pub use error::{RemoteSendError, RemoteTransactionError};
 pub use io::Io;
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
@@ -149,7 +144,7 @@ pub use mode::{Accepts, Local, Mode};
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-pub use runtime::Remote;
+pub use runtime::RemoteIo;
 pub use runtime::{
     Anchor, Anchored, CollectionPolicy, IoTransaction, Listener, Runtime, Transaction,
 };

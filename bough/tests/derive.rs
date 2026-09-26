@@ -226,7 +226,7 @@ struct Members {
 /// RFD 6's chat room, built as the RFD writes it, in a `Threaded` graph,
 /// with the one outbound listener attached before the sends; the members
 /// are an in-place accumulator of a derived type. Driven directly here,
-/// since `Remote` and `pump` are the I/O edge's stage.
+/// since `RemoteIo` and `pump` are the I/O edge's stage.
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
     let (mut graph, edge) = Runtime::build_threaded(|b| {

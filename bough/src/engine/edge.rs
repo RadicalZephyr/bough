@@ -10,7 +10,7 @@
 //! against an interrupt that preempts the driver while it holds it. So the
 //! lock is the standard mutex under `std`, a critical section with the
 //! `critical-section` feature, and nothing otherwise: a `no_std` build
-//! without that feature has no input slots and no `Remote`.
+//! without that feature has no input slots and no `RemoteIo`.
 
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -128,8 +128,8 @@ pub(crate) struct Edge {
     /// The connected slots, in connection order.
     #[cfg(any(feature = "std", feature = "critical-section"))]
     pub(crate) slots: Vec<Connection>,
-    /// The queue every `Remote` of this graph shares. Made with the graph,
-    /// so `Runtime::remote` takes `&self`.
+    /// The queue every `RemoteIo` of this graph shares. Made with the graph,
+    /// so `Runtime::remote_io` takes `&self`.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
@@ -171,7 +171,7 @@ impl Edge {
 /// A graph that goes away, dropped or unwound out of a panicking build,
 /// disconnects its slots, so that each can be connected again and no event
 /// written for this graph reaches another, and closes its inbox, so that
-/// no remote keeps filling a queue that no pump will drain.
+/// no `RemoteIo` keeps filling a queue that no pump will drain.
 impl Drop for Edge {
     fn drop(&mut self) {
         #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -195,17 +195,21 @@ impl Drop for Edge {
 ))]
 pub(crate) type Unit = Box<dyn FnOnce(&mut IoTransaction<'_>) + Send>;
 
-/// The queue of units every `Remote` of one graph shares (RFD 6).
+/// The queue of units every `RemoteIo` of one graph shares (RFD 6).
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 pub(crate) struct Inbox {
-    /// The graph's id, for a remote send's foreign-token check.
+    /// The graph's id, for a remote call's foreign-token check.
     pub(crate) graph: u32,
     /// The graph's poison, mirrored by the first entry that finds it, so
-    /// that remote sends fail from then on.
+    /// that remote calls fail from then on.
     poisoned: AtomicBool,
+    /// The graph was dropped, so nothing will drain the queue. Set under
+    /// the lock, and read there by a push; a call reads it first without
+    /// the lock, to refuse early.
+    closed: AtomicBool,
     /// The guard: the token of the thread running this graph's code, or 0.
     /// Only that thread can find its own token here, so a relaxed load
     /// suffices: it reads its own store.
@@ -235,8 +239,6 @@ struct Queue {
     units: VecDeque<Unit>,
     /// What a push wakes.
     waker: Option<Waker>,
-    /// The graph was dropped: nothing will drain the queue.
-    closed: bool,
 }
 
 #[cfg(all(
@@ -248,12 +250,12 @@ impl Inbox {
         Inbox {
             graph,
             poisoned: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             #[cfg(feature = "std")]
             running: AtomicUsize::new(0),
             state: Lock::new(Queue {
                 units: VecDeque::new(),
                 waker: None,
-                closed: false,
             }),
         }
     }
@@ -263,7 +265,7 @@ impl Inbox {
     /// the lock, since its captures' `Drop` is user code.
     pub(crate) fn push(&self, unit: Unit) -> Result<(), Unit> {
         let waker = self.state.with(|q| {
-            if q.closed {
+            if self.closed.load(Ordering::Relaxed) {
                 return Err(unit);
             }
             q.units.push_back(unit);
@@ -298,7 +300,7 @@ impl Inbox {
         #[cfg(feature = "std")]
         self.running.store(0, Ordering::Relaxed);
         let (units, waker) = self.state.with(|q| {
-            q.closed = true;
+            self.closed.store(true, Ordering::Relaxed);
             (core::mem::take(&mut q.units), q.waker.take())
         });
         drop((units, waker));
@@ -324,6 +326,11 @@ impl Inbox {
 
     pub(crate) fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Whether the graph was dropped. A push checks again under the lock.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 }
 

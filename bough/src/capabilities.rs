@@ -18,7 +18,7 @@
 //! | `Anchored<T>` | everywhere | where `T` is, with pointer atomics |
 //! | `Runtime<Threaded>` | with pointer atomics | yes |
 //! | `InputSlot` | with a lock | `Sync`, since it lives in a `static` |
-//! | `Remote` | with pointer atomics and a lock | yes |
+//! | `RemoteIo` | with pointer atomics and a lock | yes, and `Sync` |
 //!
 //! A lock is `std` or `critical-section`. The Cortex-M0 has no pointer
 //! atomics, so it has the first five rows, with guards that aren't `Send`,
@@ -38,8 +38,8 @@ macro_rules! send {
     };
 }
 
-/// Each type must be `Sync`. Only the slot's row uses it, so without a
-/// lock it's unused.
+/// Each type must be `Sync`. Only rows that need a lock use it, so
+/// without one it's unused.
 #[cfg_attr(
     not(any(feature = "std", feature = "critical-section")),
     allow(unused_macros)
@@ -118,7 +118,8 @@ mod with_a_lock {
     any(feature = "std", feature = "critical-section")
 ))]
 mod with_atomics_and_a_lock {
-    use crate::Remote;
+    use crate::RemoteIo;
 
-    send!(Remote);
+    send!(RemoteIo);
+    sync!(RemoteIo);
 }

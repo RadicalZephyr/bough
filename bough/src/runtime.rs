@@ -20,19 +20,19 @@ use crate::cell::CellRef;
 use crate::engine::Statistics;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::engine::edge::Connection;
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-use crate::engine::edge::Inbox;
 use crate::engine::edge::{Fault, Start};
-use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
-use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::error::{RemoteSendError, RemoteTransactionError};
+use crate::engine::edge::{Inbox, Unit};
+use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::error::IoError;
+use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 use crate::guard::Liveness;
 use crate::io::{Io, IoQueue};
 #[cfg(target_has_atomic = "ptr")]
@@ -1047,35 +1047,18 @@ impl<M: Mode> Runtime<M> {
         edge.waker = Some(waker);
     }
 
-    /// An endpoint any thread uses to send into this graph: each send, or
-    /// each remote transaction, is queued as one unit, which the driver runs
-    /// as one transaction at its next [`pump`](Runtime::pump) (RFD 6).
-    ///
-    /// Every remote of a graph shares its one inbox, made with the graph.
-    /// Panics on a poisoned graph.
+    /// A handle for I/O code on any thread: every call through it queues
+    /// for the next [`pump`](Runtime::pump), as an [`Io`]'s does (RFD 6).
+    /// Every `RemoteIo` of a runtime shares its one inbox, made with the
+    /// runtime, so this takes `&self`.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    pub fn remote(&self) -> Remote {
-        self.enter();
-        Remote {
+    pub fn remote_io(&self) -> RemoteIo {
+        RemoteIo {
             inbox: self.build.edge.inbox.clone(),
         }
-    }
-
-    /// [`remote`](Runtime::remote), returning the error instead of panicking.
-    #[cfg(all(
-        target_has_atomic = "ptr",
-        any(feature = "std", feature = "critical-section")
-    ))]
-    pub fn try_remote(&self) -> Result<Remote, PoisonedError> {
-        if self.poisoned() {
-            return Err(PoisonedError);
-        }
-        Ok(Remote {
-            inbox: self.build.edge.inbox.clone(),
-        })
     }
 }
 
@@ -1288,17 +1271,19 @@ impl<T: Clone> Clone for Anchored<T> {
     }
 }
 
-/// A `Send + Clone` endpoint for sending into a graph from any thread
-/// (RFD 6).
+/// A handle for I/O code on any thread: a `Send + Sync + Clone` endpoint
+/// whose calls queue for the driver's next [`pump`](Runtime::pump), as an
+/// [`Io`]'s do on the runtime's own thread (RFD 6). From
+/// [`Runtime::remote_io`].
 ///
-/// A send pushes a unit into the graph's inbox and wakes the driver; it
-/// never blocks on the graph, and allocates on the sending thread. Each
-/// unit is one transaction, run by [`Runtime::pump`] in arrival order: a
-/// [`transaction`](Remote::transaction) makes its sends simultaneous, and
-/// two units are never merged. A remote works with a `Local` graph; what it
-/// carries must be `Send`. The graph's poison is mirrored into the inbox by
-/// the first entry that finds it, so sends fail from then on, and a
-/// dropped graph closes it. Dropping a remote does nothing.
+/// A call pushes a unit into the runtime's inbox and wakes the driver. It
+/// never blocks on the runtime, and allocates on the calling thread. Each
+/// unit is one transaction, run by the pump in arrival order: a
+/// [`transaction`](RemoteIo::transaction) makes its sends simultaneous, and
+/// two units are never merged. A `RemoteIo` works with a `Local` runtime;
+/// what it carries must be `Send`. The runtime's poison is mirrored into
+/// the inbox by the first entry that finds it, so calls fail from then on,
+/// and a dropped runtime closes it. Dropping a `RemoteIo` does nothing.
 ///
 /// ```
 /// use std::cell::RefCell;
@@ -1312,14 +1297,14 @@ impl<T: Clone> Clone for Anchored<T> {
 ///     (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
 /// });
 /// let (numbers_in, total) = edge.keep();
-/// let heard = Rc::new(RefCell::new(Vec::new())); // a Local graph keeps its Rc
+/// let heard = Rc::new(RefCell::new(Vec::new())); // a Local runtime keeps its Rc
 /// let sink = heard.clone();
 /// graph.listen_steps(total, move |t| sink.borrow_mut().push(*t)).keep();
 ///
-/// let remote = graph.remote();
+/// let remote = graph.remote_io();
 /// thread::spawn(move || {
-///     remote.send(numbers_in, 1); // one unit
-///     remote.transaction(move |tx| tx.send(numbers_in, 2)); // another
+///     remote.send(numbers_in, 1).unwrap(); // one unit
+///     remote.transaction(move |tx| tx.send(numbers_in, 2)).unwrap(); // another
 /// })
 /// .join()
 /// .unwrap();
@@ -1328,7 +1313,7 @@ impl<T: Clone> Clone for Anchored<T> {
 /// assert_eq!(*heard.borrow(), [1, 3]);
 /// ```
 ///
-/// What a remote carries crosses threads, so it must be `Send`:
+/// What a `RemoteIo` carries crosses threads, so it must be `Send`:
 ///
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
@@ -1337,36 +1322,42 @@ impl<T: Clone> Clone for Anchored<T> {
 ///
 /// let (graph, edge) = Runtime::build(|b| b.input::<Rc<u32>>().1);
 /// let shared_in = edge.keep();
-/// graph.remote().send(shared_in, Rc::new(1)); // error: Rc is not Send
+/// graph.remote_io().send(shared_in, Rc::new(1)).unwrap(); // error: Rc is not Send
 /// ```
 ///
-/// A remote send from graph code is an error in both builds,
-/// `InsideTransaction`: I/O from inside FRP logic, which a closure can do
-/// because a remote is `Send + Clone + 'static`. The guard is a thread
-/// token the driver stores in the inbox while its graph code runs:
-/// evaluation and commit, `accumulate_mut`'s function, a `construct`
-/// closure, a split's iterator, in every child instant too. It is cleared
-/// before the listeners run, so a listener's remote send queues a later
-/// transaction, the sanctioned way for I/O to feed back; so does the
-/// closure of a transaction, which is I/O code, and a send from any other
-/// thread. It needs a thread id and exists under `std`; on bare metal it
-/// is documented and unchecked (RFD 7). It knows its own graph only: graph
-/// code sending through another graph's remote queues there. A panic that
-/// escapes graph code leaves the token behind, so until an entry finds the
-/// poison, a remote send from that thread reports `InsideTransaction`.
+/// A call checks, in the order an `Io`'s does, that the runtime hasn't
+/// dropped, isn't poisoned and isn't running graph code on this thread,
+/// and that the tokens the call names are the runtime's own. A
+/// transaction's closure hides its tokens, so a foreign one in it is found
+/// at the pump.
 ///
-/// `Remote` holds an `Arc` and its inbox a lock, so it exists where the
+/// A call from graph code is refused with [`IoError::FromGraphCode`]: I/O
+/// from inside FRP logic, which a closure can do because a `RemoteIo` is
+/// `Send + Clone + 'static`. The check is a thread token the driver stores
+/// in the inbox while its graph code runs: evaluation and commit,
+/// `accumulate_mut`'s function, a `construct` closure, a split's iterator,
+/// in every child instant too. It is cleared before the listeners run, so
+/// a listener's call queues a later transaction, the sanctioned way for
+/// I/O to feed back; so does the closure of a transaction, which is I/O
+/// code, and a call from any other thread. It needs a thread id and exists
+/// under `std`; on bare metal it is documented and unchecked (RFD 7). It
+/// knows its own runtime only: graph code calling through another
+/// runtime's `RemoteIo` queues there. A panic that escapes graph code
+/// leaves the token behind, so until an entry finds the poison, a call
+/// from that thread reports `FromGraphCode`.
+///
+/// `RemoteIo` holds an `Arc` and its inbox a lock, so it exists where the
 /// target has pointer atomics and there is a lock: under `std`, or with the
 /// `critical-section` feature. On a Cortex-M0 the path from an interrupt
-/// handler into the graph is an [`InputSlot`](crate::InputSlot). On wasm32
-/// it exists and is the path for DOM callbacks, which may run inside a
-/// transaction's listener and so must not send directly.
+/// handler into the runtime is an [`InputSlot`](crate::InputSlot). On
+/// wasm32 it exists, though a DOM callback runs on the runtime's thread and
+/// can hold an [`Io`].
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 #[derive(Clone)]
-pub struct Remote {
+pub struct RemoteIo {
     inbox: Arc<Inbox>,
 }
 
@@ -1374,115 +1365,58 @@ pub struct Remote {
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-impl Remote {
+impl RemoteIo {
     /// Queues one value as a unit of its own, and wakes the driver.
     ///
-    /// Panics on a token from another graph, on a poisoned graph, and on the
-    /// driver thread inside a transaction. A send to a dropped graph cannot
-    /// be observed: a panic in a debug build and a no-op in a release
-    /// build. Whether the input is collected, or was by the time the driver
-    /// pumps, is graph knowledge, found at [`Runtime::pump`].
-    pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) {
-        match self.try_send(input, value) {
-            Ok(()) => {}
-            Err(RemoteSendError::ForeignGraph) => panic!("bough: a token from another graph"),
-            Err(RemoteSendError::InsideTransaction) => inside_transaction(),
-            Err(RemoteSendError::Poisoned) => panic!("{POISONED}"),
-            Err(RemoteSendError::GraphDropped) => dropped_graph(),
-        }
-    }
-
-    /// [`send`](Remote::send), returning the error instead of panicking.
-    pub fn try_send<A: Send + 'static>(
-        &self,
-        input: Input<A>,
-        value: A,
-    ) -> Result<(), RemoteSendError> {
-        if self.inbox.is_poisoned() {
-            return Err(RemoteSendError::Poisoned);
-        }
-        if input.token.graph != self.inbox.graph {
-            return Err(RemoteSendError::ForeignGraph);
-        }
-        if self.inbox.inside() {
-            return Err(RemoteSendError::InsideTransaction);
-        }
-        self.inbox
-            .push(Box::new(move |tx: &mut IoTransaction<'_>| {
-                tx.send(input, value)
-            }))
-            .map_err(|_| RemoteSendError::GraphDropped)
+    /// Whether the input is collected, or was by the time the driver pumps,
+    /// is graph knowledge, found at the pump, as for an [`Io`]'s send.
+    pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
+        self.check(&[input.token])?;
+        self.push(Box::new(move |tx: &mut IoTransaction<'_>| {
+            tx.send(input, value)
+        }))
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
     /// on the driver, at its next pump, with an [`IoTransaction`] whose
     /// sends are simultaneous. The closure is I/O code: it has no graph
     /// access, and its order of sends does not matter.
-    ///
-    /// Panics on a poisoned graph and on the driver thread inside a
-    /// transaction; a dropped graph is a panic in a debug build and a no-op
-    /// in a release build.
-    pub fn transaction<F>(&self, f: F)
+    pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
     {
-        match self.try_transaction(f) {
-            Ok(()) => {}
-            Err(RemoteTransactionError::InsideTransaction) => inside_transaction(),
-            Err(RemoteTransactionError::Poisoned) => panic!("{POISONED}"),
-            Err(RemoteTransactionError::GraphDropped) => dropped_graph(),
-        }
+        self.check(&[])?;
+        self.push(Box::new(f))
     }
 
-    /// [`transaction`](Remote::transaction), returning the error instead of
-    /// panicking.
-    pub fn try_transaction<F>(&self, f: F) -> Result<(), RemoteTransactionError>
-    where
-        F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
-    {
+    /// The checks a call makes before it queues: the runtime has dropped,
+    /// is poisoned, or runs graph code on this thread, or a token the call
+    /// names is another runtime's.
+    fn check(&self, tokens: &[Token]) -> Result<(), IoError> {
+        if self.inbox.is_closed() {
+            return Err(IoError::Gone);
+        }
         if self.inbox.is_poisoned() {
-            return Err(RemoteTransactionError::Poisoned);
+            return Err(IoError::Poisoned);
         }
         if self.inbox.inside() {
-            return Err(RemoteTransactionError::InsideTransaction);
+            return Err(IoError::FromGraphCode);
         }
-        self.inbox
-            .push(Box::new(f))
-            .map_err(|_| RemoteTransactionError::GraphDropped)
+        if tokens.iter().any(|token| token.graph != self.inbox.graph) {
+            return Err(IoError::ForeignGraph);
+        }
+        Ok(())
+    }
+
+    /// Queues a unit, unless the runtime has dropped since the check.
+    fn push(&self, unit: Unit) -> Result<(), IoError> {
+        self.inbox.push(unit).map_err(|_| IoError::Gone)
     }
 }
 
-/// The panic of a remote send from graph code.
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-fn inside_transaction() {
-    panic!(
-        "bough: a remote send from graph code, on the driver thread while a transaction \
-         runs: send from I/O code, such as a listener, which queues a later transaction"
-    )
-}
-
-/// A remote send to a dropped graph: nothing can observe it, so it follows
-/// the rule for a send to a collected input, a debug-build panic and a
-/// release no-op, with no graph left to count it.
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-fn dropped_graph() {
-    if cfg!(debug_assertions) {
-        panic!(
-            "bough: a remote send to a dropped graph: nothing drains its inbox. In a release \
-             build this is a no-op"
-        );
-    }
-}
-
-/// The sends of one unit a handle queued, a [`Remote`]'s or an [`Io`]'s, run
-/// on the driver inside the transaction it opened for the unit, so they are
-/// simultaneous.
+/// The sends of one unit a handle queued, an [`Io`]'s or a
+/// [`RemoteIo`]'s, run on the driver inside the transaction it opened for
+/// the unit, so they are simultaneous.
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
 /// failed send here is found at [`Runtime::pump`], which drops the whole unit

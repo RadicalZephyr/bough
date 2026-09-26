@@ -36,7 +36,7 @@ pub enum TransactionSendError {
 /// The graph is poisoned: a previous transaction never finished, because a
 /// panic escaped it.
 ///
-/// Returned by `try_transaction`, `try_collect_garbage` and `try_remote`.
+/// Returned by `try_transaction` and `try_collect_garbage`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonedError;
 
@@ -52,21 +52,26 @@ pub enum TokenError {
     Poisoned,
 }
 
-/// Failure modes of a call through an [`Io`](crate::Io). A call only
-/// queues, so these are what the handle knows without the runtime; what
-/// needs the graph, a stale token or one from another graph, is found at
-/// the pump, as [`PumpError`].
+/// Failure modes of a call through a handle, an [`Io`](crate::Io) or a
+/// `RemoteIo`. A call only queues, so these are what the handle knows
+/// without the runtime; what needs the graph, such as a stale token, is
+/// found at the pump, as [`PumpError`]. A call checks them in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoError {
-    /// Called from graph code: a `map` function, a `construct` closure, a
-    /// split's iterator. That's I/O inside FRP logic. A listener is I/O
-    /// code, so its calls queue.
-    FromGraphCode,
     /// The runtime was dropped.
     Gone,
     /// The runtime is poisoned: a previous transaction never finished. The
     /// handle knows once an entry on the runtime has found the poison.
     Poisoned,
+    /// Called from graph code: a `map` function, a `construct` closure, a
+    /// split's iterator. That's I/O inside FRP logic. A listener is I/O
+    /// code, so its calls queue. A `RemoteIo` checks this under `std`
+    /// only, where a thread has an id.
+    FromGraphCode,
+    /// A token the call names belongs to another graph. A transaction's
+    /// closure hides its tokens, so a foreign one there is found at the
+    /// pump instead.
+    ForeignGraph,
 }
 
 /// Failure modes of [`Runtime::try_pump`](crate::Runtime::try_pump).
@@ -86,47 +91,10 @@ pub enum PumpError {
     Stale,
     /// A queued unit sent twice to a non-coalescing input.
     DoubleSend,
-    /// A queued unit or registration named a token from another graph. A
-    /// queued call runs on the driver, so this is found there; only a
-    /// single remote send is checked when it is queued.
+    /// A queued transaction sent with a token from another graph. Its
+    /// closure runs on the driver, so this is found there; every other
+    /// call a handle makes is checked when it is queued.
     ForeignGraph,
-}
-
-/// Failure modes of [`Remote::try_send`](crate::Remote::try_send).
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteSendError {
-    /// The token belongs to another graph.
-    ForeignGraph,
-    /// Called on the driver thread while a transaction runs: I/O from inside
-    /// graph code. Checked under `std`, where a thread id exists.
-    InsideTransaction,
-    /// The graph is poisoned; the inbox mirrors the bit, so no thread keeps
-    /// filling an inbox that no pump will drain.
-    Poisoned,
-    /// The graph was dropped, so nothing will drain the inbox and every
-    /// input is gone.
-    GraphDropped,
-}
-
-/// Failure modes of
-/// [`Remote::try_transaction`](crate::Remote::try_transaction).
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteTransactionError {
-    /// Called on the driver thread while a transaction runs. Checked under
-    /// `std`, where a thread id exists.
-    InsideTransaction,
-    /// The graph is poisoned.
-    Poisoned,
-    /// The graph was dropped.
-    GraphDropped,
 }
 
 macro_rules! display_error {
@@ -148,13 +116,3 @@ display_error!(
 );
 display_error!(PumpError, "pump failed");
 display_error!(IoError, "the runtime refused a call through its handle");
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-display_error!(RemoteSendError, "remote send failed");
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-display_error!(RemoteTransactionError, "remote transaction failed");

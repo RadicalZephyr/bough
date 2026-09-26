@@ -274,8 +274,8 @@ macro_rules! smoke_graph {
 
 /// Stage 8, the I/O edge, in one mode: a slot connected to an input and a
 /// burst folded into one event, a pump and a waker; and where the target
-/// has a `Remote`, a remote send and a remote transaction, pumped after the
-/// slot. Each expansion has a slot of its own.
+/// has a `RemoteIo`, remote sends and remote transactions, pumped after
+/// the slot. Each expansion has a slot of its own.
 macro_rules! smoke_edge {
     ($build:path) => {{
         #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -293,11 +293,13 @@ macro_rules! smoke_edge {
             graph.pump();
             #[cfg(target_has_atomic = "ptr")]
             {
-                let remote = graph.remote();
-                remote.send(presses_in, 10);
-                remote.transaction(move |tx| tx.send(presses_in, 20));
-                let _ = remote.try_send(presses_in, 30);
-                let _ = remote.try_transaction(move |tx| tx.send(presses_in, 40));
+                let remote = graph.remote_io();
+                remote.send(presses_in, 10).unwrap();
+                remote
+                    .transaction(move |tx| tx.send(presses_in, 20))
+                    .unwrap();
+                let _ = remote.send(presses_in, 30);
+                let _ = remote.transaction(move |tx| tx.send(presses_in, 40));
             }
             let _ = graph.try_pump();
             *graph.sample(total)

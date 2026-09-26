@@ -106,7 +106,7 @@ fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
     graph
         .listen(first, move |n| io.send(second_in, n).unwrap())
         .keep();
-    graph.remote().send(first_in, 7);
+    graph.remote_io().send(first_in, 7).unwrap();
     graph.pump();
     assert_eq!(*graph.sample(second), 0, "made after the pump began");
     graph.pump();
@@ -449,11 +449,11 @@ fn a_queued_unit_whose_send_fails_is_dropped_whole() {
     assert_eq!(*seen.borrow(), [4, 5], "the runtime stayed usable");
 }
 
-/// A stale or foreign token is graph knowledge, found at the pump:
-/// `try_pump` returns it; `pump` panics on a foreign token in both builds,
-/// and on a stale one in a debug build, where a release build counts it.
+/// A stale token is graph knowledge, found at the pump: `try_pump`
+/// returns it, and `pump` panics on it in a debug build, where a release
+/// build counts it.
 #[test]
-fn a_stale_or_foreign_token_is_found_at_the_pump() {
+fn a_stale_token_is_found_at_the_pump() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (kept, kept_in) = b.input::<u32>();
         let (_lost, lost_in) = b.input::<u32>();
@@ -463,8 +463,6 @@ fn a_stale_or_foreign_token_is_found_at_the_pump() {
     let _kept = graph.anchor((kept_in, latest));
     drop(edge);
     graph.collect_garbage();
-    let (_other, other_edge) = Runtime::build(|b| b.input::<u32>().1);
-    let foreign_in = other_edge.keep();
     let io = graph.io();
 
     io.send(lost_in, 1).unwrap();
@@ -473,13 +471,7 @@ fn a_stale_or_foreign_token_is_found_at_the_pump() {
     assert_eq!(graph.try_pump(), Ok(()));
     assert_eq!(*graph.sample(latest), 2, "the call behind it ran");
 
-    io.send(foreign_in, 3).unwrap();
-    assert_eq!(graph.try_pump(), Err(PumpError::ForeignGraph));
-    io.send(foreign_in, 3).unwrap();
-    let text = panic_text(catch_unwind(AssertUnwindSafe(|| graph.pump())));
-    assert!(text.contains("another graph"), "{text}");
-
-    io.send(lost_in, 4).unwrap();
+    io.send(lost_in, 3).unwrap();
     if cfg!(debug_assertions) {
         let text = panic_text(catch_unwind(AssertUnwindSafe(|| graph.pump())));
         assert!(text.contains("a send to a collected input"), "{text}");
@@ -487,6 +479,36 @@ fn a_stale_or_foreign_token_is_found_at_the_pump() {
         graph.pump();
         assert_eq!(graph.stale_operations(), 1);
     }
+}
+
+/// A token from another graph is refused when the call that names it is
+/// queued. A transaction's closure hides its tokens, so a foreign one there
+/// is found at the pump: `try_pump` returns it, and `pump` panics on it in
+/// both builds.
+#[test]
+fn a_foreign_token_is_refused_when_queued_or_found_at_the_pump() {
+    let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().1);
+    let _numbers_in = edge.keep();
+    let (_other, other_edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (foreign_in, foreign) = other_edge.keep();
+    let io = graph.io();
+
+    assert_eq!(io.send(foreign_in, 1), Err(IoError::ForeignGraph));
+    assert_eq!(
+        io.listen_steps(foreign, |_| ()).err(),
+        Some(IoError::ForeignGraph)
+    );
+    assert_eq!(io.anchor(foreign).err(), Some(IoError::ForeignGraph));
+    assert_eq!(graph.try_pump(), Ok(()), "nothing was queued");
+
+    io.transaction(move |tx| tx.send(foreign_in, 2)).unwrap();
+    assert_eq!(graph.try_pump(), Err(PumpError::ForeignGraph));
+    io.transaction(move |tx| tx.send(foreign_in, 3)).unwrap();
+    let text = panic_text(catch_unwind(AssertUnwindSafe(|| graph.pump())));
+    assert!(text.contains("another graph"), "{text}");
 }
 
 /// Test 6: a call from graph code is refused, and a listener's call
@@ -564,6 +586,43 @@ fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
     assert_eq!(graph.try_send(numbers_in, 1), Err(SendError::Poisoned));
     assert_eq!(io.send(numbers_in, 1), Err(IoError::Poisoned));
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));
+}
+
+/// A call checks in a fixed order: the runtime has dropped, is poisoned,
+/// runs graph code, or a token the call names is another graph's. So
+/// graph code naming a foreign token gets `FromGraphCode`, and a poisoned
+/// runtime that has dropped gets `Gone`.
+#[test]
+fn a_call_reports_the_first_failure_in_a_fixed_order() {
+    let (_other, other_edge) = Runtime::build(|b| b.input::<u32>().1);
+    let foreign_in = other_edge.keep();
+    let io_cell: Rc<RefCell<Option<Io>>> = Rc::new(RefCell::new(None));
+    let found = Rc::new(RefCell::new(Vec::new()));
+    let (mut graph, edge) = Runtime::build({
+        let io_cell = io_cell.clone();
+        let found = found.clone();
+        move |b| {
+            let (numbers, numbers_in) = b.input::<u32>();
+            let checked = numbers.map(move |n: u32| {
+                assert_ne!(n, 13, "unlucky");
+                if let Some(io) = &*io_cell.borrow() {
+                    found.borrow_mut().push(io.send(foreign_in, n));
+                }
+                n
+            });
+            (numbers_in, checked.hold(b, 0u32))
+        }
+    });
+    let (numbers_in, _checked) = edge.keep();
+    let io = graph.io();
+    *io_cell.borrow_mut() = Some(io.clone());
+    graph.send(numbers_in, 1);
+    assert_eq!(*found.borrow(), [Err(IoError::FromGraphCode)]);
+    let _ = catch_unwind(AssertUnwindSafe(|| graph.send(numbers_in, 13)));
+    assert_eq!(graph.try_send(numbers_in, 2), Err(SendError::Poisoned));
+    assert_eq!(io.send(numbers_in, 3), Err(IoError::Poisoned));
+    drop(graph);
+    assert_eq!(io.send(numbers_in, 4), Err(IoError::Gone));
 }
 
 #[derive(Default)]

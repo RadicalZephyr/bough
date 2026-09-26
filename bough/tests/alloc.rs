@@ -591,7 +591,7 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
         .listen_steps(total, move |_| sink.set(sink.get() + 1))
         .keep();
     graph.set_waker(Waker::from(Arc::new(Wakes::default())));
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let (go, rounds) = mpsc::sync_channel::<()>(0);
     let (sent, filled) = mpsc::sync_channel::<usize>(0);
     let sender = thread::spawn(move || {
@@ -599,8 +599,10 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
         while rounds.recv().is_ok() {
             let before = allocations();
             for n in 0..UNITS / 2 {
-                remote.send(numbers_in, n);
-                remote.transaction(move |tx| tx.send(numbers_in, n));
+                remote.send(numbers_in, n).unwrap();
+                remote
+                    .transaction(move |tx| tx.send(numbers_in, n))
+                    .unwrap();
             }
             sent.send(allocations() - before).unwrap();
         }

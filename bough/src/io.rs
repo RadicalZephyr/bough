@@ -47,8 +47,9 @@ struct Waiting {
 /// share in `Local`, and nothing in `Threaded`, which has no `Io`.
 #[doc(hidden)]
 pub trait IoQueue<M: Mode>: 'static {
-    /// An empty queue, whose guards count their releases on `released`.
-    fn new(released: &Released) -> Self;
+    /// An empty queue for graph `graph`, whose guards count their releases
+    /// on `released`.
+    fn new(graph: u32, released: &Released) -> Self;
     /// Graph code starts or stops running. A call is refused while it
     /// runs.
     fn graph_code(&self, running: bool);
@@ -69,6 +70,8 @@ pub trait IoQueue<M: Mode>: 'static {
 /// What a `Local` runtime shares with its [`Io`]s.
 #[doc(hidden)]
 pub struct IoState {
+    /// The graph's id, for a call's foreign-token check.
+    graph: u32,
     /// The calls waiting for the next pump, in the order they were made.
     calls: RefCell<VecDeque<Waiting>>,
     /// Set while graph code runs, from `arm` to `disarm`.
@@ -103,8 +106,9 @@ impl IoState {
 }
 
 impl IoQueue<Local> for Rc<IoState> {
-    fn new(released: &Released) -> Self {
+    fn new(graph: u32, released: &Released) -> Self {
         Rc::new(IoState {
+            graph,
             calls: RefCell::new(VecDeque::new()),
             graph_code: Cell::new(false),
             poisoned: Cell::new(false),
@@ -157,7 +161,7 @@ pub struct NoIo;
 
 #[cfg(target_has_atomic = "ptr")]
 impl IoQueue<Threaded> for NoIo {
-    fn new(_: &Released) -> Self {
+    fn new(_: u32, _: &Released) -> Self {
         NoIo
     }
     #[inline]
@@ -217,13 +221,15 @@ impl IoQueue<Threaded> for NoIo {
 /// closure hides its tokens, so a waiting transaction keeps none, and a
 /// registration whose guard has gone keeps none either.
 ///
-/// An `Io` is `Clone + 'static`, so graph code can capture one: a `map`
-/// function, a `construct` closure, a split's iterator. A call from there
-/// would be I/O inside FRP logic, so it's refused with
-/// [`IoError::FromGraphCode`]. A panic that escapes graph code leaves that
-/// check's flag set, so a call reports `FromGraphCode` until an entry on
-/// the runtime finds the poison, and `Poisoned` after that. A call after
-/// the runtime drops reports `Gone`.
+/// A call is refused, with an [`IoError`], if the runtime has dropped, is
+/// poisoned or is running graph code, or if a token the call names is
+/// another graph's, checked in that order. An `Io` is `Clone + 'static`,
+/// so graph code can capture one: a `map` function, a `construct`
+/// closure, a split's iterator. A call from there would be I/O inside FRP
+/// logic, so it's refused with [`IoError::FromGraphCode`]. A panic that
+/// escapes graph code leaves that check's flag set, so a call reports
+/// `FromGraphCode` until an entry on the runtime finds the poison, and
+/// `Poisoned` after that.
 #[derive(Clone)]
 pub struct Io(Weak<IoState>);
 
@@ -239,9 +245,9 @@ impl Io {
     /// Whether the input is collected is graph knowledge, so it's found at
     /// the pump, as for a remote unit: a panic in a debug build, and in a
     /// release build a no-op that
-    /// [`stale_operations`](Runtime::stale_operations) counts. A token from
-    /// another graph is found there too, and panics in both builds.
-    /// [`try_pump`](Runtime::try_pump) returns either.
+    /// [`stale_operations`](Runtime::stale_operations) counts;
+    /// [`try_pump`](Runtime::try_pump) returns it. A token from another
+    /// graph is refused now, with [`IoError::ForeignGraph`].
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
         self.unit(vec![input.token], move |tx| tx.send(input, value))
     }
@@ -252,9 +258,10 @@ impl Io {
     /// and its order of sends doesn't matter.
     ///
     /// A unit whose send fails is dropped whole at the pump, with none of
-    /// its sends run, as a remote's is. A panic in the closure poisons the
-    /// runtime. While it waits it keeps no token alive, since its closure
-    /// hides them: anchor what it sends to.
+    /// its sends run, as a remote's is; that's where a token from another
+    /// graph is found, too. A panic in the closure poisons the runtime.
+    /// While it waits it keeps no token alive, since its closure hides
+    /// them: anchor what it sends to.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
@@ -268,8 +275,8 @@ impl Io {
     ///
     /// A listener misses what ran before its registration: the
     /// transactions before the pump, and those the pump ran before it. A
-    /// stale or foreign token is found at the pump, as for
-    /// [`send`](Io::send).
+    /// stale token is found at the pump, and a foreign one refused now, as
+    /// for [`send`](Io::send).
     pub fn listen<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
     where
         S: Node,
@@ -316,8 +323,8 @@ impl Io {
     /// [`Anchored`] comes back now, carrying the value. The waiting call
     /// keeps the value's tokens alive until the next pump registers the
     /// anchor, and the anchor keeps them after; dropping the `Anchored`
-    /// before that pump cancels both. A stale or foreign token is found at
-    /// the pump, as for [`send`](Io::send).
+    /// before that pump cancels both. A stale token is found at the pump,
+    /// and a foreign one refused now, as for [`send`](Io::send).
     pub fn anchor<T: Trace>(&self, value: T) -> Result<Anchored<T>, IoError> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
@@ -329,15 +336,18 @@ impl Io {
     }
 
     /// The state the handle shares with its runtime, if the runtime takes
-    /// calls: it hasn't dropped, isn't poisoned, and isn't running graph
-    /// code.
-    fn state(&self) -> Result<Rc<IoState>, IoError> {
+    /// a call that names `tokens`: it hasn't dropped, isn't poisoned, isn't
+    /// running graph code, and owns every token.
+    fn state(&self, tokens: &[Token]) -> Result<Rc<IoState>, IoError> {
         let state = self.0.upgrade().ok_or(IoError::Gone)?;
         if state.poisoned.get() {
             return Err(IoError::Poisoned);
         }
         if state.graph_code.get() {
             return Err(IoError::FromGraphCode);
+        }
+        if tokens.iter().any(|token| token.graph != state.graph) {
+            return Err(IoError::ForeignGraph);
         }
         Ok(state)
     }
@@ -348,7 +358,7 @@ impl Io {
         roots: Vec<Token>,
         f: impl FnOnce(&mut IoTransaction<'_>) + 'static,
     ) -> Result<(), IoError> {
-        let state = self.state()?;
+        let state = self.state(&roots)?;
         push(
             &state,
             Waiting {
@@ -368,7 +378,7 @@ impl Io {
         roots: Vec<Token>,
         register: impl FnOnce(&mut Runtime<Local>, bool, Liveness) -> Result<(), Stop> + 'static,
     ) -> Result<Liveness, IoError> {
-        let state = self.state()?;
+        let state = self.state(&roots)?;
         let flag = Liveness::new(&state.released);
         let shared = flag.clone();
         push(

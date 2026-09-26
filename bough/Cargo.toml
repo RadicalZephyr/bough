@@ -11,7 +11,7 @@ repository.workspace = true
 
 [features]
 default = ["std"]
-# The standard library: the thread-id guard on `Remote`, `Trace` for the
+# The standard library: the thread-id guard on `RemoteIo`, `Trace` for the
 # standard collections and `Instant`, and the standard mutex under input
 # slots. Off for bare metal; a web build keeps it.
 std = []

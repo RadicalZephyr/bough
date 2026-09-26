@@ -1,4 +1,4 @@
-//! `Remote` (RFD 6): a send or a remote transaction is queued as one unit,
+//! `RemoteIo` (RFD 6): a send or a remote transaction is queued as one unit,
 //! and `pump` runs each unit as one transaction, in arrival order, after
 //! the slots. A unit is never split and never merged; a unit whose send
 //! fails is dropped whole at `pump`, and the rest stay queued.
@@ -14,10 +14,7 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{
-    Input, InputSlot, PumpError, Remote, RemoteSendError, RemoteTransactionError, Runtime, Source,
-    Stream,
-};
+use bough::{Input, InputSlot, IoError, PumpError, RemoteIo, Runtime, Source, Stream};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {
@@ -50,7 +47,7 @@ fn log<A: Clone + 'static>(graph: &mut Runtime, stream: Stream<A>) -> Rc<RefCell
 #[test]
 fn a_remote_is_send_sync_and_clone() {
     fn assert_send_sync_clone<T: Send + Sync + Clone + 'static>() {}
-    assert_send_sync_clone::<Remote>();
+    assert_send_sync_clone::<RemoteIo>();
 }
 
 /// Two inputs, and their merge, whose function marks a simultaneous pair.
@@ -70,9 +67,9 @@ fn pair() -> (Runtime, Pair) {
 fn a_remote_send_waits_for_the_pump_and_is_one_transaction() {
     let (mut graph, (left_in, right_in, merged)) = pair();
     let seen = log(&mut graph, merged);
-    let remote = graph.remote();
-    remote.send(left_in, 1);
-    remote.send(right_in, 2);
+    let remote = graph.remote_io();
+    remote.send(left_in, 1).unwrap();
+    remote.send(right_in, 2).unwrap();
     assert!(
         seen.borrow().is_empty(),
         "nothing runs until the driver pumps"
@@ -87,12 +84,14 @@ fn a_remote_send_waits_for_the_pump_and_is_one_transaction() {
 fn a_remote_transaction_is_one_unit_whose_sends_are_simultaneous() {
     let (mut graph, (left_in, right_in, merged)) = pair();
     let seen = log(&mut graph, merged);
-    let remote = graph.remote();
-    remote.transaction(move |tx| {
-        tx.send(right_in, 2);
-        tx.send(left_in, 1);
-    });
-    remote.send(left_in, 3);
+    let remote = graph.remote_io();
+    remote
+        .transaction(move |tx| {
+            tx.send(right_in, 2);
+            tx.send(left_in, 1);
+        })
+        .unwrap();
+    remote.send(left_in, 3).unwrap();
     graph.pump();
     assert_eq!(
         *seen.borrow(),
@@ -111,10 +110,13 @@ fn a_unit_coalesces_what_its_input_coalesces() {
     });
     let (words_in, words) = edge.keep();
     let seen = log(&mut graph, words);
-    graph.remote().transaction(move |tx| {
-        tx.send(words_in, "one".to_string());
-        tx.send(words_in, "unit".to_string());
-    });
+    graph
+        .remote_io()
+        .transaction(move |tx| {
+            tx.send(words_in, "one".to_string());
+            tx.send(words_in, "unit".to_string());
+        })
+        .unwrap();
     graph.pump();
     assert_eq!(*seen.borrow(), ["one unit"]);
 }
@@ -131,9 +133,9 @@ fn slots_drain_before_units() {
     });
     let (numbers_in, numbers) = edge.keep();
     let seen = log(&mut graph, numbers);
-    let remote = graph.remote();
-    remote.send(numbers_in, 1);
-    remote.send(numbers_in, 2);
+    let remote = graph.remote_io();
+    remote.send(numbers_in, 1).unwrap();
+    remote.send(numbers_in, 2).unwrap();
     SENSOR.send(3);
     graph.pump();
     assert_eq!(*seen.borrow(), [3, 1, 2]);
@@ -151,13 +153,13 @@ fn a_local_graph_takes_units_from_several_threads() {
     });
     let (numbers_in, numbers) = edge.keep();
     let seen = log(&mut graph, numbers);
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let senders: Vec<_> = (0..4u32)
         .map(|k| {
             let remote = remote.clone();
             thread::spawn(move || {
                 for n in 0..50 {
-                    remote.send(numbers_in, (k, n));
+                    remote.send(numbers_in, (k, n)).unwrap();
                 }
             })
         })
@@ -184,14 +186,14 @@ fn a_remote_send_never_blocks_on_the_graph() {
         (numbers_in, numbers.node(b))
     });
     let (numbers_in, numbers) = edge.keep();
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let (sent, has_sent) = mpsc::channel::<()>();
     let start = Arc::new(Barrier::new(2));
     let other = {
         let (remote, start) = (remote.clone(), start.clone());
         thread::spawn(move || {
             start.wait();
-            remote.send(numbers_in, 2);
+            remote.send(numbers_in, 2).unwrap();
             sent.send(()).unwrap();
         })
     };
@@ -208,7 +210,7 @@ fn a_remote_send_never_blocks_on_the_graph() {
             sink.borrow_mut().push(v);
         })
         .keep();
-    remote.send(numbers_in, 1);
+    remote.send(numbers_in, 1).unwrap();
     graph.pump();
     other.join().unwrap();
     graph.pump();
@@ -225,14 +227,14 @@ fn a_remote_send_from_a_listener_is_a_later_transaction() {
         (numbers_in, numbers.node(b))
     });
     let (numbers_in, numbers) = edge.keep();
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     graph
         .listen(numbers, move |v| {
             sink.borrow_mut().push(v);
             if v < 3 {
-                remote.send(numbers_in, v + 1);
+                remote.send(numbers_in, v + 1).unwrap();
             }
         })
         .keep();
@@ -260,15 +262,17 @@ fn a_remote_transaction_runs_on_the_driver() {
     });
     let (numbers_in, numbers) = edge.keep();
     let seen = log(&mut graph, numbers);
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let (ran_on, ran) = mpsc::channel();
     let again = remote.clone();
     thread::spawn(move || {
-        remote.transaction(move |tx| {
-            ran_on.send(thread::current().id()).unwrap();
-            tx.send(numbers_in, 1);
-            again.send(numbers_in, 2);
-        });
+        remote
+            .transaction(move |tx| {
+                ran_on.send(thread::current().id()).unwrap();
+                tx.send(numbers_in, 1);
+                again.send(numbers_in, 2).unwrap();
+            })
+            .unwrap();
     })
     .join()
     .unwrap();
@@ -299,13 +303,15 @@ fn a_remote_send_wakes_the_waker_the_driver_registered() {
         (numbers_in, numbers.hold(b, 0u32))
     });
     let (numbers_in, _numbers) = edge.keep();
-    let remote = graph.remote();
-    remote.send(numbers_in, 1);
+    let remote = graph.remote_io();
+    remote.send(numbers_in, 1).unwrap();
     let counter = Arc::new(Counter::default());
     graph.set_waker(Waker::from(counter.clone()));
     assert_eq!(counter.0.load(Ordering::SeqCst), 0, "no waker then");
-    remote.send(numbers_in, 2);
-    remote.transaction(move |tx| tx.send(numbers_in, 3));
+    remote.send(numbers_in, 2).unwrap();
+    remote
+        .transaction(move |tx| tx.send(numbers_in, 3))
+        .unwrap();
     assert_eq!(counter.0.load(Ordering::SeqCst), 2);
 }
 
@@ -317,22 +323,26 @@ fn a_remote_send_wakes_the_waker_the_driver_registered() {
 fn a_double_send_inside_a_unit_drops_the_unit_whole() {
     let (mut graph, (left_in, right_in, merged)) = pair();
     let seen = log(&mut graph, merged);
-    let remote = graph.remote();
-    remote.transaction(move |tx| {
-        tx.send(right_in, 1);
-        tx.send(left_in, 2);
-        tx.send(left_in, 3);
-    });
-    remote.send(left_in, 4);
+    let remote = graph.remote_io();
+    remote
+        .transaction(move |tx| {
+            tx.send(right_in, 1);
+            tx.send(left_in, 2);
+            tx.send(left_in, 3);
+        })
+        .unwrap();
+    remote.send(left_in, 4).unwrap();
     assert_eq!(graph.try_pump(), Err(PumpError::DoubleSend));
     assert!(seen.borrow().is_empty(), "no send of the unit ran");
     assert_eq!(graph.try_pump(), Ok(()));
     assert_eq!(*seen.borrow(), [4], "the rest stayed queued");
-    remote.transaction(move |tx| {
-        tx.send(right_in, 5);
-        tx.send(right_in, 6);
-    });
-    remote.send(right_in, 7);
+    remote
+        .transaction(move |tx| {
+            tx.send(right_in, 5);
+            tx.send(right_in, 6);
+        })
+        .unwrap();
+    remote.send(right_in, 7).unwrap();
     let message = panic_message(|| graph.pump());
     assert!(message.contains("a second send"), "{message}");
     graph.pump();
@@ -352,20 +362,20 @@ fn a_foreign_token_is_refused_when_queued_or_at_pump() {
     let (_other, edge) = Runtime::build(|b| b.input::<u32>().1);
     let foreign_in = edge.keep();
     let seen = log(&mut graph, numbers);
-    let remote = graph.remote();
-    assert_eq!(
-        remote.try_send(foreign_in, 1),
-        Err(RemoteSendError::ForeignGraph)
-    );
-    assert!(panic_message(|| remote.send(foreign_in, 1)).contains("another graph"));
-    remote.transaction(move |tx| {
-        tx.send(numbers_in, 1);
-        tx.send(foreign_in, 2);
-    });
-    remote.send(numbers_in, 3);
+    let remote = graph.remote_io();
+    assert_eq!(remote.send(foreign_in, 1), Err(IoError::ForeignGraph));
+    remote
+        .transaction(move |tx| {
+            tx.send(numbers_in, 1);
+            tx.send(foreign_in, 2);
+        })
+        .unwrap();
+    remote.send(numbers_in, 3).unwrap();
     assert_eq!(graph.try_pump(), Err(PumpError::ForeignGraph));
     assert!(seen.borrow().is_empty());
-    remote.transaction(move |tx| tx.send(foreign_in, 4));
+    remote
+        .transaction(move |tx| tx.send(foreign_in, 4))
+        .unwrap();
     let message = panic_message(|| graph.pump());
     assert!(message.contains("another graph"), "{message}");
     graph.pump();
@@ -392,24 +402,28 @@ fn a_remote_send_to_an_input_collected_before_the_pump_is_stale() {
     let (kept_in, kept) = edge.keep();
     let lost_in = lost.unwrap();
     let seen = log(&mut graph, kept);
-    let remote = graph.remote();
-    // Queued before any transaction; the pump's first collects the input.
-    remote.send(lost_in, 1);
-    remote.transaction(move |tx| {
-        tx.send(kept_in, 2);
-        tx.send(lost_in, 3);
-    });
-    remote.send(kept_in, 4);
+    let remote = graph.remote_io();
+    // Nothing roots the lost input, so the build's collection freed it.
+    remote.send(lost_in, 1).unwrap();
+    remote
+        .transaction(move |tx| {
+            tx.send(kept_in, 2);
+            tx.send(lost_in, 3);
+        })
+        .unwrap();
+    remote.send(kept_in, 4).unwrap();
     assert_eq!(graph.try_pump(), Err(PumpError::Stale));
     assert_eq!(graph.try_pump(), Err(PumpError::Stale));
     assert!(seen.borrow().is_empty(), "the whole unit was dropped");
     assert_eq!(graph.try_pump(), Ok(()));
     assert_eq!(*seen.borrow(), [4]);
-    remote.transaction(move |tx| {
-        tx.send(kept_in, 5);
-        tx.send(lost_in, 6);
-    });
-    remote.send(kept_in, 7);
+    remote
+        .transaction(move |tx| {
+            tx.send(kept_in, 5);
+            tx.send(lost_in, 6);
+        })
+        .unwrap();
+    remote.send(kept_in, 7).unwrap();
     if cfg!(debug_assertions) {
         let message = panic_message(|| graph.pump());
         assert!(message.contains("a send to a collected input"), "{message}");
@@ -436,8 +450,8 @@ fn a_dropped_graph_refuses_remote_sends() {
     let drops = Arc::new(AtomicUsize::new(0));
     let (graph, edge) = Runtime::build(|b| b.input::<Counted>().1);
     let things_in = edge.keep();
-    let remote = graph.remote();
-    remote.send(things_in, Counted(drops.clone()));
+    let remote = graph.remote_io();
+    remote.send(things_in, Counted(drops.clone())).unwrap();
     drop(graph);
     assert_eq!(
         drops.load(Ordering::SeqCst),
@@ -445,24 +459,14 @@ fn a_dropped_graph_refuses_remote_sends() {
         "the queued unit was dropped"
     );
     assert_eq!(
-        remote.try_send(things_in, Counted(drops.clone())).err(),
-        Some(RemoteSendError::GraphDropped)
+        remote.send(things_in, Counted(drops.clone())).err(),
+        Some(IoError::Gone)
     );
-    assert_eq!(
-        remote.try_transaction(|_| ()),
-        Err(RemoteTransactionError::GraphDropped)
-    );
-    if cfg!(debug_assertions) {
-        let message = panic_message(|| remote.send(things_in, Counted(drops.clone())));
-        assert!(message.contains("a dropped graph"), "{message}");
-    } else {
-        remote.send(things_in, Counted(drops.clone()));
-        remote.transaction(|_| ());
-    }
+    assert_eq!(remote.transaction(|_| ()), Err(IoError::Gone));
     assert_eq!(
         drops.load(Ordering::SeqCst),
-        3,
-        "refused values are dropped"
+        2,
+        "a refused value is dropped"
     );
 }
 
@@ -475,12 +479,14 @@ fn a_panic_in_a_unit_poisons_the_graph() {
         (numbers_in, numbers.node(b))
     });
     let (numbers_in, _numbers) = edge.keep();
-    let remote = graph.remote();
-    remote.transaction(move |tx| {
-        tx.send(numbers_in, 1);
-        panic!("a remote transaction's closure panicked");
-    });
-    remote.send(numbers_in, 2);
+    let remote = graph.remote_io();
+    remote
+        .transaction(move |tx| {
+            tx.send(numbers_in, 1);
+            panic!("a remote transaction's closure panicked");
+        })
+        .unwrap();
+    remote.send(numbers_in, 2).unwrap();
     let message = panic_message(|| graph.pump());
     assert!(message.contains("closure panicked"), "{message}");
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));
