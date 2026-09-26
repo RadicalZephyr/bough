@@ -17,11 +17,12 @@ type Log = Rc<RefCell<Vec<String>>>;
 type TwoCells = (Input<u32>, Input<u32>, Cell<u32>, Cell<u32>);
 
 fn two_cells() -> (Runtime, TwoCells) {
-    Runtime::build(|build| {
+    let (graph, edge) = Runtime::build(|build| {
         let (a, a_in) = build.input::<u32>();
         let (b, b_in) = build.input::<u32>();
         (a_in, b_in, a.hold(build, 0), b.hold(build, 0))
-    })
+    });
+    (graph, edge.keep())
 }
 
 /// A counter: an input of its own, and the running total of what it gets.
@@ -29,14 +30,15 @@ type Counter = (Input<u32>, Cell<u32>);
 
 /// Each event opens a counter that starts from the event's value.
 fn counters() -> (Runtime, (Input<u32>, Stream<Counter>)) {
-    Runtime::build(|b| {
+    let (graph, edge) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
             (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
         });
         (open_in, opened)
-    })
+    });
+    (graph, edge.keep())
 }
 
 /// A waker that counts its wakes.
@@ -197,7 +199,7 @@ fn a_listener_that_always_sends_cannot_keep_a_call_from_returning() {
 /// over is still alive when the code outside anchors it.
 #[test]
 fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_for() {
-    let (mut graph, (open_in, other_in, opened)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let (_, other_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
@@ -206,6 +208,7 @@ fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_fo
         });
         (open_in, other_in, opened)
     });
+    let (open_in, other_in, opened) = edge.keep();
     graph.set_collect_after_every_transaction(true);
     let owner = Owner::new(graph);
     let io = owner.io();
@@ -236,7 +239,7 @@ fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_fo
 fn a_call_from_graph_code_is_refused() {
     let log: Log = Rc::default();
     let (map_log, construct_log) = (log.clone(), log.clone());
-    let (graph, (ios_in, _roots)) = Runtime::build(move |b| {
+    let (graph, edge) = Runtime::build(move |b| {
         let (ios, ios_in) = b.input::<Io>();
         let ios = ios.share(b);
         let (numbers, numbers_in) = b.input::<u32>();
@@ -257,6 +260,7 @@ fn a_call_from_graph_code_is_refused() {
         });
         (ios_in, (mapped, built.hold(b, ()), latest, numbers_in))
     });
+    let (ios_in, _roots) = edge.keep();
     let owner = Owner::new(graph);
     let io = owner.io();
     io.send(ios_in, io.clone()).unwrap();
@@ -360,12 +364,13 @@ fn an_anchor_from_a_listener_keeps_what_it_anchors() {
 /// events of the child transactions its transaction started.
 #[test]
 fn a_listener_registered_from_a_listener_misses_its_transactions_child_instants() {
-    let (graph, (numbers_in, numbers, later)) = Runtime::build(|b| {
+    let (graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let later = numbers.defer(b).share(b);
         (numbers_in, numbers, later)
     });
+    let (numbers_in, numbers, later) = edge.keep();
     let owner = Owner::new(graph);
     let io = owner.io();
     let log: Log = Rc::default();

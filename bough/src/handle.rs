@@ -150,11 +150,12 @@ impl Drop for Owner {
 /// ```
 /// use bough::{Runtime, Owner, Source};
 ///
-/// let (graph, (a_in, b_in, a, b)) = Runtime::build(|build| {
+/// let (graph, edge) = Runtime::build(|build| {
 ///     let (a, a_in) = build.input::<u32>();
 ///     let (b, b_in) = build.input::<u32>();
 ///     (a_in, b_in, a.hold(build, 0), b.hold(build, 0))
 /// });
+/// let (a_in, b_in, a, b) = edge.keep();
 /// let owner = Owner::new(graph);
 /// let io = owner.io();
 /// let echo = io.clone();

@@ -199,7 +199,7 @@ fn counted(graph: &mut Runtime, drive: impl FnOnce(&mut Runtime)) -> Option<[u64
 #[test]
 fn the_switch_stream_vector_restated_with_inputs() {
     let events = every_order(|order| {
-        let (mut graph, (s1_in, s2_in, sel_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (s1, s1_in) = b.input::<char>();
             let (s2, s2_in) = b.input::<char>();
             let (sel, sel_in) = b.input::<()>();
@@ -209,6 +209,7 @@ fn the_switch_stream_vector_restated_with_inputs() {
             let out = c.switch_stream(b);
             (s1_in, s2_in, sel_in, log_events(b, out))
         });
+        let (s1_in, s2_in, sel_in, log) = edge.keep();
         let schedule = [
             vec![send(s1_in, 'a'), send(s2_in, 'W')],
             vec![send(s1_in, 'b'), send(s2_in, 'X'), send(sel_in, ())],
@@ -233,7 +234,7 @@ struct SwitchCVector {
 
 /// The switch's steps by instant and its samples.
 fn switch_c_vector(v: &SwitchCVector, order: Order) -> (Vec<(usize, char)>, Vec<char>) {
-    let (mut graph, (inputs, sel_in, log, sw)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (c1, c1_in) = b.input_cell('a');
         let (c2, c2_in) = b.input_cell(v.c2);
         let (c3, c3_in) = b.input_cell('1');
@@ -243,6 +244,7 @@ fn switch_c_vector(v: &SwitchCVector, order: Order) -> (Vec<(usize, char)>, Vec<
         let sw = outer.switch_cell(b);
         ([c1_in, c2_in, c3_in], sel_in, log_steps(b, sw), sw)
     });
+    let (inputs, sel_in, log, sw) = edge.keep();
     let c1_sends = [Some('b'), Some('c'), Some('d'), Some('e')];
     let schedule: Vec<Vec<Send>> = (0..4)
         .map(|k| {
@@ -337,7 +339,7 @@ fn the_switch_cell_vectors_restated_with_inputs() {
 fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_orders() {
     let program = |x_first: bool, seed: Option<u64>| {
         let (calls, c) = counter();
-        let (mut graph, (sel_in, x_in, sc, log)) = Runtime::build(move |b| {
+        let (mut graph, edge) = Runtime::build(move |b| {
             let (sel, sel_in) = b.input::<()>();
             let (x, x_in) = b.input::<u32>();
             let a = b.constant(1u32);
@@ -352,6 +354,7 @@ fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_order
             let sc = outer.switch_cell(b);
             (sel_in, x_in, sc, log_steps(b, sc))
         });
+        let (sel_in, x_in, sc, log) = edge.keep();
         graph.set_shuffle_seed(seed);
         let (seen, mut on) = recorder();
         graph.listen_steps(sc, move |v| on(*v)).keep();
@@ -415,7 +418,7 @@ fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_order
 #[test]
 fn r3_steps_of_a_map_cell_over_a_loop_closed_with_a_switch_cell() {
     let steps = every_order(|order| {
-        let (mut graph, (sel_in, x_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (c, closer) = b.cell_loop::<u32>();
             let m = c.map_cell(b, |v| v + 1);
             let log = log_steps(b, m);
@@ -429,6 +432,7 @@ fn r3_steps_of_a_map_cell_over_a_loop_closed_with_a_switch_cell() {
             closer.close(b, sw);
             (sel_in, x_in, log)
         });
+        let (sel_in, x_in, log) = edge.keep();
         let schedule = [vec![send(x_in, 7), send(sel_in, ())]];
         let (logs, _) = drive::<u32, ()>(&mut graph, order, &schedule, &[log], &[]);
         logs
@@ -455,7 +459,7 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
     ];
     for permutation in permutations {
         let (steps, samples) = every_order(|order| {
-            let (mut graph, (sa_in, sb_in, x_in, log, top)) = Runtime::build(|b| {
+            let (mut graph, edge) = Runtime::build(|b| {
                 let (sa, sa_in) = b.input::<()>();
                 let (sb, sb_in) = b.input::<()>();
                 let (x, x_in) = b.input::<u32>();
@@ -470,6 +474,7 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
                 let top = outer_a.switch_cell(b);
                 (sa_in, sb_in, x_in, log_steps(b, top), top)
             });
+            let (sa_in, sb_in, x_in, log, top) = edge.keep();
             let mut sends = [
                 Some(send(sa_in, ())),
                 Some(send(sb_in, ())),
@@ -493,7 +498,7 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
 #[test]
 fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
     let steps = every_order(|order| {
-        let (mut graph, (sel_in, x_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>();
             let (x, x_in) = b.input::<u32>();
             let x = x.share(b);
@@ -506,6 +511,7 @@ fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
             let l = (sw, other).lift(b, |p, q| p + q);
             (sel_in, x_in, log_steps(b, l))
         });
+        let (sel_in, x_in, log) = edge.keep();
         let schedule = [vec![send(x_in, 7), send(sel_in, ())]];
         let (logs, _) = drive::<u32, ()>(&mut graph, order, &schedule, &[log], &[]);
         logs
@@ -523,7 +529,7 @@ fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
 #[test]
 fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
     let samples = every_order(|order| {
-        let (mut graph, (sel_in, cur)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (outer, closer) = b.cell_loop::<Cell<u32>>();
             let cur = outer.switch_cell(b);
             let (sel, sel_in) = b.input::<()>();
@@ -534,6 +540,7 @@ fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
             closer.close(b, def);
             (sel_in, cur)
         });
+        let (sel_in, cur) = edge.keep();
         let schedule = [vec![send(sel_in, ())]];
         let (_, samples) = drive::<(), u32>(&mut graph, order, &schedule, &[], &[cur]);
         samples
@@ -546,7 +553,7 @@ fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
 /// the same instant, which the text cannot evaluate. With `steps`, a steps
 /// view of the loop reads the switch after the instant.
 fn r10(steps: bool) -> (Runtime, Input<()>, Cell<u32>) {
-    let (graph, (sel_in, c, _steps)) = Runtime::build(|b| {
+    let (graph, edge) = Runtime::build(|b| {
         let (sel, sel_in) = b.input::<()>(); // node 1
         let a = b.constant(1u32); // node 2
         let (c, closer) = b.cell_loop::<u32>(); // node 3
@@ -559,6 +566,7 @@ fn r10(steps: bool) -> (Runtime, Input<()>, Cell<u32>) {
         let steps = steps.then(|| c.steps(b));
         (sel_in, c, steps)
     });
+    let (sel_in, c, _steps) = edge.keep();
     (graph, sel_in, c)
 }
 
@@ -626,7 +634,7 @@ fn r10b_the_relink_check_finds_the_cycle_without_a_reader() {
 #[test]
 fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (sel_in, logs, cells)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>();
             let sel = sel.share(b);
             let x = b.constant(1u32);
@@ -644,6 +652,7 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
             let logs = [log_steps(b, a_switch), log_steps(b, b_switch)];
             (sel_in, logs, [a_switch, b_switch, p, y])
         });
+        let (sel_in, logs, cells) = edge.keep();
         let schedule = [vec![send(sel_in, ())], vec![]];
         drive(&mut graph, order, &schedule, &logs, &cells)
     });
@@ -667,7 +676,7 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
 #[test]
 fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
     for seed in SEEDS {
-        let (mut graph, (sel_in, top)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>(); // node 1
             let one = b.constant(1u32); // node 2
             let first = b.constant(one); // node 3
@@ -680,6 +689,7 @@ fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
             closer.close(b, top);
             (sel_in, top)
         });
+        let (sel_in, top) = edge.keep();
         graph.set_shuffle_seed(seed);
         assert_eq!(*graph.sample(top), 1);
         let message = panic_message(|| graph.send(sel_in, ()));
@@ -725,7 +735,7 @@ fn a_first_link_that_closes_a_cycle_is_refused_in_the_build() {
 /// build.
 #[test]
 fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
-    let (mut graph, (x_in, sel_in, total)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (x, x_in) = b.input::<u32>(); // node 1
         let x = x.share(b); // node 2
         let (sel, sel_in) = b.input::<()>(); // node 3
@@ -738,6 +748,7 @@ fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
         let total = out.accumulate(b, 0u32, |v, t| t + v);
         (x_in, sel_in, total)
     });
+    let (x_in, sel_in, total) = edge.keep();
     graph.send(x_in, 5);
     assert_eq!(*graph.sample(total), 5);
     let message = panic_message(|| graph.send(sel_in, ()));
@@ -781,7 +792,7 @@ fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
 #[test]
 fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
     let (events, relinks) = every_order(|order| {
-        let (mut graph, (a_in, z_in, sel_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (a, a_in) = b.input::<char>();
             let (z, z_in) = b.input::<char>();
             let (sel, sel_in) = b.input::<()>();
@@ -791,6 +802,7 @@ fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
             let out = outer.switch_stream(b);
             (a_in, z_in, sel_in, log_events(b, out))
         });
+        let (a_in, z_in, sel_in, log) = edge.keep();
         let schedule = [
             vec![send(a_in, 'a'), send(z_in, 'X')],
             vec![send(sel_in, ())],
@@ -830,7 +842,7 @@ fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
 fn switch_stream_loop_through_its_selection() {
     for linear in [false, true] {
         let events = every_order(|order| {
-            let (mut graph, (ticks_in, log)) = Runtime::build(|b| {
+            let (mut graph, edge) = Runtime::build(|b| {
                 let (fwd, closer) = b.stream_loop::<u32>();
                 let out = fwd.share(b);
                 let (ticks, ticks_in) = b.input::<u32>();
@@ -864,6 +876,7 @@ fn switch_stream_loop_through_its_selection() {
                 let out = out.node(b);
                 (ticks_in, log_events(b, out))
             });
+            let (ticks_in, log) = edge.keep();
             let schedule: Vec<Vec<Send>> = (0..4).map(|_| vec![send(ticks_in, 1)]).collect();
             let (logs, _) = drive::<u32, ()>(&mut graph, order, &schedule, &[log], &[]);
             logs
@@ -888,7 +901,7 @@ fn switch_stream_loop_through_its_selection() {
 fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
     for through_loop in [true, false] {
         let events = every_order(|order| {
-            let (mut graph, (a_in, z_in, pick_in, log)) = Runtime::build(|b| {
+            let (mut graph, edge) = Runtime::build(|b| {
                 let (a, a_in) = b.input::<char>();
                 let (z, z_in) = b.input::<char>();
                 let (a, z) = (a.share(b), z.share(b));
@@ -908,6 +921,7 @@ fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
                 };
                 (a_in, z_in, pick_in, log_events(b, out))
             });
+            let (a_in, z_in, pick_in, log) = edge.keep();
             let both = |x, y| vec![send(a_in, x), send(z_in, y)];
             let schedule = [
                 both('a', 'X'),
@@ -944,7 +958,7 @@ fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
 #[test]
 fn a_switch_stream_whose_outer_steps_at_its_creation_moves_at_that_commit() {
     let events = every_order(|order| {
-        let (mut graph, (a_in, z_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let p = b.constant('p').steps_with_current(b);
             let (a, a_in) = b.input::<char>();
             let a = p.or_else(b, a).share(b);
@@ -959,6 +973,7 @@ fn a_switch_stream_whose_outer_steps_at_its_creation_moves_at_that_commit() {
             let out = outer.switch_stream(b);
             (a_in, z_in, log_events(b, out))
         });
+        let (a_in, z_in, log) = edge.keep();
         let schedule = [
             vec![send(a_in, 'a'), send(z_in, 'X')],
             vec![send(a_in, 'b'), send(z_in, 'Y')],
@@ -981,7 +996,7 @@ fn a_switch_stream_whose_outer_steps_at_its_creation_moves_at_that_commit() {
 #[test]
 fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
     let events = every_order(|order| {
-        let (mut graph, (x_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (outer, closer) = b.cell_loop::<Shared<char>>();
             let out = outer.switch_stream(b);
             let log = log_events(b, out);
@@ -992,6 +1007,7 @@ fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
             closer.close(b, definition);
             (x_in, log)
         });
+        let (x_in, log) = edge.keep();
         let schedule = [vec![send(x_in, 'x')], vec![send(x_in, 'y')]];
         drive::<char, ()>(&mut graph, order, &schedule, &[log], &[]).0
     });
@@ -1012,7 +1028,7 @@ fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
 fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
     for linear in [false, true] {
         let events = every_order(|order| {
-            let (mut graph, (a_in, z_in, pick_in, log)) = Runtime::build(|b| {
+            let (mut graph, edge) = Runtime::build(|b| {
                 let (a, a_in) = b.input::<char>();
                 let (z, z_in) = b.input::<char>();
                 let (pick, pick_in) = b.input::<bool>();
@@ -1030,6 +1046,7 @@ fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
                 };
                 (a_in, z_in, pick_in, log_events(b, out))
             });
+            let (a_in, z_in, pick_in, log) = edge.keep();
             let schedule = [
                 vec![send(a_in, 'a'), send(z_in, 'W')],
                 vec![send(a_in, 'b'), send(z_in, 'X'), send(pick_in, true)],
@@ -1064,7 +1081,7 @@ fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
 #[test]
 fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x_in, y_in, sel_in, logs, sw)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(1u32);
             let (hy, y_in) = b.input_cell(2u32);
             let (sel, sel_in) = b.input::<bool>();
@@ -1075,6 +1092,7 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
             let logs = [log_steps(b, sw), log_steps(b, tens)];
             (x_in, y_in, sel_in, logs, sw)
         });
+        let (x_in, y_in, sel_in, logs, sw) = edge.keep();
         let schedule = [
             vec![send(x_in, 5)],
             vec![send(x_in, 6), send(sel_in, true)],
@@ -1103,7 +1121,7 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
 fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
     let (steps, calls) = every_order(|order| {
         let (calls, c) = counter();
-        let (mut graph, (pick_in, c1_in, c2_in, log)) = Runtime::build(move |b| {
+        let (mut graph, edge) = Runtime::build(move |b| {
             let (pick, pick_in) = b.input_cell(false);
             let (c1, c1_in) = b.input_cell(1u32);
             let (c2, c2_in) = b.input_cell(10u32);
@@ -1115,6 +1133,7 @@ fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
             let sw = outer.switch_cell(b);
             (pick_in, c1_in, c2_in, log_steps(b, sw))
         });
+        let (pick_in, c1_in, c2_in, log) = edge.keep();
         let schedule = [
             vec![send(c1_in, 2)],
             vec![send(c1_in, 3), send(c2_in, 20), send(pick_in, true)],
@@ -1137,13 +1156,14 @@ fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
 #[test]
 fn a_switch_cell_steps_when_its_outer_selects_the_inner_it_follows() {
     let steps = every_order(|order| {
-        let (mut graph, (x_in, sel_in, log)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(1u32);
             let (sel, sel_in) = b.input::<()>();
             let outer = sel.map(move |_| hx).hold(b, hx);
             let sw = outer.switch_cell(b);
             (x_in, sel_in, log_steps(b, sw))
         });
+        let (x_in, sel_in, log) = edge.keep();
         let schedule = [
             vec![send(x_in, 5)],
             vec![send(sel_in, ())],
@@ -1171,7 +1191,7 @@ fn a_switch_cell_steps_when_its_outer_selects_the_inner_it_follows() {
 #[test]
 fn a_switch_cell_steps_at_its_creation() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x_in, sel_in, logs, cells)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(4u32);
             let (sel, sel_in) = b.input::<()>();
             let five = b.constant(5u32);
@@ -1199,6 +1219,7 @@ fn a_switch_cell_steps_at_its_creation() {
             ];
             (x_in, sel_in, logs, [held, early])
         });
+        let (x_in, sel_in, logs, cells) = edge.keep();
         let schedule = [vec![], vec![send(x_in, 9)], vec![send(sel_in, ())]];
         drive(&mut graph, order, &schedule, &logs, &cells)
     });
@@ -1227,7 +1248,7 @@ fn a_switch_cell_steps_at_its_creation() {
 #[test]
 fn nested_switches_in_every_send_order() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (leaves, picks, logs, cells)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (l1, l1_in) = b.input_cell(10u32);
             let (l2, l2_in) = b.input_cell(20u32);
             let (l3, l3_in) = b.input_cell(30u32);
@@ -1258,6 +1279,7 @@ fn nested_switches_in_every_send_order() {
                 [top, twice],
             )
         });
+        let (leaves, picks, logs, cells) = edge.keep();
         let leaf_sends: [&[(usize, u32)]; 6] = [
             &[(0, 11)],
             &[(1, 22)],
@@ -1315,7 +1337,7 @@ fn nested_switches_in_every_send_order() {
 fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
     let program = |x_first: bool, seed: Option<u64>| {
         let (calls, c) = counter();
-        let (mut graph, (x_in, sel_in, log, sw)) = Runtime::build(move |b| {
+        let (mut graph, edge) = Runtime::build(move |b| {
             let (x, x_in) = b.input::<u32>();
             let (sel, sel_in) = b.input::<()>();
             let h = x.hold(b, 0u32);
@@ -1329,6 +1351,7 @@ fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
             let sw = outer.switch_cell(b);
             (x_in, sel_in, log_steps(b, sw), sw)
         });
+        let (x_in, sel_in, log, sw) = edge.keep();
         graph.set_shuffle_seed(seed);
         let switch = counted(&mut graph, |g| {
             g.transaction(|tx| {
@@ -1386,7 +1409,7 @@ fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
 #[test]
 fn switches_move_at_each_child_instant() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x1_in, x2_in, lists_in, log, sw, cells)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (c1, x1_in) = b.input_cell(1u32);
             let (c2, x2_in) = b.input_cell(2u32);
             let c3 = b.constant(3u32);
@@ -1395,6 +1418,7 @@ fn switches_move_at_each_child_instant() {
             let sw = outer.switch_cell(b);
             (x1_in, x2_in, lists_in, log_steps(b, sw), sw, [c1, c2, c3])
         });
+        let (x1_in, x2_in, lists_in, log, sw, cells) = edge.keep();
         let [c1, c2, c3] = cells;
         let lists = move |cells: Vec<Cell<u32>>| -> Send {
             Box::new(move |tx| tx.send(lists_in, cells.clone()))
@@ -1411,7 +1435,7 @@ fn switches_move_at_each_child_instant() {
     assert_eq!(samples, [1, 3, 5, 21]);
 
     let events = every_order(|order| {
-        let (mut graph, (inputs, picks_in, log, streams)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (a, a_in) = b.input::<Vec<char>>();
             let (z, z_in) = b.input::<Vec<char>>();
             let a = a.split(b).share(b);
@@ -1421,6 +1445,7 @@ fn switches_move_at_each_child_instant() {
             let out = outer.switch_stream(b);
             ([a_in, z_in], picks_in, log_events(b, out), [a, z])
         });
+        let (inputs, picks_in, log, streams) = edge.keep();
         let [a, z] = streams;
         let chars = move |i: usize, text: &'static str| -> Send {
             let input = inputs[i];
@@ -1450,7 +1475,7 @@ fn switches_move_at_each_child_instant() {
 #[test]
 fn a_switch_cell_over_states_steps_as_a_state() {
     let (heard, lengths) = every_order(|order| {
-        let (mut graph, (names_in, pick_in, current, lengths)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (names, names_in) = b.input::<String>();
             let names = names.share(b);
             let push = |n: String, v: &mut Vec<String>| v.push(n);
@@ -1465,6 +1490,7 @@ fn a_switch_cell_over_states_steps_as_a_state() {
             let lengths: State<usize> = current.map_cell(b, |v| v.len());
             (names_in, pick_in, current, lengths)
         });
+        let (names_in, pick_in, current, lengths) = edge.keep();
         graph.set_shuffle_seed(order.seed);
         let instant = Rc::new(StdCell::new(0usize));
         let (heard, mut on) = recorder();
@@ -1562,7 +1588,7 @@ fn a_switch_stream_on_a_loop_forward_and_one_on_its_definition_are_refused() {
 /// Shared streams may have any number of switches over them.
 #[test]
 fn a_cell_of_shared_streams_may_have_several_switch_streams() {
-    let (mut graph, (clicks_in, first, second)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let clicks = clicks.share(b);
         let current = b.constant(clicks);
@@ -1572,6 +1598,7 @@ fn a_cell_of_shared_streams_may_have_several_switch_streams() {
             current.switch_stream(b),
         )
     });
+    let (clicks_in, first, second) = edge.keep();
     let (heard_first, on_first) = recorder();
     let (heard_second, on_second) = recorder();
     graph.listen(first, on_first).keep();
@@ -1587,7 +1614,7 @@ fn a_cell_of_shared_streams_may_have_several_switch_streams() {
 /// commit and panics, which poisons the graph.
 #[test]
 fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_poisons() {
-    let (mut graph, (s1_in, sel_in, taken, direct)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (s1, s1_in) = b.input::<u32>(); // node 1
         let c1 = b.constant(s1); // node 2
         let direct = c1.switch_stream(b); // node 3
@@ -1600,6 +1627,7 @@ fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_p
         let taken = log_events(b, via);
         (s1_in, sel_in, taken, direct)
     });
+    let (s1_in, sel_in, taken, direct) = edge.keep();
     let (heard, on) = recorder();
     graph.listen(direct, on).keep();
     graph.send(s1_in, 1);
@@ -1649,7 +1677,7 @@ fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build(
 #[test]
 fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
     let (first, second) = every_order(|order| {
-        let (mut graph, (inputs, sel_in, logs)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (s1, s1_in) = b.input::<u32>();
             let (s2, s2_in) = b.input::<u32>();
             let (s3, s3_in) = b.input::<u32>();
@@ -1667,6 +1695,7 @@ fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
             let logs = [log_events(b, a), log_events(b, bb)];
             ([s1_in, s2_in, s3_in], sel_in, logs)
         });
+        let (inputs, sel_in, logs) = edge.keep();
         let all = |k: u32| -> Vec<Send> {
             inputs
                 .iter()

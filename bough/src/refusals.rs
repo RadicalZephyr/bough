@@ -411,7 +411,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (_local, shared) = Runtime::build(|b| b.constant(Rc::new(0u32)));
+//! let (_local, edge) = Runtime::build(|b| b.constant(Rc::new(0u32)));
+//! let shared = edge.keep();
 //! let _ = Runtime::build_threaded(move |b| {
 //!     let _ = shared.steps(b);
 //! });
@@ -420,7 +421,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (_local, shared) = Runtime::build(|b| b.constant(Rc::new(0u32)));
+//! let (_local, edge) = Runtime::build(|b| b.constant(Rc::new(0u32)));
+//! let shared = edge.keep();
 //! let _ = Runtime::build_threaded(move |b| {
 //!     let _ = shared.steps_with_current(b);
 //! });
@@ -431,7 +433,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (_local, shared) = Runtime::build(|b| b.input::<Rc<u32>>().0);
+//! let (_local, edge) = Runtime::build(|b| b.input::<Rc<u32>>().0);
+//! let shared = edge.keep();
 //! let _ = Runtime::build_threaded(move |b| {
 //!     let _ = b.constant(shared).switch_stream(b);
 //! });
@@ -494,7 +497,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::{Runtime, Source};
-//! let (mut graph, numbers) = Runtime::build_threaded(|b| b.input::<u32>().0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input::<u32>().0);
+//! let numbers = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen(numbers, move |n| assert!(n < *rc));
 //! ```
@@ -502,7 +506,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::{Runtime, Source};
-//! let (mut graph, numbers) = Runtime::build_threaded(|b| b.input::<u32>().0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input::<u32>().0);
+//! let numbers = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen(numbers, move |n| assert!(n < *rc));
 //! ```
@@ -512,7 +517,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (mut graph, level) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let level = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen_cell(level, move |l| assert!(*l < *rc));
 //! ```
@@ -520,7 +526,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (mut graph, level) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let level = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen_cell(level, move |l| assert!(*l < *rc));
 //! ```
@@ -530,7 +537,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (mut graph, level) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let level = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen_steps(level, move |l| assert!(*l < *rc));
 //! ```
@@ -538,7 +546,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::Runtime;
-//! let (mut graph, level) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let (mut graph, edge) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
+//! let level = edge.keep();
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen_steps(level, move |l| assert!(*l < *rc));
 //! ```

@@ -59,11 +59,12 @@ fn folded_runs<A: Clone>(steps: &[Step<A>], fold: fn(A, A) -> A) -> Vec<A> {
 /// What the engine delivers for the same steps, through a slot connected
 /// to an input a listener observes, with a pump at the end.
 fn delivered<A: Clone + Send + 'static>(slot: &'static InputSlot<A>, steps: &[Step<A>]) -> Vec<A> {
-    let (mut graph, events) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<A>();
         b.connect(events_in, slot);
         events.node(b)
     });
+    let events = edge.keep();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     graph
@@ -131,11 +132,12 @@ fn runs_cut_by_timing_join_into_the_writes() {
         a
     });
     const WRITES: u32 = 20_000;
-    let (mut graph, events) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<Vec<u32>>();
         b.connect(events_in, &SLOT);
         events.node(b)
     });
+    let events = edge.keep();
     let runs = Rc::new(RefCell::new(Vec::new()));
     let sink = runs.clone();
     graph

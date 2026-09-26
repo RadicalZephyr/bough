@@ -49,7 +49,7 @@ pub struct App {
 }
 
 pub fn build() -> (Runtime, App) {
-    Runtime::build(|b| {
+    let (graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
         let counter_label = count.map_cell(b, |n| format!("Clicked {n} times"));
@@ -97,7 +97,8 @@ pub fn build() -> (Runtime, App) {
             ticks_in,
             clock,
         }
-    })
+    });
+    (graph, edge.keep())
 }
 
 /// A row that wires itself. It takes the handle, not the graph, so it can

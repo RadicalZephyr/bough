@@ -14,13 +14,14 @@ fn counter() -> (Rc<StdCell<u32>>, Rc<StdCell<u32>>) {
 
 #[test]
 fn a_hold_starts_at_its_initial_value_and_keeps_the_latest_event() {
-    let (mut graph, (numbers_in, latest)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let latest = numbers.hold(b, 7u32);
         // Sampling in graph code reads the value before the instant.
         assert_eq!(*latest.sample(b), 7);
         (numbers_in, latest)
     });
+    let (numbers_in, latest) = edge.keep();
     assert_eq!(*graph.sample(latest), 7);
     graph.send(numbers_in, 1);
     assert_eq!(*graph.sample(latest), 1);
@@ -31,7 +32,7 @@ fn a_hold_starts_at_its_initial_value_and_keeps_the_latest_event() {
 
 #[test]
 fn map_filter_and_hold_fuse_into_one_node() {
-    let (mut graph, (numbers_in, out)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let out = numbers
             .map(|n| n * 2)
@@ -40,6 +41,7 @@ fn map_filter_and_hold_fuse_into_one_node() {
             .hold(b, 0u32);
         (numbers_in, out)
     });
+    let (numbers_in, out) = edge.keep();
     assert_eq!(graph.live_nodes(), 2, "the input and the chain's hold");
     graph.send(numbers_in, 1);
     assert_eq!(*graph.sample(out), 3);
@@ -51,11 +53,12 @@ fn map_filter_and_hold_fuse_into_one_node() {
 
 #[test]
 fn filter_map_maps_and_filters_in_one_step() {
-    let (mut graph, (text_in, parsed)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (text, text_in) = b.input::<String>();
         let parsed = text.filter_map(|t| t.parse::<i64>().ok()).hold(b, -1i64);
         (text_in, parsed)
     });
+    let (text_in, parsed) = edge.keep();
     graph.send(text_in, "12".to_string());
     assert_eq!(*graph.sample(parsed), 12);
     graph.send(text_in, "twelve".to_string());
@@ -66,10 +69,11 @@ fn filter_map_maps_and_filters_in_one_step() {
 
 #[test]
 fn filter_map_with_the_identity_is_sodiums_filter_optional() {
-    let (mut graph, (maybe_in, held)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (maybe, maybe_in) = b.input::<Option<u32>>();
         (maybe_in, maybe.filter_map(|o| o).hold(b, 0u32))
     });
+    let (maybe_in, held) = edge.keep();
     graph.send(maybe_in, Some(4));
     graph.send(maybe_in, None);
     assert_eq!(*graph.sample(held), 4);
@@ -77,13 +81,14 @@ fn filter_map_with_the_identity_is_sodiums_filter_optional() {
 
 #[test]
 fn map_to_replaces_each_event_with_a_clone_of_one_value() {
-    let (mut graph, (clicks_in, label)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         (
             clicks_in,
             clicks.map_to("clicked".to_string()).hold(b, String::new()),
         )
     });
+    let (clicks_in, label) = edge.keep();
     assert_eq!(graph.sample(label), "");
     graph.send(clicks_in, ());
     assert_eq!(graph.sample(label), "clicked");
@@ -91,12 +96,13 @@ fn map_to_replaces_each_event_with_a_clone_of_one_value() {
 
 #[test]
 fn snapshot_reads_the_cell_as_it_was_before_the_instant() {
-    let (mut graph, (numbers_in, limit_in, out)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (limit, limit_in) = b.input_cell(10u32);
         let out = numbers.snapshot(limit, |n, l| n.min(*l)).hold(b, 0u32);
         (numbers_in, limit_in, out)
     });
+    let (numbers_in, limit_in, out) = edge.keep();
     graph.send(numbers_in, 18);
     assert_eq!(*graph.sample(out), 10);
     // The limit steps in the same instant: the snapshot still reads 10.
@@ -117,11 +123,12 @@ fn snapshot_reads_the_cell_as_it_was_before_the_instant() {
 
 #[test]
 fn gate_keeps_the_events_during_which_the_cell_was_true_before_the_instant() {
-    let (mut graph, (numbers_in, open_in, out)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (open, open_in) = b.input_cell(true);
         (numbers_in, open_in, numbers.gate(open).hold(b, 0u32))
     });
+    let (numbers_in, open_in, out) = edge.keep();
     graph.send(numbers_in, 1);
     assert_eq!(*graph.sample(out), 1);
     graph.send(open_in, false);
@@ -145,10 +152,11 @@ fn gate_keeps_the_events_during_which_the_cell_was_true_before_the_instant() {
 
 #[test]
 fn once_keeps_only_the_first_event() {
-    let (mut graph, (numbers_in, first)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.once().hold(b, 0u32))
     });
+    let (numbers_in, first) = edge.keep();
     graph.send(numbers_in, 5);
     graph.send(numbers_in, 6);
     assert_eq!(*graph.sample(first), 5);
@@ -158,7 +166,7 @@ fn once_keeps_only_the_first_event() {
 fn once_before_a_gate_takes_its_first_event_even_when_the_gate_drops_it() {
     // `gate (once s) c` against `once (gate s c)`: the first loses the
     // first event to the closed gate, the second waits for the gate.
-    let (mut graph, (numbers_in, open_in, gated_once, once_gated)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let (open, open_in) = b.input_cell(false);
@@ -166,6 +174,7 @@ fn once_before_a_gate_takes_its_first_event_even_when_the_gate_drops_it() {
         let once_gated = numbers.gate(open).once().hold(b, 0u32);
         (numbers_in, open_in, gated_once, once_gated)
     });
+    let (numbers_in, open_in, gated_once, once_gated) = edge.keep();
     graph.send(numbers_in, 1);
     graph.send(open_in, true);
     graph.send(numbers_in, 2);
@@ -177,7 +186,7 @@ fn once_before_a_gate_takes_its_first_event_even_when_the_gate_drops_it() {
 #[test]
 fn merge_combines_simultaneous_events_once_with_the_left_event_first() {
     let (calls, count) = counter();
-    let (mut graph, (left_in, right_in, merged)) = Runtime::build(move |b| {
+    let (mut graph, edge) = Runtime::build(move |b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left
@@ -188,6 +197,7 @@ fn merge_combines_simultaneous_events_once_with_the_left_event_first() {
             .hold(b, 0u32);
         (left_in, right_in, merged)
     });
+    let (left_in, right_in, merged) = edge.keep();
     graph.transaction(|tx| {
         tx.send(left_in, 1);
         tx.send(right_in, 2);
@@ -212,7 +222,7 @@ fn merge_combines_simultaneous_events_once_with_the_left_event_first() {
 #[test]
 fn merge_of_two_chains_from_one_shared_stream_fires_once() {
     let (calls, count) = counter();
-    let (mut graph, (numbers_in, merged)) = Runtime::build(move |b| {
+    let (mut graph, edge) = Runtime::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let merged = numbers
@@ -224,6 +234,7 @@ fn merge_of_two_chains_from_one_shared_stream_fires_once() {
             .hold(b, 0u32);
         (numbers_in, merged)
     });
+    let (numbers_in, merged) = edge.keep();
     graph.send(numbers_in, 2);
     assert_eq!(*graph.sample(merged), 23);
     assert_eq!(calls.get(), 1);
@@ -231,11 +242,12 @@ fn merge_of_two_chains_from_one_shared_stream_fires_once() {
 
 #[test]
 fn or_else_keeps_the_left_event() {
-    let (mut graph, (left_in, right_in, merged)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (left, left_in) = b.input::<&'static str>();
         let (right, right_in) = b.input::<&'static str>();
         (left_in, right_in, left.or_else(b, right).hold(b, ""))
     });
+    let (left_in, right_in, merged) = edge.keep();
     graph.transaction(|tx| {
         tx.send(right_in, "right");
         tx.send(left_in, "left");
@@ -247,10 +259,11 @@ fn or_else_keeps_the_left_event() {
 
 #[test]
 fn coalescing_inputs_fold_in_send_order_with_the_first_send_on_the_left() {
-    let (mut graph, (words_in, folded)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (words, words_in) = b.input_coalescing(|a: String, b: String| format!("({a}{b})"));
         (words_in, words.hold(b, String::new()))
     });
+    let (words_in, folded) = edge.keep();
     graph.transaction(|tx| {
         tx.send(words_in, "a".to_string());
         tx.send(words_in, "b".to_string());
@@ -263,7 +276,8 @@ fn coalescing_inputs_fold_in_send_order_with_the_first_send_on_the_left() {
 
 #[test]
 fn an_input_cell_starts_at_its_initial_value_and_steps_on_each_send() {
-    let (mut graph, (level, level_in)) = Runtime::build(|b| b.input_cell(3u8));
+    let (mut graph, edge) = Runtime::build(|b| b.input_cell(3u8));
+    let (level, level_in) = edge.keep();
     assert_eq!(graph.live_nodes(), 2, "an input and a hold over it");
     assert_eq!(*graph.sample(level), 3);
     graph.send(level_in, 4);
@@ -272,8 +286,8 @@ fn an_input_cell_starts_at_its_initial_value_and_steps_on_each_send() {
 
 #[test]
 fn a_coalescing_input_cell_folds_the_sends_of_one_transaction() {
-    let (mut graph, (digits, digits_in)) =
-        Runtime::build(|b| b.input_cell_coalescing(0u32, |a, b| a * 10 + b));
+    let (mut graph, edge) = Runtime::build(|b| b.input_cell_coalescing(0u32, |a, b| a * 10 + b));
+    let (digits, digits_in) = edge.keep();
     graph.transaction(|tx| {
         tx.send(digits_in, 1);
         tx.send(digits_in, 2);
@@ -284,7 +298,7 @@ fn a_coalescing_input_cell_folds_the_sends_of_one_transaction() {
 
 #[test]
 fn a_constant_never_changes_and_can_be_snapshotted() {
-    let (mut graph, (numbers_in, scale, scaled)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let scale = b.constant(3u32);
         (
@@ -293,6 +307,7 @@ fn a_constant_never_changes_and_can_be_snapshotted() {
             numbers.snapshot(scale, |n, k| n * k).hold(b, 0u32),
         )
     });
+    let (numbers_in, scale, scaled) = edge.keep();
     graph.send(numbers_in, 5);
     assert_eq!(*graph.sample(scale), 3);
     assert_eq!(*graph.sample(scaled), 15);
@@ -301,7 +316,7 @@ fn a_constant_never_changes_and_can_be_snapshotted() {
 #[test]
 fn never_never_fires() {
     let (calls, count) = counter();
-    let (mut graph, (numbers_in, merged, held)) = Runtime::build(move |b| {
+    let (mut graph, edge) = Runtime::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let nothing = b.never::<u32>();
         let merged = numbers
@@ -313,6 +328,7 @@ fn never_never_fires() {
         let held = b.never::<u32>().map(|n| n + 1).hold(b, 9u32);
         (numbers_in, merged, held)
     });
+    let (numbers_in, merged, held) = edge.keep();
     graph.send(numbers_in, 4);
     assert_eq!(*graph.sample(merged), 4);
     assert_eq!(*graph.sample(held), 9);
@@ -321,13 +337,14 @@ fn never_never_fires() {
 
 #[test]
 fn a_shared_stream_gives_every_consumer_the_event() {
-    let (mut graph, (words_in, lengths, shouts)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (words, words_in) = b.input::<String>();
         let words = words.share(b);
         let lengths = words.map(|w| w.len()).hold(b, 0usize);
         let shouts = words.map(|w| w.to_uppercase()).hold(b, String::new());
         (words_in, lengths, shouts)
     });
+    let (words_in, lengths, shouts) = edge.keep();
     graph.send(words_in, "hey".to_string());
     assert_eq!(*graph.sample(lengths), 3);
     assert_eq!(graph.sample(shouts), "HEY");
@@ -335,11 +352,12 @@ fn a_shared_stream_gives_every_consumer_the_event() {
 
 #[test]
 fn a_node_gives_a_chain_an_identity_that_a_later_chain_reads() {
-    let (mut graph, (numbers_in, out)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let doubled = numbers.map(|n| n * 2).node(b);
         (numbers_in, doubled.map(|n| n + 1).hold(b, 0u32))
     });
+    let (numbers_in, out) = edge.keep();
     assert_eq!(graph.live_nodes(), 3);
     graph.send(numbers_in, 4);
     assert_eq!(*graph.sample(out), 9);
@@ -354,7 +372,7 @@ impl Trace for Ticket {
 
 #[test]
 fn an_event_with_no_clone_moves_through_a_linear_path_into_a_hold() {
-    let (mut graph, (tickets_in, last)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (tickets, tickets_in) = b.input::<Ticket>();
         let nothing = b.never();
         let last = tickets
@@ -363,6 +381,7 @@ fn an_event_with_no_clone_moves_through_a_linear_path_into_a_hold() {
             .hold(b, Ticket(0));
         (tickets_in, last)
     });
+    let (tickets_in, last) = edge.keep();
     graph.send(tickets_in, Ticket(5));
     graph.send(tickets_in, Ticket(0));
     assert_eq!(graph.sample(last).0, 5);
@@ -370,10 +389,11 @@ fn an_event_with_no_clone_moves_through_a_linear_path_into_a_hold() {
 
 #[test]
 fn cell_values_are_read_by_reference_without_clone() {
-    let (mut graph, (names_in, names)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (names, names_in) = b.input::<Leaf<Vec<String>>>();
         (names_in, names.hold(b, Leaf(Vec::new())))
     });
+    let (names_in, names) = edge.keep();
     graph.send(names_in, Leaf(vec!["ada".to_string()]));
     let first: &Leaf<Vec<String>> = graph.sample(names);
     let second: &Leaf<Vec<String>> = graph.sample(names);
@@ -383,7 +403,7 @@ fn cell_values_are_read_by_reference_without_clone() {
 
 #[test]
 fn a_threaded_graph_runs_every_first_order_operation() {
-    let (mut graph, (numbers_in, limit_in, words_in, out, words)) = Runtime::build_threaded(|b| {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let (limit, limit_in) = b.input_cell(10u32);
@@ -405,6 +425,7 @@ fn a_threaded_graph_runs_every_first_order_operation() {
         let words = words.hold(b, String::new());
         (numbers_in, limit_in, words_in, out, words)
     });
+    let (numbers_in, limit_in, words_in, out, words) = edge.keep();
     graph.send(numbers_in, 3);
     assert_eq!(*graph.sample(out), 1006);
     graph.send(limit_in, 5);

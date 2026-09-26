@@ -20,12 +20,13 @@ mod sealed {
 /// ```
 /// use bough::{Cell, Runtime, Lift, Source};
 ///
-/// let (mut graph, (price_in, quantity_in, total)) = Runtime::build(|b| {
+/// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (price, price_in) = b.input_cell(3u32);
 ///     let (quantity, quantity_in) = b.input_cell(2u32);
 ///     let total: Cell<u32> = (price, quantity).lift(b, |p, q| p * q);
 ///     (price_in, quantity_in, total)
 /// });
+/// let (price_in, quantity_in, total) = edge.keep();
 /// assert_eq!(*graph.sample(total), 6);
 /// graph.transaction(|tx| {
 ///     tx.send(price_in, 4); // two inputs step in one instant:
@@ -42,13 +43,14 @@ mod sealed {
 /// ```compile_fail,E0599
 /// use bough::{Runtime, Lift, Source};
 ///
-/// let (_graph, _) = Runtime::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (names, _names_in) = b.input::<String>();
 ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     let (extra, _extra_in) = b.input_cell(1usize);
 ///     let total = (members, extra).lift(b, |m, e| m.len() + e);
 ///     let _totals = total.steps(b); // error: no method named `steps` found for struct `State`
 /// });
+/// edge.keep();
 /// ```
 pub trait Lift<F, R>: sealed::Sealed + Sized {
     /// The lifted cell: `Cell<R>` when every input is a `Cell`, `State<R>`

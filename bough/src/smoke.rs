@@ -13,10 +13,7 @@ use crate::{CollectionPolicy, Lift, Runtime, Source};
 /// mode cannot name the `Accepts` bound their types need.
 macro_rules! smoke_graph {
     ($build:path) => {{
-        let (
-            mut graph,
-            ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later),
-        ) = $build(|b| {
+        let (mut graph, edge) = $build(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
             let (level, level_in) = b.input_cell(1u32);
@@ -183,6 +180,8 @@ macro_rules! smoke_graph {
                 (stage2, stage3, stage4, stage5, stage6),
             )
         });
+        let ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later) =
+            edge.keep();
         let (
             stage2,
             (ticks, tick_steps, running, entry_count),
@@ -282,11 +281,12 @@ macro_rules! smoke_edge {
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
-            let (mut graph, (presses_in, total)) = $build(|b| {
+            let (mut graph, edge) = $build(|b| {
                 let (presses, presses_in) = b.input::<u32>();
                 b.connect(presses_in, &PRESSES);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
             });
+            let (presses_in, total) = edge.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             PRESSES.send(1);
             PRESSES.send(2);
@@ -304,7 +304,8 @@ macro_rules! smoke_edge {
         }
         #[cfg(not(any(feature = "std", feature = "critical-section")))]
         {
-            let (mut graph, _) = $build(|b| b.input::<u32>().1);
+            let (mut graph, edge) = $build(|b| b.input::<u32>().1);
+            edge.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             graph.pump();
             let _ = graph.try_pump();

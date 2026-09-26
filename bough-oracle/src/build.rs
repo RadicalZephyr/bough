@@ -387,7 +387,8 @@ macro_rules! engine_mode {
             const FUSED: usize = $fused;
 
             fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Runtime<Self>, R) {
-                Runtime::$build(f)
+                let (runtime, edge) = Runtime::$build(f);
+                (runtime, edge.keep())
             }
             fn input(b: &mut Build<Self>) -> (Stream<i64>, bough::Input<i64>) {
                 b.input()

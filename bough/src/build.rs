@@ -95,7 +95,7 @@ impl<M: Mode> Build<M> {
     ///
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (open_in, opened)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -104,6 +104,7 @@ impl<M: Mode> Build<M> {
     ///     });
     ///     (open_in, opened)
     /// });
+    /// let (open_in, opened) = edge.keep();
     /// graph.set_collect_after_every_transaction(true); // a test setting
     /// let received = Rc::new(RefCell::new(Vec::new()));
     /// let log = received.clone();
@@ -231,13 +232,14 @@ impl<M: Mode> Build<M> {
     /// ```
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (ticks_in, count)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
     ///     let (ticks, ticks_in) = b.input::<()>();
     ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
     ///     count_loop.close(b, next);                             // close
     ///     (ticks_in, count)
     /// });
+    /// let (ticks_in, count) = edge.keep();
     /// graph.send(ticks_in, ());
     /// graph.send(ticks_in, ());
     /// assert_eq!(*graph.sample(count), 2);
@@ -287,7 +289,7 @@ impl<M: Mode> Build<M> {
     /// ```
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (names_in, members)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
     ///     let (names, names_in) = b.input::<String>();
     ///     // A name joins once: the snapshot reads the members before the instant.
@@ -298,6 +300,7 @@ impl<M: Mode> Build<M> {
     ///     members_loop.close(b, joined);
     ///     (names_in, members)
     /// });
+    /// let (names_in, members) = edge.keep();
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "grace".to_string());
@@ -326,13 +329,14 @@ impl<M: Mode> Build<M> {
     /// use bough::{Runtime, Source};
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
-    /// let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (sums, sums_loop) = b.stream_loop::<u32>();
     ///     let total = sums.hold(b, 0u32);
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     sums_loop.close(b, numbers.snapshot(total, |n, t| n + t));
     ///     (numbers_in, total)
     /// });
+    /// let (numbers_in, total) = edge.keep();
     /// graph.send(numbers_in, 2);
     /// graph.send(numbers_in, 3);
     /// assert_eq!(*graph.sample(total), 5);
@@ -378,7 +382,7 @@ impl<M: Mode> Build<M> {
     /// ```
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (pick_in, shown)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let english = b.constant("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (pick, pick_in) = b.input::<bool>();
@@ -390,6 +394,7 @@ impl<M: Mode> Build<M> {
     ///     b.depends(&language, &[&french, &english]);
     ///     (pick_in, language.switch_cell(b))
     /// });
+    /// let (pick_in, shown) = edge.keep();
     /// graph.set_collect_after_every_transaction(true); // a test setting
     /// graph.send(pick_in, true);
     /// assert_eq!(graph.sample(shown), "bonjour");
@@ -458,13 +463,14 @@ impl<M: Mode> Build<M> {
 /// ```compile_fail,E0382
 /// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Runtime::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
 ///     let (ticks, _ticks_in) = b.input::<()>();
 ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
 ///     count_loop.close(b, next);
 ///     count_loop.close(b, next); // error: use of moved value: `count_loop`
 /// });
+/// edge.keep();
 /// ```
 ///
 /// It cannot be used from inside a `construct` closure either:
@@ -472,7 +478,7 @@ impl<M: Mode> Build<M> {
 /// ```compile_fail,E0507
 /// use bough::{Runtime, Source};
 ///
-/// let (graph, _) = Runtime::build(|b| {
+/// let (graph, edge) = Runtime::build(|b| {
 ///     let (events, _in) = b.input::<u32>();
 ///     let (forward, closer) = b.cell_loop::<u32>();
 ///     let _out = events.construct(b, move |b, n| {
@@ -480,6 +486,7 @@ impl<M: Mode> Build<M> {
 ///         closer.close(b, s.hold(b, n)); // error: cannot move out of a captured variable in an FnMut closure
 ///     });
 /// });
+/// edge.keep();
 /// ```
 pub struct CellLoop<A> {
     token: Token,
@@ -511,10 +518,11 @@ impl<A: 'static> CellLoop<A> {
 /// ```compile_fail,E0599
 /// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Runtime::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
 ///     let _joins = members.steps(b); // error: no method named `steps` found for struct `State`
 /// });
+/// edge.keep();
 /// ```
 ///
 /// A cell loop's forward is a [`Cell`], which has, so a cell loop closes
@@ -523,12 +531,13 @@ impl<A: 'static> CellLoop<A> {
 /// ```compile_fail,E0308
 /// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Runtime::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
 ///     let (names, _names_in) = b.input::<String>();
 ///     let joined = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     members_loop.close(b, joined); // error: expected `Cell<Vec<String>>`, found `State<Vec<String>>`
 /// });
+/// edge.keep();
 /// ```
 pub struct StateLoop<A> {
     token: Token,
@@ -575,11 +584,12 @@ impl<A: 'static> StreamLoop<A> {
     /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Runtime::build_threaded(|b| {
+    /// let (_graph, edge) = Runtime::build_threaded(|b| {
     ///     let (_counts, counts_loop) = b.stream_loop::<Rc<u32>>();
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     counts_loop.close(b, numbers.map(Rc::new)); // error: Rc is not Send
     /// });
+    /// edge.keep();
     /// ```
     ///
     /// Panics if the loop was declared in another scope, and if the chain's

@@ -56,7 +56,7 @@ const LINES: usize = 50;
 
 #[test]
 fn rfd_6_s_chat_room_runs_over_remotes() {
-    let (mut graph, (joins, messages, outbound)) = Runtime::build_threaded(|b| {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(
@@ -76,6 +76,7 @@ fn rfd_6_s_chat_room_runs_over_remotes() {
             .node(b);
         (joins_in, messages_in, outbound)
     });
+    let (joins, messages, outbound) = edge.keep();
 
     graph
         .listen(outbound, |(recipients, text)| {

@@ -427,7 +427,7 @@ fn a_remote_send_from_a_thread() {
 /// every transaction. The listener wires each counter through the handle,
 /// and the queue runs between the units, so both survive.
 fn rows_one_pump_opens() {
-    let (mut graph, (open_in, opened)) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -435,6 +435,7 @@ fn rows_one_pump_opens() {
         });
         (open_in, opened)
     });
+    let (open_in, opened) = edge.keep();
     graph.set_collect_after_every_transaction(true);
     let remote = graph.remote();
     let owner = Owner::new(graph);

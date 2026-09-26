@@ -60,8 +60,9 @@ use crate::trace::{Trace, Tracer};
 /// # Memory
 ///
 /// Nodes live in an arena the graph owns, and a node is alive while a root
-/// reaches it (RFD 3). There are three kinds of root: whatever the build
-/// closure returned, every live [`Listener`], and every live [`Anchor`].
+/// reaches it (RFD 3). There are two kinds of root: every live
+/// [`Listener`], and every live [`Anchor`], which an [`Anchored`] holds.
+/// What the build closure returned comes back anchored, like anything else.
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
 /// the cells a chain snapshots or gates on, and what
@@ -74,8 +75,6 @@ use crate::trace::{Trace, Tracer};
 /// [`CollectionPolicy`].
 pub struct Runtime<M: Mode = Local> {
     build: Build<M>,
-    /// The build closure's return value, traced once: the permanent roots.
-    roots: Vec<Token>,
     /// The build context's count of released guards as the last
     /// collection found it.
     released_before: usize,
@@ -90,7 +89,7 @@ pub struct Runtime<M: Mode = Local> {
 
 /// Transaction zero: nothing is started, so the new-node phase runs every
 /// node the closure built, dependencies first.
-fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtime<M>, R) {
+fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtime<M>, Anchored<R>) {
     let mut build = Build::<M>::new();
     let id = build.graph_id;
     build.begin();
@@ -104,30 +103,32 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
     );
     build.pop_scope();
     build.finish();
-    let mut tracer = Tracer::new();
-    r.trace(&mut tracer);
+    let edge = build.anchor(r);
     let graph = Runtime {
         build,
-        roots: tracer.visited,
         released_before: 0,
         baseline: 0,
         policy: CollectionPolicy::Automatic,
         stress: false,
         stale_operations: 0,
     };
-    (graph, r)
+    (graph, edge)
 }
 
 impl Runtime<Local> {
     /// Builds a `Local` graph. The closure gets the only [`Build`] context;
-    /// whatever it returns is the edge of the graph and its permanent root
-    /// set, which is why `R: Trace`.
+    /// whatever it returns is the edge of the graph, which comes back
+    /// [`Anchored`], so `R: Trace`. [`keep`](Anchored::keep) it to hold the
+    /// edge for the graph's life, or drop it to let collection free what
+    /// only the edge reached.
     ///
     /// The build closure runs as transaction zero. Its child transactions,
     /// which a [`split`](crate::Source::split) or a
     /// [`defer`](crate::Source::defer) that fires in it starts, run before
     /// `build` returns.
-    pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Runtime<Local>, R) {
+    pub fn build<R: Trace>(
+        f: impl FnOnce(&mut Build<Local>) -> R,
+    ) -> (Runtime<Local>, Anchored<R>) {
         build_graph(f)
     }
 }
@@ -142,7 +143,7 @@ impl Runtime<Threaded> {
     /// function.
     pub fn build_threaded<R: Trace + Send>(
         f: impl FnOnce(&mut Build<Threaded>) -> R,
-    ) -> (Runtime<Threaded>, R) {
+    ) -> (Runtime<Threaded>, Anchored<R>) {
         build_graph(f)
     }
 }
@@ -379,7 +380,7 @@ impl<M: Mode> Runtime<M> {
     /// Collects now, and starts counting toward the next one.
     fn collect_now(&mut self) {
         let released = self.build.released.count();
-        self.build.collect(&self.roots);
+        self.build.collect();
         self.released_before = released;
         self.baseline = self.build.store.live;
         self.build.store.allocated = 0;
@@ -501,7 +502,8 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0277
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, events) = Runtime::build(|b| b.input::<u32>().0);
+    /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
+    /// let events = edge.keep();
     /// let _l = graph.listen(events.map(|n| n + 1), |n| println!("{n}")); // error: Map<..> is not a Node
     /// ```
     ///
@@ -510,7 +512,8 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0382
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, events) = Runtime::build(|b| b.input::<u32>().0);
+    /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
+    /// let events = edge.keep();
     /// let _a = graph.listen(events, |n| println!("{n}"));
     /// let _b = graph.listen(events, |n| println!("{n}")); // error: use of moved value
     /// ```
@@ -644,11 +647,11 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// Anchors what I/O code wants to hold without listening to it: one of
-    /// the three kinds of root. `value` is a token, or any value that holds
+    /// the two kinds of root. `value` is a token, or any value that holds
     /// tokens, such as the tuple or struct of tokens a
     /// [`construct`](crate::Source::construct) closure made; the anchor roots
-    /// every token its [`Trace`] finds, as the build closure's return value
-    /// roots its own. The [`Anchored`] it returns carries the value and reads
+    /// every token its [`Trace`] finds, as [`build`](Runtime::build) does
+    /// for the build closure's return value. The [`Anchored`] it returns carries the value and reads
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
     ///
@@ -663,7 +666,7 @@ impl<M: Mode> Runtime<M> {
     ///
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (open_in, opened)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -671,6 +674,7 @@ impl<M: Mode> Runtime<M> {
     ///     });
     ///     (open_in, opened)
     /// });
+    /// let (open_in, opened) = edge.keep();
     /// graph.set_collect_after_every_transaction(true); // a test setting
     /// let received = Rc::new(RefCell::new(Vec::new()));
     /// let log = received.clone();
@@ -735,10 +739,11 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0502
     /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (numbers_in, latest)) = Runtime::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     (numbers_in, numbers.hold(b, 0u32))
     /// });
+    /// let (numbers_in, latest) = edge.keep();
     /// let before = graph.sample(latest);
     /// graph.send(numbers_in, 1); // error: graph is also borrowed as immutable
     /// assert_eq!(*before, 0);
@@ -1179,7 +1184,7 @@ impl Drop for Listener {
 }
 
 /// The handle that keeps a node alive from I/O code without listening to
-/// it, one of the three kinds of root, from [`Runtime::anchor`]. Dropping it
+/// it, one of the two kinds of root, from [`Anchored::into_parts`]. Dropping it
 /// removes the root, and the node is collected at a later collection if
 /// nothing else reaches it. It borrows nothing from the graph, and shares a
 /// count of its owners with its entries, as a [`Listener`] does.
@@ -1236,10 +1241,11 @@ impl Drop for Anchor {
 /// ```compile_fail,E0277
 /// use bough::{Anchored, Input, Runtime, Source};
 ///
-/// let (_graph, _) = Runtime::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
 ///     let _latest = rows.map(Some).hold(b, None); // error: Anchored is not Trace
 /// });
+/// edge.keep();
 /// ```
 pub struct Anchored<T> {
     value: T,
@@ -1298,10 +1304,11 @@ impl<T: Clone> Clone for Anchored<T> {
 ///
 /// use bough::{Runtime, Source};
 ///
-/// let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
+/// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
 /// });
+/// let (numbers_in, total) = edge.keep();
 /// let heard = Rc::new(RefCell::new(Vec::new())); // a Local graph keeps its Rc
 /// let sink = heard.clone();
 /// graph.listen_steps(total, move |t| sink.borrow_mut().push(*t)).keep();
@@ -1325,7 +1332,8 @@ impl<T: Clone> Clone for Anchored<T> {
 ///
 /// use bough::Runtime;
 ///
-/// let (graph, shared_in) = Runtime::build(|b| b.input::<Rc<u32>>().1);
+/// let (graph, edge) = Runtime::build(|b| b.input::<Rc<u32>>().1);
+/// let shared_in = edge.keep();
 /// graph.remote().send(shared_in, Rc::new(1)); // error: Rc is not Send
 /// ```
 ///
@@ -1521,7 +1529,7 @@ mod tests {
     fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
         // The consumers are returned, so that they are roots: a consumer no
         // root reaches is collected at the first send, and takes nothing.
-        let (mut graph, (linear_in, shared_in, shared, _consumers)) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (linear, linear_in) = b.input::<u32>();
             let latest = linear.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
@@ -1530,6 +1538,7 @@ mod tests {
             let same = shared.hold(b, 0u32);
             (linear_in, shared_in, shared, [latest, plus, same])
         });
+        let (linear_in, shared_in, shared, _consumers) = edge.keep();
         let data = |graph: &Runtime, index: u32| {
             *slot::<Local, u32>(&graph.build.store.data[index as usize])
         };

@@ -32,12 +32,12 @@
 //! context at each event of a stream, in the middle of its transaction:
 //! what the closure builds exists from that instant on, and each run is a
 //! scope that must close the loops it declares. Stage 7 adds collection
-//! (RFD 3): a node lives while a root reaches it, the build closure's
-//! return value, a live [`Listener`] or a live [`Anchor`]; what it reaches
-//! is its dependencies, the tokens [`Trace`] finds in a stateful cell's
-//! value, and what [`Build::depends`] declares; and collection, automatic
-//! by default and never inside a transaction, frees the rest, so that a
-//! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
+//! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or a
+//! live [`Anchor`], and [`Runtime::build`] anchors what its closure returns;
+//! what it reaches is its dependencies, the tokens [`Trace`] finds in a
+//! stateful cell's value, and what [`Build::depends`] declares; and
+//! collection, automatic by default and never inside a transaction, frees
+//! the rest, so that a stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, in connection order; a [`Remote`] queues a send, or a remote
@@ -79,12 +79,13 @@
 //!
 //! struct Click;
 //!
-//! let (mut graph, (clicks_in, label)) = Runtime::build(|b| {
+//! let (mut graph, edge) = Runtime::build(|b| {
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
-//!     (clicks_in, label) // whatever build returns is the edge, and the root set
+//!     (clicks_in, label) // whatever build returns is the edge, anchored
 //! });
+//! let (clicks_in, label) = edge.keep(); // kept for the graph's life
 //!
 //! let shown = Rc::new(RefCell::new(Vec::new()));
 //! let _listener = graph.listen_cell(label, {

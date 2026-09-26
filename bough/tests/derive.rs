@@ -37,7 +37,7 @@ struct Screen {
 /// else names it, and is stale.
 #[test]
 fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
-    let (mut graph, screen) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let events = clicks.share(b);
         let first = events.hold(b, 0u32);
@@ -56,6 +56,7 @@ fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
         };
         b.constant(screen)
     });
+    let screen = edge.keep();
     graph.collect_garbage();
     let screen = graph.sample(screen);
     assert_eq!((screen.title.as_str(), screen.opaque.0), ("home", 42));
@@ -111,7 +112,7 @@ struct Tagged<T, U> {
 fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
     let pages_out = Rc::new(RefCell::new(None));
     let pages_in = pages_out.clone();
-    let (mut graph, (routes_in, route, tagged, pair)) = Runtime::build(move |b| {
+    let (mut graph, edge) = Runtime::build(move |b| {
         let (routes, routes_in) = b.input::<Route>();
         let route = routes.hold(b, Route::Home);
         let pages = [b.constant(1u32), b.constant(2u32), b.constant(3u32)];
@@ -125,6 +126,7 @@ fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
         *pages_in.borrow_mut() = Some(pages);
         (routes_in, route, tagged, pair)
     });
+    let (routes_in, route, tagged, pair) = edge.keep();
     graph.set_collection_policy(CollectionPolicy::Manual);
     let [one, two, three] = pages_out.borrow().expect("the build ran");
     graph.send(routes_in, Route::Page(one));
@@ -189,7 +191,7 @@ struct Shadow {
 
 #[test]
 fn degenerate_shapes_derive_and_trace() {
-    let (mut graph, cells) = Runtime::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let unit = b.constant(Unit);
         let skipped = b.constant(AllSkipped { opaque: Opaque(5) });
         let empty = b.constant(None::<Empty>);
@@ -198,6 +200,7 @@ fn degenerate_shapes_derive_and_trace() {
         let shadow = b.constant(Shadow { tracer: seven });
         (unit, skipped, empty, flags, shadow)
     });
+    let cells = edge.keep();
     graph.collect_garbage();
     let (_, skipped, empty, flags, shadow) = cells;
     assert_eq!(graph.sample(skipped).opaque.0, 5);
@@ -228,7 +231,7 @@ struct Members {
 /// since `Remote` and `pump` are the I/O edge's stage.
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
-    let (mut graph, (joins, messages, outbound)) = Runtime::build_threaded(|b| {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(
@@ -248,6 +251,7 @@ fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
             .node(b);
         (joins_in, messages_in, outbound)
     });
+    let (joins, messages, outbound) = edge.keep();
     graph
         .listen(outbound, |(recipients, text)| {
             for sender in recipients {
