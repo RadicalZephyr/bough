@@ -643,6 +643,102 @@ fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
     assert_eq!(steps_heard.try_iter().collect::<Vec<_>>(), [6]);
 }
 
+/// A remote `listen_once` registers at the pump and hears the first event
+/// after that, and no other, on the driver's thread; here a send, the
+/// listen, then two sends, from another thread.
+#[test]
+fn a_remote_listen_once_hears_the_first_event_after_the_pump_registers_it() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    thread::spawn(move || {
+        remote.send(numbers_in, 1).unwrap();
+        remote
+            .listen_once(numbers, move |n| {
+                heard.send((n, thread::current().id())).unwrap()
+            })
+            .unwrap()
+            .keep();
+        remote.send(numbers_in, 2).unwrap();
+        remote.send(numbers_in, 3).unwrap();
+    })
+    .join()
+    .unwrap();
+    graph.pump();
+    assert_eq!(
+        hearing.try_iter().collect::<Vec<_>>(),
+        [(2, thread::current().id())]
+    );
+}
+
+/// A remote `listen_cell_once` runs on the driver at the pump, with the
+/// value then, and never again, into a `Threaded` runtime too.
+#[test]
+fn a_remote_listen_cell_once_fires_at_the_pump_with_the_value_then() {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = edge.keep();
+    let remote = graph.remote_io();
+    let (cells, cells_heard) = mpsc::channel();
+    thread::spawn(move || {
+        remote
+            .listen_cell_once(latest, move |n| cells.send(*n).unwrap())
+            .unwrap()
+            .keep();
+    })
+    .join()
+    .unwrap();
+    graph.send(numbers_in, 5);
+    graph.pump();
+    graph.send(numbers_in, 6);
+    assert_eq!(cells_heard.try_iter().collect::<Vec<_>>(), [5]);
+}
+
+/// A once-listener a remote asked for is a root until it fires, waiting
+/// included, as an `Io`'s is: a stream's until the first event after the
+/// pump, and a cell's until the pump.
+#[test]
+fn a_remote_once_listener_is_a_root_until_it_fires() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        let tens = numbers.map(|n| n * 10).share(b);
+        (numbers_in, (tens, numbers.hold(b, 0u32)))
+    });
+    let ((numbers_in, (tens, latest)), edge) = edge.into_parts();
+    let numbers_in = graph.anchor(numbers_in).keep();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    let cell_heard = heard.clone();
+    remote
+        .listen_once(tens, move |n| heard.send(n).unwrap())
+        .unwrap()
+        .keep();
+    remote
+        .listen_cell_once(latest, move |n| cell_heard.send(*n).unwrap())
+        .unwrap()
+        .keep();
+    drop(edge);
+    graph.collect_garbage();
+    graph.pump();
+    assert_eq!(hearing.try_iter().collect::<Vec<_>>(), [0], "at the pump");
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
+    graph.send(numbers_in, 1);
+    graph.collect_garbage();
+    assert_eq!(hearing.try_iter().collect::<Vec<_>>(), [10]);
+    assert_eq!(
+        graph.try_listen(tens, |_| ()).err(),
+        Some(TokenError::Stale)
+    );
+}
+
 /// A remote anchor keeps its value alive until the `Anchored` drops, and
 /// the `Anchored` can come back from the thread that asked for it.
 #[test]

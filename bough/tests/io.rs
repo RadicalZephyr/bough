@@ -209,6 +209,126 @@ fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
     assert_eq!(*steps.borrow(), [6]);
 }
 
+/// A queued `listen_once` registers at the pump, as a queued `listen`
+/// does, and hears the first event after that, and no other: here a send,
+/// the listen, then two sends.
+#[test]
+fn a_queued_listen_once_hears_the_first_event_after_the_pump_registers_it() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    io.send(numbers_in, 1).unwrap();
+    io.listen_once(numbers, move |n| sink.borrow_mut().push(n))
+        .unwrap()
+        .keep();
+    io.send(numbers_in, 2).unwrap();
+    io.send(numbers_in, 3).unwrap();
+    graph.pump();
+    assert_eq!(*heard.borrow(), [2]);
+}
+
+/// A queued `listen_cell_once` runs at the pump, with the value then, and
+/// never again. Dropping a once-listener's guard before the pump cancels
+/// it, as for any registration.
+#[test]
+fn a_queued_listen_cell_once_fires_at_the_pump_with_the_value_then() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        (numbers_in, numbers, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, numbers, latest) = edge.keep();
+    let io = graph.io();
+    let cells = Rc::new(RefCell::new(Vec::new()));
+    let sink = cells.clone();
+    io.listen_cell_once(latest, move |n| sink.borrow_mut().push(*n))
+        .unwrap()
+        .keep();
+    drop(
+        io.listen_cell_once(latest, |_| panic!("a cancelled call ran"))
+            .unwrap(),
+    );
+    drop(
+        io.listen_once(numbers, |_| panic!("a cancelled listener ran"))
+            .unwrap(),
+    );
+    graph.send(numbers_in, 5);
+    assert!(cells.borrow().is_empty(), "nothing fires before the pump");
+    graph.pump();
+    graph.send(numbers_in, 6);
+    assert_eq!(*cells.borrow(), [5], "the value at the pump, once");
+}
+
+/// A once-listener an `Io` asked for is a root until it fires, waiting
+/// included: a stream's until the first event after the pump, and a
+/// cell's until the pump.
+#[test]
+fn a_queued_once_listener_is_a_root_until_it_fires() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        let tens = numbers.map(|n| n * 10).share(b);
+        (numbers_in, (tens, numbers.hold(b, 0u32)))
+    });
+    let ((numbers_in, (tens, latest)), edge) = edge.into_parts();
+    let numbers_in = graph.anchor(numbers_in).keep();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let (stream_sink, cell_sink) = (heard.clone(), heard.clone());
+    io.listen_once(tens, move |n| stream_sink.borrow_mut().push(n))
+        .unwrap()
+        .keep();
+    io.listen_cell_once(latest, move |n| cell_sink.borrow_mut().push(*n))
+        .unwrap()
+        .keep();
+    drop(edge);
+    graph.collect_garbage();
+    graph.pump();
+    assert_eq!(*heard.borrow(), [0], "the cell's value, at the pump");
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
+    graph.send(numbers_in, 1);
+    graph.collect_garbage();
+    assert_eq!(*heard.borrow(), [0, 10]);
+    assert_eq!(
+        graph.try_listen(tens, |_| ()).err(),
+        Some(TokenError::Stale)
+    );
+}
+
+/// A queued cell once-listener's root ends at the pump, where it fires,
+/// so the automatic policy counts it released there: seven of them, on a
+/// graph the last collection left six nodes live in, and the unit after
+/// them ends with a collection.
+#[test]
+fn the_automatic_policy_counts_a_queued_cell_once_released_at_the_pump() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (n, n_in) = b.input::<u32>();
+        let n = n.share(b);
+        let cells: Vec<Cell<u32>> = (0..4)
+            .map(|k| n.map(move |v| v + k).hold(b, 0u32))
+            .collect();
+        (n_in, cells)
+    });
+    let ((n_in, cells), edge) = edge.into_parts();
+    let n_in = graph.anchor(n_in).keep();
+    let io = graph.io();
+    for k in 0..7 {
+        io.listen_cell_once(cells[k % 4], |_| ()).unwrap().keep();
+    }
+    drop(edge);
+    graph.collect_garbage(); // count from here; the waiting calls root the cells
+    assert_eq!(graph.live_nodes(), 6);
+    io.send(n_in, 1).unwrap();
+    graph.pump(); // seven spent, then the send's unit, and a collection after it
+    assert_eq!(graph.live_nodes(), 1);
+}
+
 /// An anchor an `Io` asked for keeps its value alive until the `Anchored`
 /// drops, and the `Anchored` carries the value from the start.
 #[test]

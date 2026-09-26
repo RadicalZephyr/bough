@@ -374,6 +374,44 @@ impl Io {
         Ok(Listener::new(Some(flag)))
     }
 
+    /// Listens to a stream's next event only, as [`Runtime::listen_once`]
+    /// does, from the next pump. The [`Listener`] comes back now. It's a
+    /// root until the listener fires, waiting included, and dropping it
+    /// before then cancels the listener.
+    pub fn listen_once<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+    {
+        let flag = self.register(
+            Roots::One(source.node_token()),
+            move |runtime, skip_stale, flag| {
+                runtime.listen_once_queued(skip_stale, flag, source, f)
+            },
+        )?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Hears a cell's value once, as [`Runtime::listen_cell_once`] does, at
+    /// the next pump: `f` runs there, with the value then, and that spends
+    /// the listener. It's how I/O code with no runtime reads a cell. The
+    /// [`Listener`] comes back now; it's a root until the pump, and
+    /// dropping it before then cancels the call.
+    pub fn listen_cell_once<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value) + 'static,
+    {
+        let flag = self.register(
+            Roots::One(cell.token()),
+            move |runtime, skip_stale, flag| {
+                runtime.listen_cell_once_queued(skip_stale, flag, cell, f)
+            },
+        )?;
+        Ok(Listener::new(Some(flag)))
+    }
+
     /// Anchors what `value` holds, as [`Runtime::anchor`] does. The
     /// [`Anchored`] comes back now, carrying the value. The waiting call
     /// keeps the value's tokens alive until the next pump registers the
@@ -563,6 +601,60 @@ where
         } else {
             runtime.listen_steps_queued(skip_stale, self.flag, self.cell, self.f)
         }
+    }
+}
+
+/// A once-listener a `RemoteIo` asked for, on a stream.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct ListenOnce<S, F> {
+    pub(crate) flag: Liveness,
+    pub(crate) source: S,
+    pub(crate) f: F,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M, S, F> RegisterIn<M> for ListenOnce<S, F>
+where
+    M: Mode + crate::mode::Accepts<F>,
+    S: Node,
+    S::Event: 'static,
+    F: FnOnce(S::Event) + 'static,
+{
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop> {
+        runtime.listen_once_queued(skip_stale, self.flag, self.source, self.f)
+    }
+}
+
+/// A cell's value a `RemoteIo` asked to hear once, at the pump. The call
+/// runs there, so the runtime stores nothing.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct ListenCellOnce<C, F> {
+    pub(crate) flag: Liveness,
+    pub(crate) cell: C,
+    pub(crate) f: F,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M, C, F> RegisterIn<M> for ListenCellOnce<C, F>
+where
+    M: Mode,
+    C: CellRef,
+    F: FnOnce(&C::Value),
+{
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop> {
+        runtime.listen_cell_once_queued(skip_stale, self.flag, self.cell, self.f)
     }
 }
 

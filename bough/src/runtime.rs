@@ -38,7 +38,9 @@ use crate::guard::{Liveness, before};
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::io::{AnchorTokens, Listen, ListenCell, Registration, Roots, Waiting};
+use crate::io::{
+    AnchorTokens, Listen, ListenCell, ListenCellOnce, ListenOnce, Registration, Roots, Waiting,
+};
 use crate::io::{Io, IoQueue};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
@@ -621,11 +623,20 @@ impl<M: Mode> Runtime<M> {
     where
         M: Accepts<F>,
     {
+        let flag = Liveness::new(&self.build.released);
+        self.attach_once_flag(i, f, call, flag.clone());
+        Listener::new(Some(flag))
+    }
+
+    /// Registers a once-listener on node `i` with the liveness its guard
+    /// shares.
+    fn attach_once_flag<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>, flag: Liveness)
+    where
+        M: Accepts<F>,
+    {
         let mut slot = <M as Accepts<F>>::erase(Erase::Slot);
         *part::<M, Option<F>>(&mut slot) = Some(f);
-        let flag = Liveness::new(&self.build.released);
-        self.push_entry(i, slot, call, flag.clone());
-        Listener::new(Some(flag))
+        self.push_entry(i, slot, call, flag);
     }
 
     /// Adds a listener's entry to node `i`, with its closure erased.
@@ -724,6 +735,55 @@ impl<M: Mode> Runtime<M> {
         }
         if let Some(i) = self.queued_lookup(skip_stale, cell.token(), LISTEN)? {
             self.attach_flag(i, f, call_cell::<M, C::Value, F>, flag);
+        }
+        Ok(())
+    }
+
+    /// [`listen_once`](Runtime::listen_once), as a handle asked for it, at
+    /// the pump, as [`listen_queued`](Runtime::listen_queued) says.
+    pub(crate) fn listen_once_queued<S, F>(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        source: S,
+        f: F,
+    ) -> Result<(), Stop>
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+        M: Accepts<F>,
+    {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        if let Some(i) = self.queued_lookup(skip_stale, source.node_token(), LISTEN)? {
+            self.attach_once_flag(i, f, call_stream_once::<M, S, F>, flag);
+        }
+        Ok(())
+    }
+
+    /// [`listen_cell_once`](Runtime::listen_cell_once), as a handle asked
+    /// for it, at the pump: `f` runs here, with the value at the pump. That
+    /// spends the listener, before `f` runs, as a stream once-listener's
+    /// call does.
+    pub(crate) fn listen_cell_once_queued<C, F>(
+        &mut self,
+        skip_stale: bool,
+        flag: Liveness,
+        cell: C,
+        f: F,
+    ) -> Result<(), Stop>
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value),
+    {
+        if !flag.is_live() {
+            return Ok(());
+        }
+        if let Some(i) = self.queued_lookup(skip_stale, cell.token(), LISTEN)? {
+            flag.spend();
+            f(self.build.value::<C::Value>(i));
         }
         Ok(())
     }
@@ -1607,6 +1667,31 @@ impl RemoteIo {
             f,
             now: false,
         })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Listens to a stream's next event only, as [`Io::listen_once`] does.
+    /// The listener runs on the driver's thread, so it must be `Send`.
+    pub fn listen_once<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
+    where
+        S: Node + Send,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + Send + 'static,
+    {
+        let token = source.node_token();
+        let flag = self.register(Roots::One(token), |flag| ListenOnce { flag, source, f })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Hears a cell's value once, as [`Io::listen_cell_once`] does: `f`
+    /// runs on the driver at the next pump, so it must be `Send`.
+    pub fn listen_cell_once<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef + Send,
+        F: FnOnce(&C::Value) + Send + 'static,
+    {
+        let token = cell.token();
+        let flag = self.register(Roots::One(token), |flag| ListenCellOnce { flag, cell, f })?;
         Ok(Listener::new(Some(flag)))
     }
 
