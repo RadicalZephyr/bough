@@ -60,11 +60,18 @@ thread_local! {
     static DRIVER: StdCell<bool> = const { StdCell::new(false) };
     /// The allocations of this thread since it became a driver.
     static ALLOCATIONS: StdCell<usize> = const { StdCell::new(0) };
+    /// The frees of this thread since it became a driver.
+    static FREES: StdCell<usize> = const { StdCell::new(0) };
 }
 
 /// The allocations the calling thread has made as a driver.
 fn allocations() -> usize {
     ALLOCATIONS.with(StdCell::get)
+}
+
+/// The frees the calling thread has made as a driver.
+fn frees() -> usize {
+    FREES.with(StdCell::get)
 }
 
 // Test scaffolding: `GlobalAlloc` is an unsafe trait. The crate under test
@@ -78,6 +85,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if DRIVER.try_with(StdCell::get).unwrap_or(false) {
+            let _ = FREES.try_with(|count| count.set(count.get() + 1));
+        }
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -611,4 +621,31 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
         on_sender[1..].iter().all(|&n| n == UNITS as usize),
         "one allocation a unit once the queue has grown: {on_sender:?}"
     );
+}
+
+/// A kept guard leaks nothing (RFD 3). `keep` gives up the guard's share
+/// and leaves its count of owners raised, and the runtime frees the state
+/// it shares with the guard when it drops. So over a round that builds a
+/// runtime, keeps a listener and an anchor, and drops the runtime, this
+/// thread frees everything it allocated. The first round warms up what a
+/// thread allocates once.
+#[test]
+fn keeping_a_guard_leaks_nothing_once_the_runtime_drops() {
+    DRIVER.with(|driver| driver.set(true));
+    let round = || {
+        let (mut graph, (numbers_in, held)) = Runtime::build(|b| {
+            let (numbers, numbers_in) = b.input::<u64>();
+            (numbers_in, numbers.hold(b, 0u64))
+        });
+        graph.listen_cell(held, |_| ()).keep();
+        graph.anchor(&held).keep();
+        graph.send(numbers_in, 1);
+        drop(graph);
+    };
+    round();
+    let (allocated, freed) = (allocations(), frees());
+    round();
+    let (allocated, freed) = (allocations() - allocated, frees() - freed);
+    assert!(allocated > 0, "the round allocates");
+    assert_eq!(freed, allocated, "the round leaked");
 }

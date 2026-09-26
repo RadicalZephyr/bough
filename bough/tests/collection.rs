@@ -897,11 +897,29 @@ fn kept_handles_are_roots_for_the_graph_s_life() {
 /// Garbage is made by unrooting as much as by allocating (RFD 3). A graph
 /// built once that then only drops listeners allocates no node, and the
 /// automatic policy still collects it: a dropped handle counts as a
-/// released root, through its flag, with no graph access, and when the
-/// handles released since the last collection exceed the live count it
-/// left, the next transaction opens with a collection.
+/// released root, through the count of owners it shares, with no graph
+/// access, and when the handles released since the last collection exceed
+/// the live count it left, the next transaction opens with a collection.
 #[test]
 fn the_automatic_policy_collects_a_graph_that_only_drops_listeners() {
+    collects_a_graph_that_only_releases(drop);
+}
+
+/// Where the target has pointer atomics, a guard can be dropped on
+/// another thread, even a `Local` runtime's, and the release still counts:
+/// the same graph, with every listener dropped on a thread of its own,
+/// collects at the same send.
+#[test]
+fn a_listener_dropped_on_another_thread_counts_as_released() {
+    collects_a_graph_that_only_releases(|listeners| {
+        std::thread::spawn(move || drop(listeners)).join().unwrap()
+    });
+}
+
+/// The graph of the two tests above: four listened cells, whose listeners
+/// `release` lets go at once, then three more listeners it lets go one at
+/// a time.
+fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
     let (out, inp) = side_channel::<Vec<Cell<u32>>>();
     let (mut graph, (n_in, n)) = Runtime::build(move |b| {
         let (n, n_in) = b.input::<u32>();
@@ -919,17 +937,37 @@ fn the_automatic_policy_collects_a_graph_that_only_drops_listeners() {
         .collect();
     graph.send(n_in, 1); // the first transaction collects what the build did not root
     assert_eq!(graph.live_nodes(), 6);
-    drop(handles);
+    release(handles);
     for released in 5..=7 {
         graph.send(n_in, released);
         assert_eq!(graph.live_nodes(), 6, "{} released, 6 live", released - 1);
-        graph.listen(n, |_| ()).unlisten();
+        release(vec![graph.listen(n, |_| ())]);
     }
     graph.send(n_in, 8); // 7 released: the transaction opens with a collection
     assert_eq!(graph.live_nodes(), 2);
     for c in cells {
         assert_eq!(graph.try_sample(c).err(), Some(TokenError::Stale));
     }
+}
+
+/// An anchor dropped on another thread releases its root, even a `Local`
+/// runtime's: the next collection frees what only the anchor reached.
+#[test]
+fn an_anchor_dropped_on_another_thread_releases_its_root() {
+    let (out, inp) = side_channel::<Cell<u32>>();
+    let (mut graph, n_in) = Runtime::build(move |b| {
+        let (n, n_in) = b.input::<u32>();
+        *inp.borrow_mut() = Some(n.hold(b, 0u32));
+        n_in
+    });
+    let held = out.borrow_mut().take().expect("the build ran");
+    let anchor = graph.anchor(&held);
+    graph.send(n_in, 1);
+    graph.collect_garbage();
+    assert_eq!(*graph.sample(held), 1);
+    std::thread::spawn(move || drop(anchor)).join().unwrap();
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(held).err(), Some(TokenError::Stale));
 }
 
 // ----------------------------------------------------------- operations on collected nodes

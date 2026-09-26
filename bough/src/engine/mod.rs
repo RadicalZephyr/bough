@@ -49,6 +49,7 @@ use core::cell::OnceCell;
 use alloc::vec::Vec;
 
 use crate::build::Build;
+use crate::guard::Liveness;
 use crate::mode::{Carrier, Mode};
 use crate::token::Token;
 use crate::trace::Tracer;
@@ -357,9 +358,10 @@ pub(crate) trait NodeOps<M: Mode> {
     const OPS: Ops<M>;
 }
 
-/// One listener: its flag, its erased closure, and the monomorphized call.
+/// One listener: the liveness its guard shares, its erased closure, and
+/// the monomorphized call.
 pub(crate) struct Entry<M: Mode> {
-    pub(crate) flag: M::Flag,
+    pub(crate) flag: Liveness,
     pub(crate) f: M::Carrier,
     pub(crate) call: fn(&mut M::Carrier, &mut Build<M>, u32),
 }

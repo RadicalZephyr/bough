@@ -33,7 +33,8 @@ use core::mem;
 
 use super::{Data, LISTENERS, LIVE, NOOP, WATCHED, cell, in_place, slot_mut};
 use crate::build::Build;
-use crate::mode::{FlagOps, Mode};
+use crate::guard::Liveness;
+use crate::mode::Mode;
 use crate::token::Token;
 use crate::trace::{Trace, Tracer};
 
@@ -70,7 +71,7 @@ impl<M: Mode> Build<M> {
     /// freed. `roots` is the build closure's return value; `anchors` are
     /// the anchors taken with `Runtime::anchor`, from which the dropped ones
     /// are removed here.
-    pub(crate) fn collect(&mut self, roots: &[Token], anchors: &mut Vec<(u32, M::Flag)>) -> usize {
+    pub(crate) fn collect(&mut self, roots: &[Token], anchors: &mut Vec<(u32, Liveness)>) -> usize {
         assert!(
             !self.in_tx,
             "bough: the graph is poisoned: a panic escaped an earlier transaction"

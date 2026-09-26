@@ -112,6 +112,7 @@ mod capabilities;
 mod cell;
 mod engine;
 mod error;
+mod guard;
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 mod handle;
 mod lift;

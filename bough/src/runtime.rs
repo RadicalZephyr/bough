@@ -5,16 +5,13 @@
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::boxed::Box;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-use alloc::rc::Rc;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-use core::cell::Cell as CoreCell;
+use core::marker::PhantomData;
 use core::task::Waker;
 
 use crate::Build;
@@ -35,11 +32,10 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-use crate::mode::LocalFlag;
+use crate::guard::{Liveness, Released};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
-use crate::mode::{Accepts, Erase, FlagOps, Local, Mode};
+use crate::mode::{Accepts, Erase, Local, Mode};
 use crate::source::Node;
 use crate::token::{Input, Token};
 use crate::trace::{Trace, Tracer};
@@ -78,12 +74,12 @@ pub struct Runtime<M: Mode = Local> {
     build: Build<M>,
     /// The build closure's return value, traced once: the permanent roots.
     roots: Vec<Token>,
-    /// The anchored nodes, each with the flag its handle shares. A dropped
-    /// anchor is taken out at the next collection.
-    anchors: Vec<(u32, M::Flag)>,
-    /// The count of dropped handles, which every handle's flag shares, so
-    /// that a drop needs no graph access.
-    released: <M::Flag as FlagOps>::Released,
+    /// The anchored nodes, each with the liveness its anchor shares. A
+    /// released anchor is taken out at the next collection.
+    anchors: Vec<(u32, Liveness)>,
+    /// The count of released guards, which every guard's state shares, so
+    /// that a release needs no graph access.
+    released: Released,
     /// `released` as the last collection found it.
     released_before: usize,
     /// Live nodes after the last collection, zero before the first.
@@ -117,7 +113,7 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
         build,
         roots: tracer.visited,
         anchors: Vec::new(),
-        released: <M::Flag as FlagOps>::released(),
+        released: Released::new(),
         released_before: 0,
         baseline: 0,
         policy: CollectionPolicy::Automatic,
@@ -166,16 +162,16 @@ impl Runtime<Local> {
         self.build.edge.inbox.clone()
     }
 
-    /// The count of released handles, for the flag of a handle made while
+    /// The count of released guards, for the liveness of a guard made while
     /// the graph is busy.
-    pub(crate) fn released(&self) -> Rc<CoreCell<usize>> {
+    pub(crate) fn released(&self) -> Released {
         self.released.clone()
     }
 
-    /// [`listen`](Runtime::listen), with the flag of a [`Listener`] the
-    /// handle gave out before the graph could register it. A cleared flag
-    /// means the listener was dropped first, and nothing registers.
-    pub(crate) fn listen_flagged<S, F>(&mut self, flag: LocalFlag, source: S, f: F)
+    /// [`listen`](Runtime::listen), with the liveness of a [`Listener`] the
+    /// handle gave out before the graph could register it. A guard with no
+    /// owner left was dropped first, and nothing registers.
+    pub(crate) fn listen_flagged<S, F>(&mut self, flag: Liveness, source: S, f: F)
     where
         S: Node,
         S::Event: 'static,
@@ -190,10 +186,10 @@ impl Runtime<Local> {
         }
     }
 
-    /// [`listen_cell`](Runtime::listen_cell), with a flag, as
+    /// [`listen_cell`](Runtime::listen_cell), with a guard's liveness, as
     /// [`listen_flagged`](Runtime::listen_flagged). The first call runs now,
     /// when the listener is registered.
-    pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, mut f: F)
+    pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: Liveness, cell: C, mut f: F)
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -209,9 +205,9 @@ impl Runtime<Local> {
         self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
     }
 
-    /// [`listen_steps`](Runtime::listen_steps), with a flag, as
+    /// [`listen_steps`](Runtime::listen_steps), with a guard's liveness, as
     /// [`listen_flagged`](Runtime::listen_flagged).
-    pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, f: F)
+    pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: Liveness, cell: C, f: F)
     where
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
@@ -225,9 +221,9 @@ impl Runtime<Local> {
         }
     }
 
-    /// [`anchor`](Runtime::anchor), with the flag of an [`Anchor`] the
+    /// [`anchor`](Runtime::anchor), with the liveness of an [`Anchor`] the
     /// handle gave out, as [`listen_flagged`](Runtime::listen_flagged).
-    pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: LocalFlag, value: &T) {
+    pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: Liveness, value: &T) {
         self.enter();
         if !flag.is_live() {
             return;
@@ -250,16 +246,16 @@ impl Runtime<Local> {
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 impl Listener<Local> {
     /// A listener whose registration shares `flag`, now or later.
-    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
-        Listener { alive: Some(flag) }
+    pub(crate) fn from_flag(flag: Liveness) -> Self {
+        Listener::new(Some(flag))
     }
 }
 
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 impl Anchor<Local> {
     /// An anchor whose registration shares `flag`, now or later.
-    pub(crate) fn from_flag(flag: LocalFlag) -> Self {
-        Anchor { alive: Some(flag) }
+    pub(crate) fn from_flag(flag: Liveness) -> Self {
+        Anchor::new(Some(flag))
     }
 }
 
@@ -359,9 +355,9 @@ impl<M: Mode> Runtime<M> {
         self.stale_operations += 1;
     }
 
-    /// Handles dropped since the last collection.
+    /// Guards released since the last collection.
     fn released_since(&self) -> usize {
-        <M::Flag as FlagOps>::count(&self.released).wrapping_sub(self.released_before)
+        self.released.count().wrapping_sub(self.released_before)
     }
 
     /// Runs a collection if one is due, as a transaction opens: under the
@@ -386,7 +382,7 @@ impl<M: Mode> Runtime<M> {
 
     /// Collects now, and starts counting toward the next one.
     fn collect_now(&mut self) {
-        let released = <M::Flag as FlagOps>::count(&self.released);
+        let released = self.released.count();
         self.build.collect(&self.roots, &mut self.anchors);
         self.released_before = released;
         self.baseline = self.build.store.live;
@@ -532,7 +528,7 @@ impl<M: Mode> Runtime<M> {
         self.enter();
         match self.checked(source.node_token(), LISTEN) {
             Some(i) => self.attach(i, f, call_stream::<M, S, F>),
-            None => Listener { alive: None },
+            None => Listener::new(None),
         }
     }
 
@@ -566,7 +562,7 @@ impl<M: Mode> Runtime<M> {
     {
         self.enter();
         let Some(i) = self.checked(cell.token(), LISTEN) else {
-            return Listener { alive: None };
+            return Listener::new(None);
         };
         f(self.build.value::<C::Value>(i));
         self.attach(i, f, call_cell::<M, C::Value, F>)
@@ -599,7 +595,7 @@ impl<M: Mode> Runtime<M> {
         self.enter();
         match self.checked(cell.token(), LISTEN) {
             Some(i) => self.attach(i, f, call_cell::<M, C::Value, F>),
-            None => Listener { alive: None },
+            None => Listener::new(None),
         }
     }
 
@@ -615,8 +611,9 @@ impl<M: Mode> Runtime<M> {
         Ok(self.attach(i, f, call_cell::<M, C::Value, F>))
     }
 
-    /// Registers a listener on node `i`. Its entry and its handle share a
-    /// flag; dispatch skips an entry whose flag is cleared and then drops it.
+    /// Registers a listener on node `i`. Its entry and its guard share a
+    /// liveness; dispatch skips an entry whose guard has no owner left, and
+    /// then drops it.
     fn attach<F: 'static>(
         &mut self,
         i: u32,
@@ -626,18 +623,18 @@ impl<M: Mode> Runtime<M> {
     where
         M: Accepts<F>,
     {
-        let flag = <M::Flag as FlagOps>::live(&self.released);
+        let flag = Liveness::new(&self.released);
         self.attach_flag(i, f, call, flag.clone());
-        Listener { alive: Some(flag) }
+        Listener::new(Some(flag))
     }
 
-    /// Registers a listener on node `i` with the flag its handle shares.
+    /// Registers a listener on node `i` with the liveness its guard shares.
     fn attach_flag<F: 'static>(
         &mut self,
         i: u32,
         f: F,
         call: fn(&mut M::Carrier, &mut Build<M>, u32),
-        flag: M::Flag,
+        flag: Liveness,
     ) where
         M: Accepts<F>,
     {
@@ -705,11 +702,11 @@ impl<M: Mode> Runtime<M> {
             .into_iter()
             .filter_map(|token| self.checked(token, ANCHOR))
             .collect();
-        let flag = <M::Flag as FlagOps>::live(&self.released);
+        let flag = Liveness::new(&self.released);
         for i in nodes {
             self.anchors.push((i, flag.clone()));
         }
-        Anchor { alive: Some(flag) }
+        Anchor::new(Some(flag))
     }
 
     /// [`anchor`](Runtime::anchor), returning the error instead of panicking.
@@ -718,7 +715,7 @@ impl<M: Mode> Runtime<M> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
         let start = self.anchors.len();
-        let flag = <M::Flag as FlagOps>::live(&self.released);
+        let flag = Liveness::new(&self.released);
         for token in tracer.visited {
             match self.lookup(token) {
                 Ok(i) => self.anchors.push((i, flag.clone())),
@@ -728,7 +725,7 @@ impl<M: Mode> Runtime<M> {
                 }
             }
         }
-        Ok(Anchor { alive: Some(flag) })
+        Ok(Anchor::new(Some(flag)))
     }
 
     /// The cell's current value, by reference. The cell is a
@@ -1144,29 +1141,39 @@ impl<M: Mode> Transaction<'_, M> {
 }
 
 /// A listener handle. Dropping it unlistens; it borrows nothing from the
-/// graph and shares a flag with its node instead, so it can be dropped inside
-/// a listener. The flag's type is the mode's, a counted cell in `Local` and
-/// an atomic in `Threaded`, which is why the handle carries the mode; the
-/// parameter is defaulted, so `Local` code never writes it.
+/// graph and shares a count of its owners with its node's entry instead, so
+/// it can be dropped inside a listener, and on any thread where the target
+/// has pointer atomics. The parameter is defaulted, so `Local` code never
+/// writes it.
 ///
 /// A live listener is a root: its node, and everything the node reaches,
 /// stays alive. Dropping the last one lets collection free them; a linear
 /// stream is consumed by `listen`, so once its listener is dropped nothing
 /// can observe it again. The drop counts as a released root for the
-/// automatic policy, through the flag, with no graph access.
+/// automatic policy, through the shared count, with no graph access.
 pub struct Listener<M: Mode = Local> {
-    /// The flag shared with the node's entry; `None` once kept.
-    alive: Option<M::Flag>,
+    /// The handle's share of the state its node's entry holds; `None` once
+    /// kept.
+    alive: Option<Liveness>,
+    mode: PhantomData<fn() -> M>,
 }
 
 impl<M: Mode> Listener<M> {
+    fn new(alive: Option<Liveness>) -> Self {
+        Listener {
+            alive,
+            mode: PhantomData,
+        }
+    }
+
     /// Stops listening now, the same as dropping the handle.
     pub fn unlisten(self) {
         drop(self);
     }
 
     /// Keeps listening for the life of the graph, without a handle to hold.
-    /// The handle gives up its share of the flag without clearing it.
+    /// The handle gives up its share without releasing it, so the count
+    /// of its owners never reaches zero.
     pub fn keep(mut self) {
         self.alive = None;
     }
@@ -1175,7 +1182,7 @@ impl<M: Mode> Listener<M> {
 impl<M: Mode> Drop for Listener<M> {
     fn drop(&mut self) {
         if let Some(flag) = self.alive.take() {
-            flag.clear();
+            flag.release();
         }
     }
 }
@@ -1183,24 +1190,33 @@ impl<M: Mode> Drop for Listener<M> {
 /// The handle that keeps a node alive from I/O code without listening to
 /// it, one of the three kinds of root, from [`Runtime::anchor`]. Dropping it
 /// removes the root, and the node is collected at a later collection if
-/// nothing else reaches it. It borrows nothing from the graph, and carries
-/// the mode for the same reason a [`Listener`] does.
+/// nothing else reaches it. It borrows nothing from the graph, and shares a
+/// count of its owners with its entries, as a [`Listener`] does.
 ///
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
 /// which is the concept this is one kind of.
 pub struct Anchor<M: Mode = Local> {
-    /// The flag shared with the anchored node; `None` once kept.
-    alive: Option<M::Flag>,
+    /// The handle's share of the state its entries hold; `None` once kept.
+    alive: Option<Liveness>,
+    mode: PhantomData<fn() -> M>,
 }
 
 impl<M: Mode> Anchor<M> {
+    fn new(alive: Option<Liveness>) -> Self {
+        Anchor {
+            alive,
+            mode: PhantomData,
+        }
+    }
+
     /// Removes the root now, the same as dropping the handle.
     pub fn unanchor(self) {
         drop(self);
     }
 
     /// Keeps the root for the life of the graph, without a handle to hold.
-    /// The handle gives up its share of the flag without clearing it.
+    /// The handle gives up its share without releasing it, so the count
+    /// of its owners never reaches zero.
     pub fn keep(mut self) {
         self.alive = None;
     }
@@ -1209,7 +1225,7 @@ impl<M: Mode> Anchor<M> {
 impl<M: Mode> Drop for Anchor<M> {
     fn drop(&mut self) {
         if let Some(flag) = self.alive.take() {
-            flag.clear();
+            flag.release();
         }
     }
 }

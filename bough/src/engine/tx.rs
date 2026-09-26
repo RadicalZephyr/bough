@@ -12,7 +12,7 @@ use core::mem;
 
 use super::{COMMITS, Kind, LISTENERS, ON_STACK, START, Tx, WATCHED, slot, slot_mut};
 use crate::build::Build;
-use crate::mode::{FlagOps, Mode};
+use crate::mode::Mode;
 
 /// A second send to a non-coalescing input in one transaction.
 #[derive(Debug)]
@@ -376,8 +376,8 @@ impl<M: Mode> Build<M> {
     }
 
     /// Listeners in evaluation order, after commit, with no graph access.
-    /// A handle dropped inside a listener only clears a flag, checked before
-    /// each call. Ties within a node follow registration order, rotated by
+    /// A guard dropped inside a listener only lowers its owner count, checked
+    /// before each call. Ties within a node follow registration order, rotated by
     /// the shuffle when it is on.
     fn dispatch(&mut self) {
         let salt = self.s.shuffle.map(|seed| seed ^ LISTENER_SALT);

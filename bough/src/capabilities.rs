@@ -11,16 +11,17 @@
 //!
 //! | Type | Exists | `Send` |
 //! | --- | --- | --- |
-//! | `Runtime<Local>`, `Listener<Local>`, `Anchor<Local>` | everywhere | no |
+//! | `Runtime<Local>` | everywhere | no |
 //! | `Input`, `Stream`, `Cell`, `State`, `Shared` | everywhere | yes, whatever they carry |
-//! | `Runtime<Threaded>`, `Listener<Threaded>`, `Anchor<Threaded>` | with pointer atomics | yes |
+//! | `Listener`, `Anchor`, in either mode | everywhere | with pointer atomics |
+//! | `Runtime<Threaded>` | with pointer atomics | yes |
 //! | `InputSlot` | with a lock | `Sync`, since it lives in a `static` |
 //! | `Remote` | with pointer atomics and a lock | yes |
 //! | `Io`, `Owner` | with `std` and pointer atomics | no |
 //!
 //! A lock is `std` or `critical-section`. The Cortex-M0 has no pointer
-//! atomics, so it has the first two rows, and the slot with
-//! `critical-section`.
+//! atomics, so it has the first three rows, with guards that aren't `Send`,
+//! and the slot with `critical-section`.
 //!
 //! Absence isn't checked: a type that exists where its row says it doesn't
 //! compiles unnoticed. Today the code can't compile there anyway, since
@@ -73,9 +74,9 @@ macro_rules! not_send {
 mod everywhere {
     use alloc::rc::Rc;
 
-    use crate::{Anchor, Cell, Input, Listener, Local, Runtime, Shared, State, Stream};
+    use crate::{Cell, Input, Local, Runtime, Shared, State, Stream};
 
-    not_send!(Runtime<Local>, Listener<Local>, Anchor<Local>);
+    not_send!(Runtime<Local>);
     // A token is an integer, whatever it carries.
     send!(
         Input<Rc<u8>>,
@@ -89,9 +90,23 @@ mod everywhere {
 /// Where the target has pointer atomics.
 #[cfg(target_has_atomic = "ptr")]
 mod with_atomics {
-    use crate::{Anchor, Listener, Runtime, Threaded};
+    use crate::{Anchor, Listener, Local, Runtime, Threaded};
 
-    send!(Runtime<Threaded>, Listener<Threaded>, Anchor<Threaded>);
+    send!(
+        Runtime<Threaded>,
+        Listener<Local>,
+        Anchor<Local>,
+        Listener<Threaded>,
+        Anchor<Threaded>,
+    );
+}
+
+/// Where the target has no pointer atomics.
+#[cfg(not(target_has_atomic = "ptr"))]
+mod without_atomics {
+    use crate::{Anchor, Listener, Local};
+
+    not_send!(Listener<Local>, Anchor<Local>);
 }
 
 /// Where there's a lock: `std` or `critical-section`.

@@ -55,12 +55,13 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::{Rc, Weak};
 use alloc::sync::Arc;
-use core::cell::{Cell as CoreCell, RefCell};
+use core::cell::RefCell;
 
 use crate::cell::CellRef;
 use crate::engine::edge::Inbox;
 use crate::error::{IoError, NowError};
-use crate::mode::{FlagOps, Local, LocalFlag};
+use crate::guard::{Liveness, Released};
+use crate::mode::Local;
 use crate::runtime::{Anchor, Listener, Runtime, Transaction};
 use crate::source::Node;
 use crate::token::Input;
@@ -76,10 +77,10 @@ struct Inner {
     /// The graph's inbox, whose poison mirror, guard and waker can be read
     /// while the graph is busy.
     inbox: Arc<Inbox>,
-    /// The graph's count of released handles, which the flag of a listener
+    /// The graph's count of released guards, which the state of a listener
     /// or an anchor points to, so that one can be made while the graph is
     /// busy.
-    released: Rc<CoreCell<usize>>,
+    released: Released,
 }
 
 impl Inner {
@@ -317,14 +318,14 @@ impl Io {
         Ok(())
     }
 
-    /// Makes the flag a handle shares with its registration, and asks for
-    /// the registration.
+    /// Makes the liveness a guard shares with its registration, and asks
+    /// for the registration.
     fn register(
         &self,
-        register: impl FnOnce(&mut Runtime<Local>, LocalFlag) + 'static,
-    ) -> Result<LocalFlag, IoError> {
+        register: impl FnOnce(&mut Runtime<Local>, Liveness) + 'static,
+    ) -> Result<Liveness, IoError> {
         let released = self.0.upgrade().ok_or(IoError::Gone)?.released.clone();
-        let flag = LocalFlag::live(&released);
+        let flag = Liveness::new(&released);
         let shared = flag.clone();
         self.request(false, Box::new(move |graph| register(graph, shared)))?;
         Ok(flag)
