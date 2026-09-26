@@ -25,7 +25,7 @@ use crate::engine::edge::{Fault, Start};
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::engine::edge::{Inbox, Unit};
+use crate::engine::edge::{Inbox, RemoteCall};
 use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -34,6 +34,11 @@ use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 use crate::error::IoError;
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 use crate::guard::Liveness;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::io::{AnchorTokens, Listen, ListenCell, Registration, Roots, Waiting};
 use crate::io::{Io, IoQueue};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
@@ -922,9 +927,10 @@ impl<M: Mode> Runtime<M> {
         self.pump_io(calls, skip_stale)
     }
 
-    /// The units queued when the pump reached them, in arrival order, each
-    /// as one transaction. A unit a listener queues runs at the next pump,
-    /// so a listener that always sends cannot keep one pump from returning.
+    /// The remote calls queued when the pump reached them, in arrival
+    /// order: each unit as one transaction, and each registration. A call a
+    /// listener queues runs at the next pump, so a listener that always
+    /// sends cannot keep one pump from returning.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
@@ -932,10 +938,13 @@ impl<M: Mode> Runtime<M> {
     fn pump_units(&mut self, skip_stale: bool) -> Result<(), Stop> {
         let queued = self.build.edge.inbox.len();
         for _ in 0..queued {
-            let Some(unit) = self.build.edge.inbox.pop() else {
-                break;
-            };
-            self.run_unit(skip_stale, unit)?;
+            match self.build.edge.inbox.pop() {
+                Some(RemoteCall::Unit(unit)) => self.run_unit(skip_stale, unit)?,
+                Some(RemoteCall::Register(registration)) => {
+                    M::register(self, registration, skip_stale)?;
+                }
+                None => break,
+            }
         }
         Ok(())
     }
@@ -1285,6 +1294,13 @@ impl<T: Clone> Clone for Anchored<T> {
 /// the inbox by the first entry that finds it, so calls fail from then on,
 /// and a dropped runtime closes it. Dropping a `RemoteIo` does nothing.
 ///
+/// It can listen and anchor too, as an `Io` can. The guard comes back at
+/// once, the registration runs on the driver at the pump, and dropping the
+/// guard first cancels it; a listener runs on the driver's thread, so it
+/// must be `Send`. A waiting call keeps the tokens it names alive until
+/// the pump runs it, as an `Io`'s does: a send's input, but not the value
+/// it carries; a registration's node; the tokens an anchor's value holds.
+///
 /// ```
 /// use std::cell::RefCell;
 /// use std::rc::Rc;
@@ -1371,22 +1387,86 @@ impl RemoteIo {
     /// Whether the input is collected, or was by the time the driver pumps,
     /// is graph knowledge, found at the pump, as for an [`Io`]'s send.
     pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.check(&[input.token])?;
-        self.push(Box::new(move |tx: &mut IoTransaction<'_>| {
-            tx.send(input, value)
-        }))
+        self.queue(
+            Roots::One(input.token),
+            None,
+            RemoteCall::Unit(Box::new(move |tx: &mut IoTransaction<'_>| {
+                tx.send(input, value)
+            })),
+        )
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
     /// on the driver, at its next pump, with an [`IoTransaction`] whose
     /// sends are simultaneous. The closure is I/O code: it has no graph
-    /// access, and its order of sends does not matter.
+    /// access, and its order of sends does not matter. While it waits it
+    /// keeps no token alive, since its closure hides them.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
     {
-        self.check(&[])?;
-        self.push(Box::new(f))
+        self.queue(Roots::None, None, RemoteCall::Unit(Box::new(f)))
+    }
+
+    /// Listens to a materialized node, as [`Io::listen`] does: the
+    /// [`Listener`] comes back now, the registration runs on the driver at
+    /// the next pump, and dropping the listener first cancels it. The
+    /// listener runs on the driver's thread, so it must be `Send`.
+    pub fn listen<S, F>(&self, source: S, f: F) -> Result<Listener, IoError>
+    where
+        S: Node + Send,
+        S::Event: 'static,
+        F: FnMut(S::Event) + Send + 'static,
+    {
+        let token = source.node_token();
+        let flag = self.register(Roots::One(token), |flag| Listen { flag, source, f })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Listens to a cell, as [`Io::listen_cell`] does: the first call, with
+    /// the current value, runs on the driver at the next pump.
+    pub fn listen_cell<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef + Send,
+        F: FnMut(&C::Value) + Send + 'static,
+    {
+        let token = cell.token();
+        let flag = self.register(Roots::One(token), |flag| ListenCell {
+            flag,
+            cell,
+            f,
+            now: true,
+        })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Listens to a cell's steps, as [`Io::listen_steps`] does.
+    pub fn listen_steps<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
+    where
+        C: CellRef + Send,
+        F: FnMut(&C::Value) + Send + 'static,
+    {
+        let token = cell.token();
+        let flag = self.register(Roots::One(token), |flag| ListenCell {
+            flag,
+            cell,
+            f,
+            now: false,
+        })?;
+        Ok(Listener::new(Some(flag)))
+    }
+
+    /// Anchors what `value` holds, as [`Io::anchor`] does. Only the tokens
+    /// cross to the driver, so the value needn't be `Send`; the
+    /// [`Anchored`] that carries it stays on this thread, or goes where
+    /// `T` can.
+    pub fn anchor<T: Trace>(&self, value: T) -> Result<Anchored<T>, IoError> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        let tokens = tracer.visited;
+        let roots = Roots::Many(tokens.clone());
+        let flag = self.register(roots, |flag| AnchorTokens { flag, tokens })?;
+        Ok(Anchored::new(value, Anchor::new(Some(flag))))
     }
 
     /// The checks a call makes before it queues: the runtime has dropped,
@@ -1408,9 +1488,38 @@ impl RemoteIo {
         Ok(())
     }
 
-    /// Queues a unit, unless the runtime has dropped since the check.
-    fn push(&self, unit: Unit) -> Result<(), IoError> {
-        self.inbox.push(unit).map_err(|_| IoError::Gone)
+    /// Queues a call that keeps `roots` alive while it waits, unless the
+    /// checks refuse it or the runtime has dropped since.
+    fn queue(
+        &self,
+        roots: Roots,
+        guard: Option<Liveness>,
+        call: RemoteCall,
+    ) -> Result<(), IoError> {
+        self.check(roots.as_slice())?;
+        self.inbox
+            .push(Waiting { call, roots, guard })
+            .map_err(|_| IoError::Gone)
+    }
+
+    /// Makes the liveness a guard shares with its registration, and queues
+    /// the registration `make` builds with it. The pump skips it if the
+    /// guard has gone.
+    fn register<R: Registration + 'static>(
+        &self,
+        roots: Roots,
+        make: impl FnOnce(Liveness) -> R,
+    ) -> Result<Liveness, IoError> {
+        self.check(roots.as_slice())?;
+        let flag = Liveness::new(&self.inbox.released);
+        let registration = Box::new(make(flag.clone()));
+        let waiting = Waiting {
+            call: RemoteCall::Register(registration),
+            roots,
+            guard: Some(flag.clone()),
+        };
+        self.inbox.push(waiting).map_err(|_| IoError::Gone)?;
+        Ok(flag)
     }
 }
 

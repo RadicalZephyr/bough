@@ -10,9 +10,9 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::{Rc, Weak};
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::slice;
 use core::task::Waker;
 
 use crate::cell::CellRef;
@@ -31,16 +31,45 @@ use crate::trace::{Trace, Tracer};
 /// build, or stops the pump.
 pub(crate) type Call<M> = Box<dyn FnOnce(&mut Runtime<M>, bool) -> Result<(), Stop>>;
 
-/// A call waiting in the queue, and the tokens it roots until it runs.
-struct Waiting {
-    call: Call<Local>,
-    /// What collection keeps alive while the call waits: a send's input,
-    /// a registration's node, the tokens an anchor's value holds. A
-    /// transaction's closure hides its tokens, so it names none.
-    roots: Vec<Token>,
-    /// A registration's guard. Once the guard has gone, the call roots
-    /// nothing, and the pump skips it.
-    guard: Option<Liveness>,
+/// The tokens a waiting call names, which collection keeps alive until it
+/// runs: a send's input or a registration's node, the tokens an anchor's
+/// value holds, or none for a transaction, whose closure hides them. One
+/// token needs no allocation of its own, so a remote send still allocates
+/// once.
+pub(crate) enum Roots {
+    None,
+    One(Token),
+    Many(Vec<Token>),
+}
+
+impl Roots {
+    pub(crate) fn as_slice(&self) -> &[Token] {
+        match self {
+            Roots::None => &[],
+            Roots::One(token) => slice::from_ref(token),
+            Roots::Many(tokens) => tokens,
+        }
+    }
+}
+
+/// A call waiting in a handle's queue, and what it keeps alive until it
+/// runs.
+pub(crate) struct Waiting<C> {
+    pub(crate) call: C,
+    pub(crate) roots: Roots,
+    /// A registration's guard. Once the guard has gone, the call keeps
+    /// nothing alive, and the pump skips it.
+    pub(crate) guard: Option<Liveness>,
+}
+
+impl<C> Waiting<C> {
+    /// Adds to `roots` the tokens this call keeps alive: none once a
+    /// registration's guard has gone.
+    pub(crate) fn roots(&self, roots: &mut Vec<Token>) {
+        if self.guard.as_ref().is_none_or(Liveness::is_live) {
+            roots.extend_from_slice(self.roots.as_slice());
+        }
+    }
 }
 
 /// What a runtime keeps for its same-thread handle: the queue its [`Io`]s
@@ -73,7 +102,7 @@ pub struct IoState {
     /// The graph's id, for a call's foreign-token check.
     graph: u32,
     /// The calls waiting for the next pump, in the order they were made.
-    calls: RefCell<VecDeque<Waiting>>,
+    calls: RefCell<VecDeque<Waiting<Call<Local>>>>,
     /// Set while graph code runs, from `arm` to `disarm`.
     graph_code: Cell<bool>,
     /// The runtime's poison, mirrored by the first entry that finds it.
@@ -147,9 +176,7 @@ impl IoQueue<Local> for Rc<IoState> {
 
     fn roots(&self, roots: &mut Vec<Token>) {
         for waiting in self.calls.borrow().iter() {
-            if waiting.guard.as_ref().is_none_or(Liveness::is_live) {
-                roots.extend_from_slice(&waiting.roots);
-            }
+            waiting.roots(roots);
         }
     }
 }
@@ -249,7 +276,7 @@ impl Io {
     /// [`try_pump`](Runtime::try_pump) returns it. A token from another
     /// graph is refused now, with [`IoError::ForeignGraph`].
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.unit(vec![input.token], move |tx| tx.send(input, value))
+        self.unit(Roots::One(input.token), move |tx| tx.send(input, value))
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
@@ -266,7 +293,7 @@ impl Io {
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
     {
-        self.unit(Vec::new(), f)
+        self.unit(Roots::None, f)
     }
 
     /// Listens to a materialized node, as [`Runtime::listen`] does, from the
@@ -284,7 +311,7 @@ impl Io {
         F: FnMut(S::Event) + 'static,
     {
         let flag = self.register(
-            vec![source.node_token()],
+            Roots::One(source.node_token()),
             move |runtime, skip_stale, flag| runtime.listen_queued(skip_stale, flag, source, f),
         )?;
         Ok(Listener::new(Some(flag)))
@@ -299,9 +326,10 @@ impl Io {
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
     {
-        let flag = self.register(vec![cell.token()], move |runtime, skip_stale, flag| {
-            runtime.listen_cell_queued(skip_stale, flag, cell, f)
-        })?;
+        let flag = self.register(
+            Roots::One(cell.token()),
+            move |runtime, skip_stale, flag| runtime.listen_cell_queued(skip_stale, flag, cell, f),
+        )?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -313,9 +341,10 @@ impl Io {
         C: CellRef,
         F: FnMut(&C::Value) + 'static,
     {
-        let flag = self.register(vec![cell.token()], move |runtime, skip_stale, flag| {
-            runtime.listen_steps_queued(skip_stale, flag, cell, f)
-        })?;
+        let flag = self.register(
+            Roots::One(cell.token()),
+            move |runtime, skip_stale, flag| runtime.listen_steps_queued(skip_stale, flag, cell, f),
+        )?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -329,9 +358,10 @@ impl Io {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
         let tokens = tracer.visited;
-        let flag = self.register(tokens.clone(), move |runtime, skip_stale, flag| {
-            runtime.anchor_queued(skip_stale, flag, tokens)
-        })?;
+        let flag = self.register(
+            Roots::Many(tokens.clone()),
+            move |runtime, skip_stale, flag| runtime.anchor_queued(skip_stale, flag, tokens),
+        )?;
         Ok(Anchored::new(value, Anchor::new(Some(flag))))
     }
 
@@ -352,13 +382,13 @@ impl Io {
         Ok(state)
     }
 
-    /// Queues a unit that roots `roots` while it waits.
+    /// Queues a unit that keeps `roots` alive while it waits.
     fn unit(
         &self,
-        roots: Vec<Token>,
+        roots: Roots,
         f: impl FnOnce(&mut IoTransaction<'_>) + 'static,
     ) -> Result<(), IoError> {
-        let state = self.state(&roots)?;
+        let state = self.state(roots.as_slice())?;
         push(
             &state,
             Waiting {
@@ -371,14 +401,14 @@ impl Io {
     }
 
     /// Makes the liveness a guard shares with its registration, and queues
-    /// the registration, which roots `roots` while it waits and the guard
-    /// lives. The pump skips it if the guard has gone.
+    /// the registration, which keeps `roots` alive while it waits and the
+    /// guard lives. The pump skips it if the guard has gone.
     fn register(
         &self,
-        roots: Vec<Token>,
+        roots: Roots,
         register: impl FnOnce(&mut Runtime<Local>, bool, Liveness) -> Result<(), Stop> + 'static,
     ) -> Result<Liveness, IoError> {
-        let state = self.state(&roots)?;
+        let state = self.state(roots.as_slice())?;
         let flag = Liveness::new(&state.released);
         let shared = flag.clone();
         push(
@@ -394,7 +424,137 @@ impl Io {
 }
 
 /// Queues a call, and wakes the driver.
-fn push(state: &IoState, waiting: Waiting) {
+fn push(state: &IoState, waiting: Waiting<Call<Local>>) {
     state.calls.borrow_mut().push_back(waiting);
     state.wake();
+}
+
+/// A registration a `RemoteIo` queued. The handle doesn't know its
+/// runtime's mode, so a registration can register into either, and the
+/// runtime's mode picks which through `Mode::register`.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+#[doc(hidden)]
+pub trait Registration: Send {
+    /// Registers into a `Local` runtime.
+    fn local(self: Box<Self>, runtime: &mut Runtime<Local>, skip_stale: bool) -> Result<(), Stop>;
+    /// Registers into a `Threaded` runtime.
+    fn threaded(
+        self: Box<Self>,
+        runtime: &mut Runtime<Threaded>,
+        skip_stale: bool,
+    ) -> Result<(), Stop>;
+}
+
+/// What a registration does in a runtime of mode `M`. A registration that
+/// can go into both modes is a [`Registration`].
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+#[doc(hidden)]
+pub trait RegisterIn<M: Mode> {
+    /// Registers into `runtime`, at the pump.
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop>;
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<R> Registration for R
+where
+    R: RegisterIn<Local> + RegisterIn<Threaded> + Send,
+{
+    fn local(self: Box<Self>, runtime: &mut Runtime<Local>, skip_stale: bool) -> Result<(), Stop> {
+        RegisterIn::<Local>::register(*self, runtime, skip_stale)
+    }
+    fn threaded(
+        self: Box<Self>,
+        runtime: &mut Runtime<Threaded>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        RegisterIn::<Threaded>::register(*self, runtime, skip_stale)
+    }
+}
+
+/// A listener a `RemoteIo` asked for, on a stream.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct Listen<S, F> {
+    pub(crate) flag: Liveness,
+    pub(crate) source: S,
+    pub(crate) f: F,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M, S, F> RegisterIn<M> for Listen<S, F>
+where
+    M: Mode + crate::mode::Accepts<F>,
+    S: Node,
+    S::Event: 'static,
+    F: FnMut(S::Event) + 'static,
+{
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop> {
+        runtime.listen_queued(skip_stale, self.flag, self.source, self.f)
+    }
+}
+
+/// A listener a `RemoteIo` asked for, on a cell: with a first call at
+/// registration, `listen_cell`, or without, `listen_steps`.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct ListenCell<C, F> {
+    pub(crate) flag: Liveness,
+    pub(crate) cell: C,
+    pub(crate) f: F,
+    pub(crate) now: bool,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M, C, F> RegisterIn<M> for ListenCell<C, F>
+where
+    M: Mode + crate::mode::Accepts<F>,
+    C: CellRef,
+    F: FnMut(&C::Value) + 'static,
+{
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop> {
+        if self.now {
+            runtime.listen_cell_queued(skip_stale, self.flag, self.cell, self.f)
+        } else {
+            runtime.listen_steps_queued(skip_stale, self.flag, self.cell, self.f)
+        }
+    }
+}
+
+/// An anchor a `RemoteIo` asked for: the tokens its value's `Trace` found.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct AnchorTokens {
+    pub(crate) flag: Liveness,
+    pub(crate) tokens: Vec<Token>,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M: Mode> RegisterIn<M> for AnchorTokens {
+    fn register(self, runtime: &mut Runtime<M>, skip_stale: bool) -> Result<(), Stop> {
+        runtime.anchor_queued(skip_stale, self.flag, self.tokens)
+    }
 }

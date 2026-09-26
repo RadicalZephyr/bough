@@ -9,12 +9,15 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, mpsc};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{Input, InputSlot, IoError, PumpError, RemoteIo, Runtime, Source, Stream};
+use bough::{
+    Cell, Input, InputSlot, IoError, PumpError, RemoteIo, Runtime, SendError, Source, Stream,
+    TokenError,
+};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {
@@ -490,4 +493,247 @@ fn a_panic_in_a_unit_poisons_the_graph() {
     let message = panic_message(|| graph.pump());
     assert!(message.contains("closure panicked"), "{message}");
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));
+}
+
+/// A listener registered from another thread runs on the driver's thread,
+/// from the pump that registers it. One whose guard was dropped before
+/// that pump is never registered.
+#[test]
+fn a_listener_registered_from_another_thread_runs_on_the_driver() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    let listener = thread::spawn(move || {
+        let kept = remote
+            .listen(numbers, move |n| {
+                heard.send((n, thread::current().id())).unwrap()
+            })
+            .unwrap();
+        drop(
+            remote
+                .listen(numbers, |_| panic!("a cancelled listener ran"))
+                .unwrap(),
+        );
+        remote.send(numbers_in, 1).unwrap();
+        kept
+    })
+    .join()
+    .unwrap();
+    graph.send(numbers_in, 0);
+    assert!(
+        hearing.try_recv().is_err(),
+        "nothing registered before the pump"
+    );
+    graph.pump();
+    assert_eq!(hearing.try_recv(), Ok((1, thread::current().id())));
+    drop(listener);
+    graph.send(numbers_in, 2);
+    assert!(hearing.try_recv().is_err(), "dropping the guard unlistens");
+}
+
+/// A remote `listen_cell` makes its first call at the pump, with the value
+/// then; a remote `listen_steps` makes none.
+#[test]
+fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = edge.keep();
+    let remote = graph.remote_io();
+    let (cells, cells_heard) = mpsc::channel();
+    let (steps, steps_heard) = mpsc::channel();
+    thread::spawn(move || {
+        remote
+            .listen_cell(latest, move |n| cells.send(*n).unwrap())
+            .unwrap()
+            .keep();
+        remote
+            .listen_steps(latest, move |n| steps.send(*n).unwrap())
+            .unwrap()
+            .keep();
+    })
+    .join()
+    .unwrap();
+    graph.send(numbers_in, 5);
+    graph.pump();
+    graph.send(numbers_in, 6);
+    assert_eq!(cells_heard.try_iter().collect::<Vec<_>>(), [5, 6]);
+    assert_eq!(steps_heard.try_iter().collect::<Vec<_>>(), [6]);
+}
+
+/// A remote anchor keeps its value alive until the `Anchored` drops, and
+/// the `Anchored` can come back from the thread that asked for it.
+#[test]
+fn a_remote_anchor_keeps_its_value_alive_until_it_drops() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = *edge;
+    let remote = graph.remote_io();
+    let kept = thread::spawn(move || remote.anchor((numbers_in, latest)).unwrap())
+        .join()
+        .unwrap();
+    graph.pump();
+    drop(edge);
+    graph.collect_garbage();
+    graph.send(kept.0, 3);
+    assert_eq!(*graph.sample(kept.1), 3, "the remote anchor kept both");
+    drop(kept);
+    graph.collect_garbage();
+    assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
+}
+
+/// A registration's token from another graph is refused when it's queued;
+/// a stale one is found at the pump.
+#[test]
+fn a_remote_registrations_foreign_token_is_refused_and_a_stale_one_found_at_the_pump() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (numbers_in, latest) = *edge;
+    let _input = graph.anchor(numbers_in);
+    drop(edge);
+    graph.collect_garbage();
+    let (_other, other_edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.hold(b, 0u32))
+    });
+    let (_foreign_in, foreign) = other_edge.keep();
+    let remote = graph.remote_io();
+    assert_eq!(
+        remote.listen_steps(foreign, |_| ()).err(),
+        Some(IoError::ForeignGraph)
+    );
+    assert_eq!(remote.anchor(foreign).err(), Some(IoError::ForeignGraph));
+    let _listener = remote.listen_steps(latest, |_| ()).unwrap();
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
+}
+
+/// A `Threaded` runtime has only the `RemoteIo`. It registers through one,
+/// moves to another thread, and its listener runs there at the pump.
+#[test]
+fn a_threaded_runtime_registers_through_remote_io_and_pumps_elsewhere() {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
+    });
+    let (numbers_in, total) = edge.keep();
+    let remote = graph.remote_io();
+    let (report, reports) = mpsc::channel();
+    remote
+        .listen_steps(total, move |t| {
+            report.send((*t, thread::current().id())).unwrap()
+        })
+        .unwrap()
+        .keep();
+    remote.send(numbers_in, 1).unwrap();
+    let driver = thread::spawn(move || {
+        graph.pump();
+        thread::current().id()
+    });
+    let driver = driver.join().unwrap();
+    assert_eq!(reports.try_recv(), Ok((1, driver)));
+}
+
+/// A row a construct sends out plain: its input, and the count of what
+/// was sent to it, starting at the event that opened it.
+type Row = (Input<u32>, Cell<u32>);
+
+/// Opens a row in a `Threaded` runtime, hands it to `on_row` in a listener,
+/// with a `RemoteIo`, and returns it once its unit has run. The runtime
+/// collects after every transaction, so a row nothing keeps is gone by then.
+fn open_a_row(
+    mut on_row: impl FnMut(&RemoteIo, Row) + Send + 'static,
+) -> (Runtime<bough::Threaded>, Row) {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let rows = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
+        });
+        (open_in, rows)
+    });
+    let (open_in, rows) = edge.keep();
+    graph.set_collect_after_every_transaction(true);
+    let remote = graph.remote_io();
+    let seen = Arc::new(Mutex::new(None));
+    let sink = seen.clone();
+    graph
+        .listen(rows, move |row: Row| {
+            on_row(&remote, row);
+            *sink.lock().unwrap() = Some(row);
+        })
+        .keep();
+    graph.send(open_in, 10);
+    let row = seen.lock().unwrap().expect("the listener saw a row");
+    (graph, row)
+}
+
+/// Waiting remote calls keep what they name alive, as an `Io`'s do: a
+/// listener handed a plain row queues a `listen_cell` on its count, and
+/// the row lasts through the collection after its unit until the pump,
+/// where the listener keeps it.
+#[test]
+fn a_waiting_remote_listen_keeps_a_plain_row_alive_until_the_pump() {
+    let counts = Arc::new(Mutex::new(Vec::new()));
+    let sink = counts.clone();
+    let (mut graph, (bumps_in, count)) = open_a_row(move |remote, (_, count)| {
+        let sink = sink.clone();
+        remote
+            .listen_cell(count, move |c| sink.lock().unwrap().push(*c))
+            .unwrap()
+            .keep();
+    });
+    assert_eq!(
+        *graph.sample(count),
+        10,
+        "alive after its unit's collection"
+    );
+    graph.pump();
+    graph.send(bumps_in, 5);
+    assert_eq!(
+        *counts.lock().unwrap(),
+        [10, 15],
+        "the listener keeps it now"
+    );
+}
+
+/// The same with a remote anchor of the whole row.
+#[test]
+fn a_waiting_remote_anchor_keeps_a_plain_row_alive_until_the_pump() {
+    let (mut graph, (bumps_in, count)) = open_a_row(|remote, row| {
+        remote.anchor(row).unwrap().keep();
+    });
+    assert_eq!(
+        *graph.sample(count),
+        10,
+        "alive after its unit's collection"
+    );
+    graph.pump();
+    graph.send(bumps_in, 5);
+    assert_eq!(*graph.sample(count), 15, "the anchor keeps it now");
+}
+
+/// A waiting remote send keeps its input alive, but not the value it
+/// carries; a registration whose guard has gone keeps nothing.
+#[test]
+fn a_waiting_remote_send_keeps_its_input_but_a_cancelled_call_keeps_nothing() {
+    let (mut graph, (bumps_in, count)) = open_a_row(|remote, (bumps_in, count)| {
+        remote.send(bumps_in, 5).unwrap();
+        drop(remote.listen_cell(count, |_| ()).unwrap());
+    });
+    assert_eq!(
+        graph.try_sample(count).err(),
+        Some(TokenError::Stale),
+        "only a cancelled call named the count"
+    );
+    assert_eq!(graph.try_pump(), Ok(()), "the send found its input alive");
+    assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
 }

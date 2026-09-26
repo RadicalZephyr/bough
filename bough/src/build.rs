@@ -79,7 +79,7 @@ impl<M: Mode> Build<M> {
             tx: 0,
             in_tx: false,
             s: Sched::default(),
-            edge: Edge::new(graph_id),
+            edge: Edge::new(graph_id, &released),
             io: M::IoQueue::new(graph_id, &released),
             anchors: Vec::new(),
             released,

@@ -42,7 +42,13 @@ use core::task::Waker;
 use super::DoubleSend;
 use super::TokenFault;
 use crate::build::Build;
+use crate::guard::Released;
 use crate::io::IoQueue;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::io::{Registration, Waiting};
 use crate::mode::Mode;
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -153,8 +159,8 @@ impl Edge {
         self.inbox.running.store(0, Ordering::Relaxed);
     }
 
-    pub(crate) fn new(graph: u32) -> Self {
-        let _ = graph;
+    pub(crate) fn new(graph: u32, released: &Released) -> Self {
+        let _ = (graph, released);
         Edge {
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -163,7 +169,7 @@ impl Edge {
                 target_has_atomic = "ptr",
                 any(feature = "std", feature = "critical-section")
             ))]
-            inbox: Arc::new(Inbox::new(graph)),
+            inbox: Arc::new(Inbox::new(graph, released)),
         }
     }
 }
@@ -186,16 +192,27 @@ impl Drop for Edge {
     }
 }
 
-/// What the inbox queues: one remote send, or one remote transaction's
-/// closure, each run by the driver as one transaction. A remote send is a
-/// closure of one send, so the driver has one path for both.
+/// One remote send, or one remote transaction's closure, run by the driver
+/// as one transaction. A remote send is a closure of one send, so the
+/// driver has one path for both.
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 pub(crate) type Unit = Box<dyn FnOnce(&mut IoTransaction<'_>) + Send>;
 
-/// The queue of units every `RemoteIo` of one graph shares (RFD 6).
+/// What a `RemoteIo` queues: a unit, or a registration of a listener or an
+/// anchor.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) enum RemoteCall {
+    Unit(Unit),
+    Register(Box<dyn Registration>),
+}
+
+/// The queue of calls every `RemoteIo` of one graph shares (RFD 6).
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -215,6 +232,9 @@ pub(crate) struct Inbox {
     /// suffices: it reads its own store.
     #[cfg(feature = "std")]
     running: AtomicUsize,
+    /// The graph's count of released guards, which a guard a `RemoteIo`
+    /// makes shares.
+    pub(crate) released: Released,
     state: Lock<Queue>,
 }
 
@@ -235,8 +255,8 @@ fn thread_token() -> usize {
     any(feature = "std", feature = "critical-section")
 ))]
 struct Queue {
-    /// Units in arrival order: the total order the semantics need.
-    units: VecDeque<Unit>,
+    /// Calls in arrival order: the total order the semantics need.
+    calls: VecDeque<Waiting<RemoteCall>>,
     /// What a push wakes.
     waker: Option<Waker>,
 }
@@ -246,29 +266,30 @@ struct Queue {
     any(feature = "std", feature = "critical-section")
 ))]
 impl Inbox {
-    fn new(graph: u32) -> Self {
+    fn new(graph: u32, released: &Released) -> Self {
         Inbox {
             graph,
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             #[cfg(feature = "std")]
             running: AtomicUsize::new(0),
+            released: released.clone(),
             state: Lock::new(Queue {
-                units: VecDeque::new(),
+                calls: VecDeque::new(),
                 waker: None,
             }),
         }
     }
 
-    /// Queues a unit and wakes the driver, after the lock is released.
-    /// Gives the unit back if the graph was dropped, to be dropped outside
+    /// Queues a call and wakes the driver, after the lock is released.
+    /// Gives the call back if the graph was dropped, to be dropped outside
     /// the lock, since its captures' `Drop` is user code.
-    pub(crate) fn push(&self, unit: Unit) -> Result<(), Unit> {
+    pub(crate) fn push(&self, waiting: Waiting<RemoteCall>) -> Result<(), Waiting<RemoteCall>> {
         let waker = self.state.with(|q| {
             if self.closed.load(Ordering::Relaxed) {
-                return Err(unit);
+                return Err(waiting);
             }
-            q.units.push_back(unit);
+            q.calls.push_back(waiting);
             Ok(q.waker.clone())
         })?;
         if let Some(waker) = waker {
@@ -277,15 +298,27 @@ impl Inbox {
         Ok(())
     }
 
-    /// The oldest unit. The lock is released before it runs, so a
+    /// The oldest call. The lock is released before it runs, so a
     /// transaction never runs under it.
-    pub(crate) fn pop(&self) -> Option<Unit> {
-        self.state.with(|q| q.units.pop_front())
+    pub(crate) fn pop(&self) -> Option<RemoteCall> {
+        self.state
+            .with(|q| q.calls.pop_front())
+            .map(|waiting| waiting.call)
     }
 
-    /// The units queued now.
+    /// The calls queued now.
     pub(crate) fn len(&self) -> usize {
-        self.state.with(|q| q.units.len())
+        self.state.with(|q| q.calls.len())
+    }
+
+    /// Adds to `roots` the tokens the waiting calls name, but none of a
+    /// registration whose guard has gone.
+    pub(crate) fn roots(&self, roots: &mut Vec<Token>) {
+        self.state.with(|q| {
+            for waiting in &q.calls {
+                waiting.roots(roots);
+            }
+        });
     }
 
     /// Replaces the waker a push wakes.
@@ -299,11 +332,11 @@ impl Inbox {
     fn close(&self) {
         #[cfg(feature = "std")]
         self.running.store(0, Ordering::Relaxed);
-        let (units, waker) = self.state.with(|q| {
+        let (calls, waker) = self.state.with(|q| {
             self.closed.store(true, Ordering::Relaxed);
-            (core::mem::take(&mut q.units), q.waker.take())
+            (core::mem::take(&mut q.calls), q.waker.take())
         });
-        drop((units, waker));
+        drop((calls, waker));
     }
 
     /// Whether the calling thread is running this graph's code: a remote

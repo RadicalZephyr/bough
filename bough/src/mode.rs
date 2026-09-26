@@ -50,7 +50,17 @@ use core::any::Any;
 use crate::engine::{CellValue, Memo};
 #[cfg(target_has_atomic = "ptr")]
 use crate::io::NoIo;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::io::Registration;
 use crate::io::{IoQueue, IoState};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::runtime::{Runtime, Stop};
 
 mod sealed {
     pub trait Sealed {}
@@ -74,6 +84,19 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     /// but it can prove `Stream<A>: Send`.
     #[doc(hidden)]
     fn erase_send<T: Send + 'static>(value: T) -> Self::Carrier;
+
+    /// Registers what a `RemoteIo` queued into a runtime of this mode, at
+    /// the pump.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    #[doc(hidden)]
+    fn register(
+        runtime: &mut Runtime<Self>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop>;
 }
 
 /// Access to an erased part: a checked downcast, never an unchecked one.
@@ -198,6 +221,17 @@ impl Mode for Local {
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
         Box::new(value)
     }
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    fn register(
+        runtime: &mut Runtime<Local>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.local(runtime, skip_stale)
+    }
 }
 
 impl<T: ?Sized> Accepts<T> for Local {
@@ -222,6 +256,14 @@ impl Mode for Threaded {
     type IoQueue = NoIo;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
         Box::new(value)
+    }
+    #[cfg(any(feature = "std", feature = "critical-section"))]
+    fn register(
+        runtime: &mut Runtime<Threaded>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.threaded(runtime, skip_stale)
     }
 }
 
