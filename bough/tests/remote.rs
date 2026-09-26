@@ -798,19 +798,16 @@ fn a_waiting_remote_anchor_keeps_a_plain_row_alive_until_the_pump() {
     assert_eq!(*graph.sample(count), 15, "the anchor keeps it now");
 }
 
-/// A waiting remote send keeps its input alive, but not the value it
-/// carries; a registration whose guard has gone keeps nothing.
+/// A waiting remote send keeps nothing alive, as an `Io`'s doesn't, and
+/// neither does a registration whose guard has gone. The row's input and
+/// count are gone after its unit, and the pump reports the send as stale.
 #[test]
-fn a_waiting_remote_send_keeps_its_input_but_a_cancelled_call_keeps_nothing() {
+fn a_waiting_remote_send_or_cancelled_registration_keeps_nothing_alive() {
     let (mut graph, (bumps_in, count)) = open_a_row(|remote, (bumps_in, count)| {
         remote.send(bumps_in, 5).unwrap();
         drop(remote.listen_cell(count, |_| ()).unwrap());
     });
-    assert_eq!(
-        graph.try_sample(count).err(),
-        Some(TokenError::Stale),
-        "only a cancelled call named the count"
-    );
-    assert_eq!(graph.try_pump(), Ok(()), "the send found its input alive");
+    assert_eq!(graph.try_sample(count).err(), Some(TokenError::Stale));
     assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
 }

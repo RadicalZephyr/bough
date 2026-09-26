@@ -84,8 +84,8 @@ impl<M: Mode> Build<M> {
             let i = self.anchors[k].0;
             self.shade(&mut gray, epoch, i);
         }
-        // What the calls waiting in the handles' queues name. A token that
-        // was stale when its call was made names nothing.
+        // What the registrations waiting in the handles' queues name. A
+        // token that was stale when its call was made names nothing.
         let mut waiting = Vec::new();
         self.io.roots(&mut waiting);
         #[cfg(all(

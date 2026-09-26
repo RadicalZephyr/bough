@@ -336,8 +336,8 @@ impl Inbox {
             .map(|waiting| waiting.call)
     }
 
-    /// Adds to `roots` the tokens the waiting calls name, but none of a
-    /// registration whose guard has gone.
+    /// Adds to `roots` the tokens the waiting registrations name, but none
+    /// of one whose guard has gone.
     pub(crate) fn roots(&self, roots: &mut Vec<Token>) {
         self.state.with(|q| {
             for waiting in &q.calls {

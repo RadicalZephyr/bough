@@ -32,11 +32,12 @@ use crate::trace::{Trace, Tracer};
 /// build, or stops the pump.
 pub(crate) type Call<M> = Box<dyn FnOnce(&mut Runtime<M>, bool) -> Result<(), Stop>>;
 
-/// The tokens a waiting call names, which collection keeps alive until it
-/// runs: a send's input or a registration's node, the tokens an anchor's
-/// value holds, or none for a transaction, whose closure hides them. One
-/// token needs no allocation of its own, so a remote send still allocates
-/// once.
+/// The tokens a waiting registration names, which collection keeps alive
+/// until it runs: a listener's node, or the tokens an anchor's value
+/// holds. A unit, a send or a transaction, keeps none: a send to an input
+/// no root reaches can't be observed, so the pump reports it as stale
+/// rather than keep the input for it. One token needs no allocation of
+/// its own.
 pub(crate) enum Roots {
     None,
     One(Token),
@@ -106,8 +107,8 @@ pub trait IoQueue<M: Mode>: 'static {
     fn front(&self) -> Option<usize>;
     /// The oldest call.
     fn pop(&self) -> Option<Call<M>>;
-    /// Adds to `roots` the tokens the waiting calls name, but none of a
-    /// registration whose guard has gone.
+    /// Adds to `roots` the tokens the waiting registrations name, but none
+    /// of one whose guard has gone.
     fn roots(&self, roots: &mut Vec<Token>);
 }
 
@@ -265,13 +266,13 @@ impl IoQueue<Threaded> for NoIo {
 /// has since the last pump began: one wake is enough for every call that
 /// pump will run. A `RemoteIo` keeps the same rule for its own calls.
 ///
-/// A waiting call keeps the tokens it names alive until the pump runs it,
-/// through any collection before then: a send's input, but not the value
-/// it carries; a registration's node; the tokens an anchor's value holds.
-/// So a listener handed a plain row can listen to it or anchor it, and the
-/// row lasts until the pump registers what keeps it. A transaction's
-/// closure hides its tokens, so a waiting transaction keeps none, and a
-/// registration whose guard has gone keeps none either.
+/// A waiting registration keeps the tokens it names alive until the pump
+/// runs it, through any collection before then: a listener's node, or the
+/// tokens an anchor's value holds. So a listener handed a plain row can
+/// listen to it or anchor it, and the row lasts until the pump registers
+/// what keeps it. One whose guard has gone keeps nothing alive. A waiting
+/// send or transaction keeps nothing alive either: a send to an input no
+/// root reaches can't be observed, so the pump reports it as stale.
 ///
 /// A call is refused, with an [`IoError`], if the runtime has dropped, is
 /// poisoned or is running graph code, or if a token the call names is
@@ -294,14 +295,15 @@ impl Io {
     /// Queues one value as a unit of its own, which the next pump runs as
     /// one transaction.
     ///
-    /// Whether the input is collected is graph knowledge, so it's found at
-    /// the pump, as for a remote unit: a panic in a debug build, and in a
-    /// release build a no-op that
+    /// A waiting send keeps nothing alive, so whatever keeps the input
+    /// alive must still do so at the pump. Whether the input is collected
+    /// is graph knowledge, found there, as for a remote unit: a panic in a
+    /// debug build, and in a release build a no-op that
     /// [`stale_operations`](Runtime::stale_operations) counts;
     /// [`try_pump`](Runtime::try_pump) returns it. A token from another
     /// graph is refused now, with [`IoError::ForeignGraph`].
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.unit(Roots::One(input.token), move |tx| tx.send(input, value))
+        self.unit(&[input.token], move |tx| tx.send(input, value))
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
@@ -312,13 +314,12 @@ impl Io {
     /// A unit whose send fails is dropped whole at the pump, with none of
     /// its sends run, as a remote's is; that's where a token from another
     /// graph is found, too. A panic in the closure poisons the runtime.
-    /// While it waits it keeps no token alive, since its closure hides
-    /// them: anchor what it sends to.
+    /// Like a send, it keeps nothing alive while it waits.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
     {
-        self.unit(Roots::None, f)
+        self.unit(&[], f)
     }
 
     /// Listens to a materialized node, as [`Runtime::listen`] does, from the
@@ -407,18 +408,18 @@ impl Io {
         Ok(state)
     }
 
-    /// Queues a unit that keeps `roots` alive while it waits.
+    /// Queues a unit that names `tokens`. It keeps none of them alive.
     fn unit(
         &self,
-        roots: Roots,
+        tokens: &[Token],
         f: impl FnOnce(&mut IoTransaction<'_>) + 'static,
     ) -> Result<(), IoError> {
-        let state = self.state(roots.as_slice())?;
+        let state = self.state(tokens)?;
         push(
             &state,
             Waiting::new(
                 Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
-                roots,
+                Roots::None,
                 None,
             ),
         );

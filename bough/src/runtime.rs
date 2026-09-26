@@ -25,7 +25,7 @@ use crate::engine::edge::{Fault, Start};
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::engine::edge::{Inbox, RemoteCall};
+use crate::engine::edge::{Inbox, RemoteCall, Unit};
 use crate::engine::{Cx, Entry, LISTENERS, TokenFault, part};
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -66,9 +66,9 @@ use crate::trace::{Trace, Tracer};
 ///
 /// Nodes live in an arena the graph owns, and a node is alive while a root
 /// reaches it (RFD 3). There are two kinds of root: a live guard, a
-/// [`Listener`] or an [`Anchor`], which an [`Anchored`] holds; and a call
-/// waiting in an [`Io`]'s queue, which keeps the tokens it names until the
-/// pump runs it. What the build closure returned comes back anchored, like
+/// [`Listener`] or an [`Anchor`], which an [`Anchored`] holds; and a
+/// registration waiting in a handle's queue, which keeps the tokens it
+/// names until the pump runs it. What the build closure returned comes back anchored, like
 /// anything else.
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
@@ -1340,9 +1340,9 @@ impl<T: Clone> Clone for Anchored<T> {
 /// It can listen and anchor too, as an `Io` can. The guard comes back at
 /// once, the registration runs on the driver at the pump, and dropping the
 /// guard first cancels it; a listener runs on the driver's thread, so it
-/// must be `Send`. A waiting call keeps the tokens it names alive until
-/// the pump runs it, as an `Io`'s does: a send's input, but not the value
-/// it carries; a registration's node; the tokens an anchor's value holds.
+/// must be `Send`. A waiting registration keeps the tokens it names alive
+/// until the pump runs it, as an `Io`'s does, and a waiting send or
+/// transaction keeps nothing alive.
 ///
 /// ```
 /// use std::cell::RefCell;
@@ -1427,28 +1427,26 @@ pub struct RemoteIo {
 impl RemoteIo {
     /// Queues one value as a unit of its own, and wakes the driver.
     ///
-    /// Whether the input is collected, or was by the time the driver pumps,
-    /// is graph knowledge, found at the pump, as for an [`Io`]'s send.
+    /// A waiting send keeps nothing alive, as an [`Io`]'s doesn't. Whether
+    /// the input is collected by the time the driver pumps is graph
+    /// knowledge, found at the pump.
     pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.queue(
-            Roots::One(input.token),
-            None,
-            RemoteCall::Unit(Box::new(move |tx: &mut IoTransaction<'_>| {
-                tx.send(input, value)
-            })),
+        self.unit(
+            &[input.token],
+            Box::new(move |tx: &mut IoTransaction<'_>| tx.send(input, value)),
         )
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
     /// on the driver, at its next pump, with an [`IoTransaction`] whose
     /// sends are simultaneous. The closure is I/O code: it has no graph
-    /// access, and its order of sends does not matter. While it waits it
-    /// keeps no token alive, since its closure hides them.
+    /// access, and its order of sends does not matter. Like a send, it
+    /// keeps nothing alive while it waits.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
     {
-        self.queue(Roots::None, None, RemoteCall::Unit(Box::new(f)))
+        self.unit(&[], Box::new(f))
     }
 
     /// Listens to a materialized node, as [`Io::listen`] does: the
@@ -1531,17 +1529,12 @@ impl RemoteIo {
         Ok(())
     }
 
-    /// Queues a call that keeps `roots` alive while it waits, unless the
-    /// checks refuse it or the runtime has dropped since.
-    fn queue(
-        &self,
-        roots: Roots,
-        guard: Option<Liveness>,
-        call: RemoteCall,
-    ) -> Result<(), IoError> {
-        self.check(roots.as_slice())?;
+    /// Queues a unit that names `tokens`, unless the checks refuse it or
+    /// the runtime has dropped since. It keeps none of them alive.
+    fn unit(&self, tokens: &[Token], unit: Unit) -> Result<(), IoError> {
+        self.check(tokens)?;
         self.inbox
-            .push(Waiting::new(call, roots, guard))
+            .push(Waiting::new(RemoteCall::Unit(unit), Roots::None, None))
             .map_err(|_| IoError::Gone)
     }
 

@@ -353,50 +353,21 @@ fn a_waiting_call_whose_guard_has_gone_keeps_nothing_alive() {
     assert_eq!(graph.try_pump(), Ok(()));
 }
 
-/// A waiting transaction keeps nothing alive, since its closure hides its
-/// tokens: its send to a plain row's input finds the input gone.
+/// A waiting send or transaction keeps nothing alive: a send to an input
+/// no root reaches can't be observed, so the pump reports it as stale,
+/// the signal a debug build panics with. Here each goes to a plain row's
+/// input, which the collection after its unit freed.
 #[test]
-fn a_waiting_transaction_keeps_nothing_alive() {
+fn a_waiting_send_or_transaction_keeps_nothing_alive() {
+    let (mut graph, (bumps_in, _)) = open_a_row(|io, (bumps_in, _)| {
+        io.send(bumps_in, 5).unwrap();
+    });
+    assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
     let (mut graph, _row) = open_a_row(|io, (bumps_in, _)| {
         io.transaction(move |tx| tx.send(bumps_in, 5)).unwrap();
     });
     assert_eq!(graph.try_pump(), Err(PumpError::Stale));
-}
-
-/// Test 8: a waiting send keeps its input alive, but not the value it
-/// carries. Once the send has run, nothing keeps the input.
-#[test]
-fn a_waiting_send_keeps_its_input_alive_but_not_the_value_it_carries() {
-    let (mut graph, edge) = Runtime::build(|b| {
-        let (open, open_in) = b.input::<u32>();
-        let (_carried, carried_in) = b.input::<Cell<u32>>();
-        let rows = open.construct(b, |b, start| {
-            let (bumps, bumps_in) = b.input::<u32>();
-            (bumps_in, bumps.accumulate(b, start, |n, c| c + n))
-        });
-        (open_in, carried_in, rows)
-    });
-    let (open_in, carried_in, rows) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
-    let io = graph.io();
-    let row = Rc::new(RefCell::new(None));
-    let row_sink = row.clone();
-    graph
-        .listen(rows, move |(bumps_in, count): Row| {
-            io.send(bumps_in, 5).unwrap();
-            io.send(carried_in, count).unwrap();
-            *row_sink.borrow_mut() = Some((bumps_in, count));
-        })
-        .keep();
-    graph.send(open_in, 10);
-    let (bumps_in, count) = row.borrow().expect("the listener saw a row");
-    assert_eq!(
-        graph.try_sample(count).err(),
-        Some(TokenError::Stale),
-        "only a send's value carried the count"
-    );
-    assert_eq!(graph.try_pump(), Ok(()), "the send found its input alive");
-    assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
 }
 
 /// Test 5.

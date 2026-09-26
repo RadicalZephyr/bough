@@ -33,7 +33,7 @@
 //! what the closure builds exists from that instant on, and each run is a
 //! scope that must close the loops it declares. Stage 7 adds collection
 //! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
-//! [`Anchor`], or a call waiting in an [`Io`]'s queue, and
+//! [`Anchor`], or a registration waiting in a handle's queue, and
 //! [`Runtime::build`] anchors what its closure returns; what it reaches is
 //! its dependencies, the tokens [`Trace`] finds in a stateful cell's
 //! value, and what [`Build::depends`] declares; and collection, automatic
