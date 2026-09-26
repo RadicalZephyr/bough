@@ -18,7 +18,6 @@
 //! | `Runtime<Threaded>` | with pointer atomics | yes |
 //! | `InputSlot` | with a lock | `Sync`, since it lives in a `static` |
 //! | `Remote` | with pointer atomics and a lock | yes |
-//! | `Io`, `Owner` | with `std` and pointer atomics | no |
 //!
 //! A lock is `std` or `critical-section`. The Cortex-M0 has no pointer
 //! atomics, so it has the first four rows, with guards that aren't `Send`,
@@ -121,12 +120,4 @@ mod with_atomics_and_a_lock {
     use crate::Remote;
 
     send!(Remote);
-}
-
-/// Where there's `std` and the target has pointer atomics.
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-mod with_std_and_atomics {
-    use crate::{Io, Owner};
-
-    not_send!(Io, Owner);
 }

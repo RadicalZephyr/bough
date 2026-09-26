@@ -1,5 +1,9 @@
 # bough-gtk: a spike
 
+> This crate is written for the eager same-thread handle, which
+> `spike/io-edge` removed. It doesn't build now; the spike's last step
+> ports it to the queue-based `Io`.
+
 Not API, and not meant to merge. This crate shows what GTK 4 code looks
 like on bough's same-thread handle, so that the handle can be judged
 from real widgets. The handle is on this branch, in `bough/src/handle.rs`.

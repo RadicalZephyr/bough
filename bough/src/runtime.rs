@@ -33,8 +33,6 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
 use crate::guard::Liveness;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-use crate::guard::Released;
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, Local, Mode};
@@ -151,111 +149,6 @@ impl Runtime<Threaded> {
         f: impl FnOnce(&mut Build<Threaded>) -> R,
     ) -> (Runtime<Threaded>, Anchored<R>) {
         build_graph(f)
-    }
-}
-
-/// What the same-thread handle needs of the graph it shares, which it
-/// cannot borrow while the graph is busy.
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Runtime<Local> {
-    /// The inbox: its poison mirror, its guard and the driver's waker,
-    /// read while the graph is busy.
-    pub(crate) fn inbox(&self) -> Arc<Inbox> {
-        self.build.edge.inbox.clone()
-    }
-
-    /// The count of released guards, for the liveness of a guard made while
-    /// the graph is busy.
-    pub(crate) fn released(&self) -> Released {
-        self.build.released.clone()
-    }
-
-    /// [`listen`](Runtime::listen), with the liveness of a [`Listener`] the
-    /// handle gave out before the graph could register it. A guard with no
-    /// owner left was dropped first, and nothing registers.
-    pub(crate) fn listen_flagged<S, F>(&mut self, flag: Liveness, source: S, f: F)
-    where
-        S: Node,
-        S::Event: 'static,
-        F: FnMut(S::Event) + 'static,
-    {
-        self.enter();
-        if !flag.is_live() {
-            return;
-        }
-        if let Some(i) = self.checked(source.node_token(), LISTEN) {
-            self.attach_flag(i, f, call_stream::<Local, S, F>, flag);
-        }
-    }
-
-    /// [`listen_cell`](Runtime::listen_cell), with a guard's liveness, as
-    /// [`listen_flagged`](Runtime::listen_flagged). The first call runs now,
-    /// when the listener is registered.
-    pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: Liveness, cell: C, mut f: F)
-    where
-        C: CellRef,
-        F: FnMut(&C::Value) + 'static,
-    {
-        self.enter();
-        if !flag.is_live() {
-            return;
-        }
-        let Some(i) = self.checked(cell.token(), LISTEN) else {
-            return;
-        };
-        f(self.build.value::<C::Value>(i));
-        self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
-    }
-
-    /// [`listen_steps`](Runtime::listen_steps), with a guard's liveness, as
-    /// [`listen_flagged`](Runtime::listen_flagged).
-    pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: Liveness, cell: C, f: F)
-    where
-        C: CellRef,
-        F: FnMut(&C::Value) + 'static,
-    {
-        self.enter();
-        if !flag.is_live() {
-            return;
-        }
-        if let Some(i) = self.checked(cell.token(), LISTEN) {
-            self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
-        }
-    }
-
-    /// [`anchor`](Runtime::anchor), with the liveness of an [`Anchor`] the
-    /// handle gave out, as [`listen_flagged`](Runtime::listen_flagged), and
-    /// the tokens it traced when it was called.
-    pub(crate) fn anchor_flagged(&mut self, flag: Liveness, tokens: Vec<Token>) {
-        self.enter();
-        if !flag.is_live() {
-            return;
-        }
-        let nodes: Vec<u32> = tokens
-            .into_iter()
-            .filter_map(|token| self.checked(token, ANCHOR))
-            .collect();
-        for i in nodes {
-            self.build.anchors.push((i, flag.clone()));
-        }
-    }
-}
-
-/// The handles the same-thread handle gives out before the graph can
-/// register them.
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Listener {
-    /// A listener whose registration shares `flag`, now or later.
-    pub(crate) fn from_flag(flag: Liveness) -> Self {
-        Listener::new(Some(flag))
-    }
-}
-
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Anchor {
-    /// An anchor whose registration shares `flag`, now or later.
-    pub(crate) fn from_flag(flag: Liveness) -> Self {
-        Anchor::new(Some(flag))
     }
 }
 
@@ -410,29 +303,16 @@ impl<M: Mode> Runtime<M> {
         M: Accepts<A>,
     {
         self.enter();
-        self.send_without_collecting(input, value);
-        self.collect_if_due();
-    }
-
-    /// [`send`](Runtime::send) without the collection that may run after it. The
-    /// same-thread handle's queue sends this way: its sends are the I/O
-    /// code a transaction's listeners asked for, and no collection runs
-    /// between a transaction and that code.
-    pub(crate) fn send_without_collecting<A: 'static>(&mut self, input: Input<A>, value: A)
-    where
-        M: Accepts<A>,
-    {
-        self.enter();
         // The token is checked before the transaction opens, so a foreign
         // token is a panic that leaves the graph usable.
-        let Some(i) = self.checked(input.token, SEND) else {
-            return;
-        };
-        self.build.begin();
-        self.build
-            .fire_start(i, value)
-            .expect("bough engine: the only send of a transaction is not a double send");
-        self.build.finish();
+        if let Some(i) = self.checked(input.token, SEND) {
+            self.build.begin();
+            self.build
+                .fire_start(i, value)
+                .expect("bough engine: the only send of a transaction is not a double send");
+            self.build.finish();
+        }
+        self.collect_if_due();
     }
 
     /// [`send`](Runtime::send), returning the error instead of panicking.
@@ -470,22 +350,10 @@ impl<M: Mode> Runtime<M> {
     /// have run.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
-        let r = self.transaction_without_collecting(f);
-        self.collect_if_due();
-        r
-    }
-
-    /// [`transaction`](Runtime::transaction) without the collection that may
-    /// run first, for the same-thread handle's queue, as
-    /// [`send_without_collecting`](Runtime::send_without_collecting).
-    pub(crate) fn transaction_without_collecting<R>(
-        &mut self,
-        f: impl FnOnce(&mut Transaction<'_, M>) -> R,
-    ) -> R {
-        self.enter();
         self.build.begin();
         let r = f(&mut Transaction { graph: self });
         self.build.finish();
+        self.collect_if_due();
         r
     }
 
@@ -876,16 +744,8 @@ impl<M: Mode> Runtime<M> {
     /// another graph, panics in both builds. A panic leaves the rest pending
     /// for the next pump.
     pub fn pump(&mut self) {
-        self.pump_between(&mut |_| {});
-    }
-
-    /// [`pump`](Runtime::pump), running `between` after each slot's and each
-    /// unit's transaction, before the collection that may run after it. The
-    /// same-thread handle runs its queue there, so that a listener can wire
-    /// what one unit built before that unit's collection.
-    pub(crate) fn pump_between(&mut self, between: &mut dyn FnMut(&mut Self)) {
         self.enter();
-        if let Err(error) = self.pump_all(!cfg!(debug_assertions), between) {
+        if let Err(error) = self.pump_all(!cfg!(debug_assertions)) {
             match error {
                 PumpError::Stale => self.stale_operation(SEND),
                 PumpError::DoubleSend => {
@@ -904,26 +764,22 @@ impl<M: Mode> Runtime<M> {
         if self.poisoned() {
             return Err(PumpError::Poisoned);
         }
-        self.pump_all(false, &mut |_| {})
+        self.pump_all(false)
     }
 
     /// The slots, then the units. With `skip_stale`, the panicking pump's
     /// release build, a stale send is counted and skipped rather than
     /// returned.
-    fn pump_all(
-        &mut self,
-        skip_stale: bool,
-        between: &mut dyn FnMut(&mut Self),
-    ) -> Result<(), PumpError> {
+    fn pump_all(&mut self, skip_stale: bool) -> Result<(), PumpError> {
         // Without a lock there are no slots and no units to pump.
-        let _ = (skip_stale, &between);
+        let _ = skip_stale;
         #[cfg(any(feature = "std", feature = "critical-section"))]
-        self.pump_slots(skip_stale, between)?;
+        self.pump_slots(skip_stale)?;
         #[cfg(all(
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        self.pump_units(skip_stale, between)?;
+        self.pump_units(skip_stale)?;
         Ok(())
     }
 
@@ -934,11 +790,7 @@ impl<M: Mode> Runtime<M> {
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
     ))]
-    fn pump_units(
-        &mut self,
-        skip_stale: bool,
-        between: &mut dyn FnMut(&mut Self),
-    ) -> Result<(), PumpError> {
+    fn pump_units(&mut self, skip_stale: bool) -> Result<(), PumpError> {
         let queued = self.build.edge.inbox.len();
         for _ in 0..queued {
             let Some(unit) = self.build.edge.inbox.pop() else {
@@ -963,7 +815,6 @@ impl<M: Mode> Runtime<M> {
                 });
             }
             self.build.finish();
-            between(self);
             self.collect_if_due();
         }
         Ok(())
@@ -973,11 +824,7 @@ impl<M: Mode> Runtime<M> {
     /// The event leaves the slot under its lock, and the transaction runs
     /// after the lock is released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    fn pump_slots(
-        &mut self,
-        skip_stale: bool,
-        between: &mut dyn FnMut(&mut Self),
-    ) -> Result<(), PumpError> {
+    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), PumpError> {
         let mut k = 0;
         while k < self.build.edge.slots.len() {
             let Connection { input, slot } = self.build.edge.slots[k];
@@ -990,7 +837,6 @@ impl<M: Mode> Runtime<M> {
                         fire(&mut self.build, i, event)
                             .expect("bough engine: a slot's event is its transaction's only send");
                         self.build.finish();
-                        between(self);
                         self.collect_if_due();
                     }
                     // `connect` checked the graph, so the input was collected.

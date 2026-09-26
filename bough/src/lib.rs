@@ -48,12 +48,6 @@
 //! examples in the documentation run, and the guarantees the RFDs make are
 //! fixed by `compile_fail` doc tests.
 //!
-//! A spike on top of stage 8 adds the same-thread handle: an [`Owner`]
-//! shares a `Local` graph with I/O code through [`Io`] handles, whose calls
-//! run now when the graph is idle and right after the call in progress
-//! when it is busy, for hosts such as GTK that call I/O code while the
-//! graph is busy.
-//!
 //! # Targets
 //!
 //! The core is `no_std` over `alloc`. The `std` feature, on by default, adds
@@ -114,8 +108,6 @@ mod cell;
 mod engine;
 mod error;
 mod guard;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-mod handle;
 mod lift;
 mod mode;
 #[cfg(doctest)]
@@ -137,16 +129,12 @@ pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-pub use error::{IoError, NowError};
 pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 pub use error::{RemoteSendError, RemoteTransactionError};
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-pub use handle::{Io, Owner};
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
