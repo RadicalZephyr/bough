@@ -47,12 +47,12 @@ use super::DoubleSend;
 ))]
 use super::TokenFault;
 use crate::build::Build;
+use crate::mode::Mode;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::graph::RemoteTransaction;
-use crate::mode::Mode;
+use crate::runtime::RemoteTransaction;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::token::Token;
 
@@ -135,7 +135,7 @@ pub(crate) struct Edge {
     #[cfg(any(feature = "std", feature = "critical-section"))]
     pub(crate) slots: Vec<Connection>,
     /// The queue every `Remote` of this graph shares. Made with the graph,
-    /// so `Graph::remote` takes `&self`.
+    /// so `Runtime::remote` takes `&self`.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")

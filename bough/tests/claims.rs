@@ -6,7 +6,7 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::{Graph, Source, Trace, Tracer};
+use bough::{Runtime, Source, Trace, Tracer};
 
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -62,7 +62,7 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
     };
     let initial = counted(0);
     let (mut graph, (linear_in, shared_in, last_linear, lengths, bangs, _keeps)) =
-        Graph::build(move |b| {
+        Runtime::build(move |b| {
             // Linear: an input of a type with no Clone, consumed by one hold.
             let (linear, linear_in) = b.input::<NoClone>();
             let last_linear = linear.hold(b, NoClone(0));
@@ -106,7 +106,7 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
 fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_instant() {
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
-    let (mut graph, (numbers_in, limit_in, out)) = Graph::build(move |b| {
+    let (mut graph, (numbers_in, limit_in, out)) = Runtime::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (limit_events, limit_in) = b.input::<u32>();
         let limit = limit_events.hold(b, 10);
@@ -153,7 +153,7 @@ fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_
 fn claim3_sample_returns_the_same_reference_twice_and_runs_nothing() {
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
-    let (mut graph, (names_in, joined, count)) = Graph::build(move |b| {
+    let (mut graph, (names_in, joined, count)) = Runtime::build(move |b| {
         let (names, names_in) = b.input::<String>();
         let names = names.share(b);
         let joined = names

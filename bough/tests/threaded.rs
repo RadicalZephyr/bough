@@ -4,15 +4,15 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bough::{Graph, Lift, Listener, Source, State, Threaded};
+use bough::{Lift, Listener, Runtime, Source, State, Threaded};
 
 #[test]
 fn a_threaded_graph_is_send_and_runs_on_another_thread() {
     fn assert_send<T: Send>() {}
-    assert_send::<Graph<Threaded>>();
+    assert_send::<Runtime<Threaded>>();
     assert_send::<Listener<Threaded>>();
 
-    let (mut graph, (numbers_in, words_in, doubled, sentence)) = Graph::build_threaded(|b| {
+    let (mut graph, (numbers_in, words_in, doubled, sentence)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let doubled = numbers.map(|n| n * 2).hold(b, 0u64);
         let (words, words_in) = b.input_coalescing(|a: String, b: String| a + " " + &b);
@@ -44,7 +44,7 @@ fn a_threaded_graph_is_send_and_runs_on_another_thread() {
 
 #[test]
 fn a_threaded_graph_can_live_behind_a_mutex() {
-    let (graph, (numbers_in, latest)) = Graph::build_threaded(|b| {
+    let (graph, (numbers_in, latest)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -65,7 +65,7 @@ fn a_threaded_graph_can_live_behind_a_mutex() {
 #[test]
 fn a_threaded_graph_runs_every_cell_operation_on_another_thread() {
     let (mut graph, (numbers_in, level_in, (label, product, total, log, labels, steps))) =
-        Graph::build_threaded(|b| {
+        Runtime::build_threaded(|b| {
             let (numbers, numbers_in) = b.input::<u64>();
             let numbers = numbers.share(b);
             let (level, level_in) = b.input_cell(2u64);
@@ -123,7 +123,7 @@ fn a_threaded_graph_runs_every_cell_operation_on_another_thread() {
 /// satisfies. Built on one thread, driven and sampled on another.
 #[test]
 fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
-    let (mut graph, (ticks_in, (count, views, total, log))) = Graph::build_threaded(|b| {
+    let (mut graph, (ticks_in, (count, views, total, log))) = Runtime::build_threaded(|b| {
         let (ticks, ticks_in) = b.input::<u64>();
         let ticks = ticks.share(b);
         let (count, count_loop) = b.cell_loop::<u64>();
@@ -171,7 +171,7 @@ fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
 /// [1,0,0], 1 at [1,0,0,0], then 1 at [1,1].
 #[test]
 fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
-    let (mut graph, (lists_in, events, total)) = Graph::build_threaded(|b| {
+    let (mut graph, (lists_in, events, total)) = Runtime::build_threaded(|b| {
         let (lists, lists_in) = b.input::<Vec<u64>>();
         let (halves, halves_loop) = b.stream_loop::<u64>();
         let again = halves.filter(|n| *n > 1).map(|n| n / 2).defer(b);
@@ -205,7 +205,7 @@ fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
 /// switch_stream still forwards its old stream's event.
 #[test]
 fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
-    let (mut graph, (numbers_in, pick_in, cells)) = Graph::build_threaded(|b| {
+    let (mut graph, (numbers_in, pick_in, cells)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let (pick, pick_in) = b.input::<bool>();
@@ -284,7 +284,7 @@ fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
 /// inner, and I/O code receives an input a closure built and sends to it.
 #[test]
 fn a_threaded_graph_runs_construct_closures_on_another_thread() {
-    let (mut graph, (numbers_in, opens_in, made, cells)) = Graph::build_threaded(|b| {
+    let (mut graph, (numbers_in, opens_in, made, cells)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let (opens, opens_in) = b.input::<u64>();

@@ -18,9 +18,9 @@ mod sealed {
 /// `(cf, ca).lift(b, |f, a| f(a))` with the cell holding `Fn(&A) -> B`.
 ///
 /// ```
-/// use bough::{Cell, Graph, Lift, Source};
+/// use bough::{Cell, Runtime, Lift, Source};
 ///
-/// let (mut graph, (price_in, quantity_in, total)) = Graph::build(|b| {
+/// let (mut graph, (price_in, quantity_in, total)) = Runtime::build(|b| {
 ///     let (price, price_in) = b.input_cell(3u32);
 ///     let (quantity, quantity_in) = b.input_cell(2u32);
 ///     let total: Cell<u32> = (price, quantity).lift(b, |p, q| p * q);
@@ -40,9 +40,9 @@ mod sealed {
 /// stepped does not exist until commit, so it has no stream view.
 ///
 /// ```compile_fail,E0599
-/// use bough::{Graph, Lift, Source};
+/// use bough::{Runtime, Lift, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, _) = Runtime::build(|b| {
 ///     let (names, _names_in) = b.input::<String>();
 ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     let (extra, _extra_in) = b.input_cell(1usize);

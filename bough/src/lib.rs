@@ -3,8 +3,8 @@
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
 //! node-creating operation needs a [`Build`] context, which only exists
-//! inside [`Graph::build`] and inside [`Source::construct`] closures; sending,
-//! listening and sampling from outside live on [`Graph`], which only exists
+//! inside [`Runtime::build`] and inside [`Source::construct`] closures; sending,
+//! listening and sampling from outside live on [`Runtime`], which only exists
 //! once the build closure has returned. The design is recorded in the RFDs
 //! at <https://github.com/bough-frp/rfd>.
 //!
@@ -15,7 +15,7 @@
 //! constants and `never`; the adapters `map`, `filter`, `filter_map`,
 //! `map_to`, `snapshot`, `gate` and `once`, which fuse into the one node
 //! that materializes them; the materializers `hold`, `node`, `share`,
-//! `merge` and `or_else`; and on [`Graph`] transactions, listeners and
+//! `merge` and `or_else`; and on [`Runtime`] transactions, listeners and
 //! `sample`. Stage 2 adds the cells: the accumulators `accumulate`,
 //! `accumulate_mut` and `scan`, read-through cells with `map_cell` and
 //! `lift`, and the stream views `steps` and `steps_with_current`, with
@@ -39,12 +39,12 @@
 //! by default and never inside a transaction, frees the rest, so that a
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
-//! [`pump`](Graph::pump) runs each pending slot as a transaction of its
+//! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, in connection order; a [`Remote`] queues a send, or a remote
 //! transaction's sends, as one unit from any thread, and `pump` then runs
 //! each unit as one transaction, in arrival order; a write or a remote
 //! send wakes the waker the driver registered with
-//! [`set_waker`](Graph::set_waker). No body is `todo!()` any more. The
+//! [`set_waker`](Runtime::set_waker). No body is `todo!()` any more. The
 //! examples in the documentation run, and the guarantees the RFDs make are
 //! fixed by `compile_fail` doc tests.
 //!
@@ -65,8 +65,8 @@
 //! a web build keeps `std` (RFD 7). A slot and a remote's inbox need one of
 //! the two locks: with no `unsafe` in the crate there is none to build from
 //! atomics, so a `no_std` build without `critical-section` has neither
-//! slots nor `Remote`, and keeps [`pump`](Graph::pump) and
-//! [`set_waker`](Graph::set_waker).
+//! slots nor `Remote`, and keeps [`pump`](Runtime::pump) and
+//! [`set_waker`](Runtime::set_waker).
 //!
 //! RFD 2's example: a click counter and its label, a listener that fires
 //! now and on every step, one send, and a transaction.
@@ -75,11 +75,11 @@
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
 //!
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //!
 //! struct Click;
 //!
-//! let (mut graph, (clicks_in, label)) = Graph::build(|b| {
+//! let (mut graph, (clicks_in, label)) = Runtime::build(|b| {
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
@@ -111,13 +111,13 @@ mod build;
 mod cell;
 mod engine;
 mod error;
-mod graph;
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 mod handle;
 mod lift;
 mod mode;
 #[cfg(doctest)]
 mod refusals;
+mod runtime;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 mod slot;
 #[cfg(feature = "smoke")]
@@ -142,18 +142,18 @@ pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSend
     any(feature = "std", feature = "critical-section")
 ))]
 pub use error::{RemoteSendError, RemoteTransactionError};
-pub use graph::{Anchor, CollectionPolicy, Graph, Listener, Transaction};
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-pub use graph::{Remote, RemoteTransaction};
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
 pub use handle::{Io, Owner};
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
+pub use runtime::{Anchor, CollectionPolicy, Listener, Runtime, Transaction};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub use runtime::{Remote, RemoteTransaction};
 #[cfg(any(feature = "std", feature = "critical-section"))]
 pub use slot::InputSlot;
 #[cfg(feature = "smoke")]

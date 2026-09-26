@@ -50,7 +50,7 @@ use std::thread;
 
 #[cfg(feature = "std")]
 use bough::InputSlot;
-use bough::{Cell, CollectionPolicy, Graph, Lift, Source};
+use bough::{Cell, CollectionPolicy, Lift, Runtime, Source};
 
 struct Counting;
 
@@ -94,12 +94,12 @@ fn tally() -> (Rc<StdCell<u64>>, Rc<StdCell<u64>>) {
 /// Switches moved since the graph was built, with the `statistics`
 /// feature.
 #[cfg(feature = "statistics")]
-fn relinks(graph: &Graph) -> Option<u64> {
+fn relinks(graph: &Runtime) -> Option<u64> {
     Some(graph.statistics().relinks)
 }
 
 #[cfg(not(feature = "statistics"))]
-fn relinks(_: &Graph) -> Option<u64> {
+fn relinks(_: &Runtime) -> Option<u64> {
     None
 }
 
@@ -107,7 +107,7 @@ fn relinks(_: &Graph) -> Option<u64> {
 fn steady_state_transactions_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
     let (mut graph, ((numbers_in, bumps_in, open_in), (total, both, merged), later)) =
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u64>();
             let numbers = numbers.share(b);
             let total = numbers
@@ -343,7 +343,7 @@ fn steady_state_transactions_do_not_allocate() {
     let (openings, on_opened) = tally();
     graph.listen_cell(opened, move |v| on_opened.set(*v)).keep();
 
-    let drive = |graph: &mut Graph, i: u64| {
+    let drive = |graph: &mut Runtime, i: u64| {
         graph.send(numbers_in, i);
         graph.transaction(|tx| {
             tx.send(bumps_in, i);
@@ -449,7 +449,7 @@ fn steady_state_transactions_do_not_allocate() {
 #[test]
 fn steady_state_collections_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, (go_in, clicks_in, made, shown)) = Graph::build(|b| {
+    let (mut graph, (go_in, clicks_in, made, shown)) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u64>();
         let clicks = clicks.share(b);
         let (go, go_in) = b.input::<u64>();
@@ -468,7 +468,7 @@ fn steady_state_collections_do_not_allocate() {
     let newest: Rc<StdCell<Option<Cell<u64>>>> = Rc::new(StdCell::new(None));
     let writer = newest.clone();
     graph.listen(made, move |c| writer.set(Some(c))).keep();
-    let round = |graph: &mut Graph, k: u64| -> usize {
+    let round = |graph: &mut Runtime, k: u64| -> usize {
         graph.send(go_in, k);
         graph.send(clicks_in, 1);
         let before = allocations();
@@ -524,7 +524,7 @@ fn slot_writes_and_pumps_do_not_allocate() {
     static SENSOR: InputSlot<u64> = InputSlot::new(|a, b| a + b);
     static LEVEL: InputSlot<u64> = InputSlot::keep_latest();
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, total) = Graph::build(|b| {
+    let (mut graph, total) = Runtime::build(|b| {
         let (sensor, sensor_in) = b.input::<u64>();
         b.connect(sensor_in, &SENSOR);
         let (level, level_in) = b.input::<u64>();
@@ -539,7 +539,7 @@ fn slot_writes_and_pumps_do_not_allocate() {
         .keep();
     let wakes = Arc::new(Wakes::default());
     graph.set_waker(Waker::from(wakes.clone()));
-    let round = |graph: &mut Graph, k: u64| {
+    let round = |graph: &mut Runtime, k: u64| {
         SENSOR.send(k);
         SENSOR.send(1);
         LEVEL.send(k);
@@ -569,7 +569,7 @@ fn slot_writes_and_pumps_do_not_allocate() {
 fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
     const UNITS: u64 = 1_000;
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         (numbers_in, numbers.accumulate(b, 0u64, |n, t| t + n))
     });

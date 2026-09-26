@@ -21,7 +21,7 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use bough::{Build, Cell, CellRef, Graph, Input, Lift, Shared, Source, Trace, Tracer};
+use bough::{Build, Cell, CellRef, Input, Lift, Runtime, Shared, Source, Trace, Tracer};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];
@@ -201,7 +201,7 @@ const EDGE_RUN: [Instant; 4] = [
 type Steps<A> = Rc<RefCell<Vec<(usize, A)>>>;
 
 /// Records a cell's steps with the instant they happened in.
-fn record<C>(graph: &mut Graph, cell: C, now: &Rc<StdCell<usize>>) -> Steps<C::Value>
+fn record<C>(graph: &mut Runtime, cell: C, now: &Rc<StdCell<usize>>) -> Steps<C::Value>
 where
     C: CellRef,
     C::Value: Clone,
@@ -215,7 +215,7 @@ where
 }
 
 /// Drives a schedule, one transaction per instant.
-fn drive(graph: &mut Graph, edge: &Slice, schedule: &[Instant], now: &Rc<StdCell<usize>>) {
+fn drive(graph: &mut Runtime, edge: &Slice, schedule: &[Instant], now: &Rc<StdCell<usize>>) {
     for (k, &(heal, damage, level_up)) in schedule.iter().enumerate() {
         now.set(k + 1);
         graph.transaction(|tx| {
@@ -247,7 +247,7 @@ struct Observed {
 /// collects every cell's steps.
 fn observe(shape: (Drive, Lifts, Reads), schedule: &[Instant], seed: Option<u64>) -> Observed {
     let (drive_kind, lifts, reads) = shape;
-    let (mut graph, edge) = Graph::build(|b| slice(b, drive_kind, lifts, reads));
+    let (mut graph, edge) = Runtime::build(|b| slice(b, drive_kind, lifts, reads));
     graph.set_shuffle_seed(seed);
     let now = Rc::new(StdCell::new(0));
     let max_health = record(&mut graph, edge.max_health, &now);
@@ -477,21 +477,22 @@ fn shape_3c_health_steps_only_when_it_changes() {
 #[test]
 fn the_slices_first_stage_clamps_by_the_maximum_before_the_instant() {
     for seed in SEEDS {
-        let (mut graph, (heal_in, level_up_in, max_health, health, fraction)) = Graph::build(|b| {
-            let (heal, heal_in) = b.input::<u32>();
-            let (level_up, level_up_in) = b.input::<u32>();
-            let (max_fwd, max_loop) = b.cell_loop::<u32>();
-            let max_health = level_up.snapshot(max_fwd, |e, c| c + e).hold(b, 100);
-            max_loop.close(b, max_health);
-            let (health_fwd, health_loop) = b.cell_loop::<u32>();
-            let health = heal
-                .snapshot(health_fwd, |h, cur| (h, *cur))
-                .snapshot(max_health, |(h, cur), max| (cur + h).min(*max))
-                .hold(b, 60);
-            health_loop.close(b, health);
-            let fraction = (max_health, health).lift(b, |m, h| *h as f32 / *m as f32);
-            (heal_in, level_up_in, max_health, health, fraction)
-        });
+        let (mut graph, (heal_in, level_up_in, max_health, health, fraction)) =
+            Runtime::build(|b| {
+                let (heal, heal_in) = b.input::<u32>();
+                let (level_up, level_up_in) = b.input::<u32>();
+                let (max_fwd, max_loop) = b.cell_loop::<u32>();
+                let max_health = level_up.snapshot(max_fwd, |e, c| c + e).hold(b, 100);
+                max_loop.close(b, max_health);
+                let (health_fwd, health_loop) = b.cell_loop::<u32>();
+                let health = heal
+                    .snapshot(health_fwd, |h, cur| (h, *cur))
+                    .snapshot(max_health, |(h, cur), max| (cur + h).min(*max))
+                    .hold(b, 60);
+                health_loop.close(b, health);
+                let fraction = (max_health, health).lift(b, |m, h| *h as f32 / *m as f32);
+                (heal_in, level_up_in, max_health, health, fraction)
+            });
         graph.set_shuffle_seed(seed);
         let now = Rc::new(StdCell::new(1));
         let fractions = record(&mut graph, fraction, &now);
@@ -540,31 +541,33 @@ fn sodium_rust_52_two_input_reduction() {
                     ),
                 ] {
                     let what = format!("looped {shield_looped}, lifted {lifted}, seed {seed:?}");
-                    let (mut graph, (heal_in, damage_in, health, effective)) = Graph::build(|b| {
-                        let (heal, heal_in) = b.input::<u32>();
-                        let (damage, damage_in) = b.input::<u32>();
-                        let damage = damage.share(b);
-                        let shield = if shield_looped {
-                            let (shield_fwd, shield_loop) = b.cell_loop::<u32>();
-                            let shield = damage
-                                .snapshot(shield_fwd, |d, s| s.saturating_sub(d))
-                                .hold(b, 30);
-                            shield_loop.close(b, shield);
-                            shield
-                        } else {
-                            damage.map(|d| 30u32.saturating_sub(d)).hold(b, 30)
-                        };
-                        let took = damage.snapshot(shield, |d, s| -(d.saturating_sub(*s) as i64));
-                        let (health_fwd, health_loop) = b.cell_loop::<u32>();
-                        let health = heal
-                            .map(|h| h as i64)
-                            .merge(b, took, |x, y| x + y)
-                            .snapshot(health_fwd, |d, cur| (*cur as i64 + d).max(0) as u32)
-                            .hold(b, 60);
-                        health_loop.close(b, health);
-                        let effective = lifted.then(|| (health, shield).lift(b, |h, s| h + s));
-                        (heal_in, damage_in, health, effective)
-                    });
+                    let (mut graph, (heal_in, damage_in, health, effective)) =
+                        Runtime::build(|b| {
+                            let (heal, heal_in) = b.input::<u32>();
+                            let (damage, damage_in) = b.input::<u32>();
+                            let damage = damage.share(b);
+                            let shield = if shield_looped {
+                                let (shield_fwd, shield_loop) = b.cell_loop::<u32>();
+                                let shield = damage
+                                    .snapshot(shield_fwd, |d, s| s.saturating_sub(d))
+                                    .hold(b, 30);
+                                shield_loop.close(b, shield);
+                                shield
+                            } else {
+                                damage.map(|d| 30u32.saturating_sub(d)).hold(b, 30)
+                            };
+                            let took =
+                                damage.snapshot(shield, |d, s| -(d.saturating_sub(*s) as i64));
+                            let (health_fwd, health_loop) = b.cell_loop::<u32>();
+                            let health = heal
+                                .map(|h| h as i64)
+                                .merge(b, took, |x, y| x + y)
+                                .snapshot(health_fwd, |d, cur| (*cur as i64 + d).max(0) as u32)
+                                .hold(b, 60);
+                            health_loop.close(b, health);
+                            let effective = lifted.then(|| (health, shield).lift(b, |h, s| h + s));
+                            (heal_in, damage_in, health, effective)
+                        });
                     graph.set_shuffle_seed(seed);
                     let now = Rc::new(StdCell::new(0));
                     let steps = record(&mut graph, health, &now);
@@ -613,7 +616,7 @@ fn the_slices_took_and_delta_events() {
                 ][..],
             ),
         ] {
-            let (mut graph, (edge, took, delta)) = Graph::build(|b| {
+            let (mut graph, (edge, took, delta)) = Runtime::build(|b| {
                 let (heal_s, heal) = b.input::<u32>();
                 let (damage_s, damage) = b.input::<u32>();
                 let (level_up_s, level_up) = b.input::<u32>();
@@ -653,7 +656,7 @@ fn the_slices_took_and_delta_events() {
             });
             graph.set_shuffle_seed(seed);
             let now = Rc::new(StdCell::new(0));
-            let events = |graph: &mut Graph, stream: Shared<i64>| {
+            let events = |graph: &mut Runtime, stream: Shared<i64>| {
                 let log: Steps<i64> = Rc::default();
                 let (now, writer) = (now.clone(), log.clone());
                 graph
@@ -697,7 +700,7 @@ fn two_loops_that_read_each_other_lifted_with_what_is_upstream_of_both() {
     for seed in SEEDS {
         let calls = Rc::new(StdCell::new(0u32));
         let count = calls.clone();
-        let (mut graph, (ticks_in, level_in, cells, views)) = Graph::build(move |b| {
+        let (mut graph, (ticks_in, level_in, cells, views)) = Runtime::build(move |b| {
             let (x_fwd, x_loop) = b.cell_loop::<u32>();
             let (y_fwd, y_loop) = b.cell_loop::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();

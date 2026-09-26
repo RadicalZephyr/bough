@@ -15,7 +15,7 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bough::{Cell, Graph, Input, Io, IoError, NowError, Owner, Source};
+use bough::{Cell, Input, Io, IoError, NowError, Owner, Runtime, Source};
 use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
@@ -427,7 +427,7 @@ fn a_remote_send_from_a_thread() {
 /// every transaction. The listener wires each counter through the handle,
 /// and the queue runs between the units, so both survive.
 fn rows_one_pump_opens() {
-    let (mut graph, (open_in, opened)) = Graph::build(|b| {
+    let (mut graph, (open_in, opened)) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();

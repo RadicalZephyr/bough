@@ -68,7 +68,7 @@ pub(crate) fn trace_in_place<M: Mode, S: Trace + 'static>(
 impl<M: Mode> Build<M> {
     /// Collects every node that no root reaches, and returns how many it
     /// freed. `roots` is the build closure's return value; `anchors` are
-    /// the anchors taken with `Graph::anchor`, from which the dropped ones
+    /// the anchors taken with `Runtime::anchor`, from which the dropped ones
     /// are removed here.
     pub(crate) fn collect(&mut self, roots: &[Token], anchors: &mut Vec<(u32, M::Flag)>) -> usize {
         assert!(

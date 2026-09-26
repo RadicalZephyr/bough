@@ -9,15 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Cell, Graph, Input, Io, IoError, NowError, Owner, Source, Stream};
+use bough::{Cell, Input, Io, IoError, NowError, Owner, Runtime, Source, Stream};
 
 type Log = Rc<RefCell<Vec<String>>>;
 
 /// Two inputs, and a hold over each.
 type TwoCells = (Input<u32>, Input<u32>, Cell<u32>, Cell<u32>);
 
-fn two_cells() -> (Graph, TwoCells) {
-    Graph::build(|build| {
+fn two_cells() -> (Runtime, TwoCells) {
+    Runtime::build(|build| {
         let (a, a_in) = build.input::<u32>();
         let (b, b_in) = build.input::<u32>();
         (a_in, b_in, a.hold(build, 0), b.hold(build, 0))
@@ -28,8 +28,8 @@ fn two_cells() -> (Graph, TwoCells) {
 type Counter = (Input<u32>, Cell<u32>);
 
 /// Each event opens a counter that starts from the event's value.
-fn counters() -> (Graph, (Input<u32>, Stream<Counter>)) {
-    Graph::build(|b| {
+fn counters() -> (Runtime, (Input<u32>, Stream<Counter>)) {
+    Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -197,7 +197,7 @@ fn a_listener_that_always_sends_cannot_keep_a_call_from_returning() {
 /// over is still alive when the code outside anchors it.
 #[test]
 fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_for() {
-    let (mut graph, (open_in, other_in, opened)) = Graph::build(|b| {
+    let (mut graph, (open_in, other_in, opened)) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let (_, other_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
@@ -237,7 +237,7 @@ fn no_collection_runs_between_a_transaction_and_the_calls_its_listeners_asked_fo
 fn a_call_from_graph_code_is_refused() {
     let log: Log = Rc::default();
     let (map_log, construct_log) = (log.clone(), log.clone());
-    let (graph, (ios_in, _roots)) = Graph::build(move |b| {
+    let (graph, (ios_in, _roots)) = Runtime::build(move |b| {
         let (ios, ios_in) = b.input::<Io>();
         let ios = ios.share(b);
         let (numbers, numbers_in) = b.input::<u32>();
@@ -361,7 +361,7 @@ fn an_anchor_from_a_listener_keeps_what_it_anchors() {
 /// events of the child transactions its transaction started.
 #[test]
 fn a_listener_registered_from_a_listener_misses_its_transactions_child_instants() {
-    let (graph, (numbers_in, numbers, later)) = Graph::build(|b| {
+    let (graph, (numbers_in, numbers, later)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let later = numbers.defer(b).share(b);

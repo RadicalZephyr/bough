@@ -13,7 +13,7 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{Graph, Source, Trace};
+use bough::{Runtime, Source, Trace};
 
 type User = String;
 
@@ -56,7 +56,7 @@ const LINES: usize = 50;
 
 #[test]
 fn rfd_6_s_chat_room_runs_over_remotes() {
-    let (mut graph, (joins, messages, outbound)) = Graph::build_threaded(|b| {
+    let (mut graph, (joins, messages, outbound)) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(

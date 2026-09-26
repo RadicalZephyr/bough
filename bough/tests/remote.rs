@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 use bough::{
-    Graph, Input, InputSlot, PumpError, Remote, RemoteSendError, RemoteTransactionError, Source,
+    Input, InputSlot, PumpError, Remote, RemoteSendError, RemoteTransactionError, Runtime, Source,
     Stream,
 };
 
@@ -38,7 +38,7 @@ fn text(payload: &(dyn Any + Send)) -> String {
 }
 
 /// Every event a stream carries, in order.
-fn log<A: Clone + 'static>(graph: &mut Graph, stream: Stream<A>) -> Rc<RefCell<Vec<A>>> {
+fn log<A: Clone + 'static>(graph: &mut Runtime, stream: Stream<A>) -> Rc<RefCell<Vec<A>>> {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     graph
@@ -56,8 +56,8 @@ fn a_remote_is_send_sync_and_clone() {
 /// Two inputs, and their merge, whose function marks a simultaneous pair.
 type Pair = (Input<u32>, Input<u32>, Stream<u32>);
 
-fn pair() -> (Graph, Pair) {
-    Graph::build(|b| {
+fn pair() -> (Runtime, Pair) {
+    Runtime::build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left.merge(b, right, |l, r| l * 1000 + r);
@@ -104,7 +104,7 @@ fn a_remote_transaction_is_one_unit_whose_sends_are_simultaneous() {
 /// function folds them, first send on the left, as in a local transaction.
 #[test]
 fn a_unit_coalesces_what_its_input_coalesces() {
-    let (mut graph, (words_in, words)) = Graph::build(|b| {
+    let (mut graph, (words_in, words)) = Runtime::build(|b| {
         let (words, words_in) = b.input_coalescing(|a: String, w: String| a + " " + &w);
         (words_in, words.node(b))
     });
@@ -122,7 +122,7 @@ fn a_unit_coalesces_what_its_input_coalesces() {
 #[test]
 fn slots_drain_before_units() {
     static SENSOR: InputSlot<u32> = InputSlot::keep_latest();
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &SENSOR);
         (numbers_in, numbers.node(b))
@@ -142,7 +142,7 @@ fn slots_drain_before_units() {
 /// arrival.
 #[test]
 fn a_local_graph_takes_units_from_several_threads() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<(u32, u32)>();
         (numbers_in, numbers.node(b))
     });
@@ -175,7 +175,7 @@ fn a_local_graph_takes_units_from_several_threads() {
 /// has returned.
 #[test]
 fn a_remote_send_never_blocks_on_the_graph() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -215,7 +215,7 @@ fn a_remote_send_never_blocks_on_the_graph() {
 /// it. The listener runs while the pump holds no lock.
 #[test]
 fn a_remote_send_from_a_listener_is_a_later_transaction() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -248,7 +248,7 @@ fn a_remote_send_from_a_listener_is_a_later_transaction() {
 /// there: a remote send from it queues a later unit.
 #[test]
 fn a_remote_transaction_runs_on_the_driver() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -287,7 +287,7 @@ impl Wake for Counter {
 
 #[test]
 fn a_remote_send_wakes_the_waker_the_driver_registered() {
-    let (mut graph, (numbers_in, _numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, _numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -336,11 +336,11 @@ fn a_double_send_inside_a_unit_drops_the_unit_whole() {
 /// runs on the driver, so its foreign token is found at `pump`.
 #[test]
 fn a_foreign_token_is_refused_when_queued_or_at_pump() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (_other, foreign_in) = Graph::build(|b| b.input::<u32>().1);
+    let (_other, foreign_in) = Runtime::build(|b| b.input::<u32>().1);
     let seen = log(&mut graph, numbers);
     let remote = graph.remote();
     assert_eq!(
@@ -372,7 +372,7 @@ fn a_remote_send_to_an_input_collected_before_the_pump_is_stale() {
     // The lost input's token leaves the build closure by a side door, so
     // that the return value does not root it.
     let mut lost = None;
-    let (mut graph, (kept_in, kept)) = Graph::build(|b| {
+    let (mut graph, (kept_in, kept)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let _unrooted = numbers.hold(b, 0u32);
         lost = Some(numbers_in);
@@ -423,7 +423,7 @@ fn a_dropped_graph_refuses_remote_sends() {
         }
     }
     let drops = Arc::new(AtomicUsize::new(0));
-    let (graph, things_in) = Graph::build(|b| b.input::<Counted>().1);
+    let (graph, things_in) = Runtime::build(|b| b.input::<Counted>().1);
     let remote = graph.remote();
     remote.send(things_in, Counted(drops.clone()));
     drop(graph);
@@ -458,7 +458,7 @@ fn a_dropped_graph_refuses_remote_sends() {
 /// runs, escapes the transaction and poisons the graph, as through `send`.
 #[test]
 fn a_panic_in_a_unit_poisons_the_graph() {
-    let (mut graph, (numbers_in, _numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, _numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });

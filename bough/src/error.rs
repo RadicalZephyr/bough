@@ -8,7 +8,7 @@
 use core::error::Error;
 use core::fmt;
 
-/// Failure modes of [`Graph::try_send`](crate::Graph::try_send). One send
+/// Failure modes of [`Runtime::try_send`](crate::Runtime::try_send). One send
 /// opens one transaction, so no double send can occur here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
@@ -52,7 +52,7 @@ pub enum TokenError {
     Poisoned,
 }
 
-/// Failure modes of [`Graph::try_pump`](crate::Graph::try_pump).
+/// Failure modes of [`Runtime::try_pump`](crate::Runtime::try_pump).
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
 /// send inside a queued unit, or a slot connected to an input since

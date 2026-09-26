@@ -12,7 +12,7 @@ use crate::engine::edge::{Drain, Lock};
 /// A slot holds one pending event. A write when one is pending folds the two
 /// with the slot's fold, pending on the left, so the slot never grows and a
 /// write never allocates; a burst of writes between two pumps becomes one
-/// event. The driver's [`pump`](crate::Graph::pump) runs each pending slot
+/// event. The driver's [`pump`](crate::Runtime::pump) runs each pending slot
 /// as one transaction of its own, in connection order, so two slots are
 /// never simultaneous: simultaneity means one external cause, which a
 /// tuple input or a remote transaction declares, never the timing of a
@@ -34,11 +34,11 @@ use crate::engine::edge::{Drain, Lock};
 /// [`connect`](crate::Build::connect).
 ///
 /// ```
-/// use bough::{Graph, InputSlot, Source};
+/// use bough::{Runtime, InputSlot, Source};
 ///
 /// static PRESSES: InputSlot<u32> = InputSlot::new(|a, b| a + b);
 ///
-/// let (mut graph, total) = Graph::build(|b| {
+/// let (mut graph, total) = Runtime::build(|b| {
 ///     let (presses, presses_in) = b.input::<u32>();
 ///     b.connect(presses_in, &PRESSES);
 ///     presses.accumulate(b, 0u32, |n, total| total + n)
@@ -116,7 +116,7 @@ impl<A: Send> InputSlot<A> {
 
     /// Registers the waker a write wakes, until the graph the slot is
     /// connected to registers its own with
-    /// [`Graph::set_waker`](crate::Graph::set_waker), which reaches every
+    /// [`Runtime::set_waker`](crate::Runtime::set_waker), which reaches every
     /// connected slot. A bare-metal main loop that sleeps on the interrupt
     /// itself needs none.
     pub fn set_waker(&self, waker: Waker) {

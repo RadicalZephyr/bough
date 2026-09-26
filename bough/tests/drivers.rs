@@ -25,7 +25,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bough::{Graph, InputSlot, Mode, Remote, RemoteSendError, Source, Threaded};
+use bough::{InputSlot, Mode, Remote, RemoteSendError, Runtime, Source, Threaded};
 
 // ---- begin thread driver
 
@@ -79,7 +79,9 @@ impl Drop for Driver {
 /// whenever a remote send or a slot write wakes it, and hands back the
 /// edge and a remote. The graph may be `Local`: it never leaves its thread,
 /// and `make` attaches its listeners there.
-fn spawn_driver<M, R>(make: impl FnOnce() -> (Graph<M>, R) + Send + 'static) -> (R, Remote, Driver)
+fn spawn_driver<M, R>(
+    make: impl FnOnce() -> (Runtime<M>, R) + Send + 'static,
+) -> (R, Remote, Driver)
 where
     M: Mode,
     R: Send + 'static,
@@ -107,7 +109,7 @@ where
 
 /// RFD 6's future driver: each poll stores the task's waker, pumps, and
 /// returns pending, so every remote send and slot write wakes the task.
-fn drive<M: Mode>(mut graph: Graph<M>) -> impl Future<Output = ()> {
+fn drive<M: Mode>(mut graph: Runtime<M>) -> impl Future<Output = ()> {
     poll_fn(move |cx| {
         graph.set_waker(cx.waker().clone());
         graph.pump();
@@ -141,7 +143,7 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
     static TICKS: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let (report, reports) = mpsc::channel();
     let (numbers_in, remote, driver) = spawn_driver(move || {
-        let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+        let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
             b.connect(ticks_in, &TICKS);
@@ -191,7 +193,7 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
 /// task, a `Local` graph included, and producers on other threads wake it.
 #[test]
 fn the_future_driver_pumps_at_each_poll() {
-    let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
@@ -227,7 +229,7 @@ fn integrations_share_one_graph_through_remotes() {
         a
     });
     const EACH: u32 = 200;
-    let (mut graph, (events_in, events)) = Graph::build(|b| {
+    let (mut graph, (events_in, events)) = Runtime::build(|b| {
         let (events, events_in) = b.input::<(char, u32)>();
         let (sensor, sensor_in) = b.input::<Vec<(char, u32)>>();
         b.connect(sensor_in, &SENSOR);
@@ -300,8 +302,8 @@ fn integrations_share_one_graph_through_remotes() {
 #[test]
 fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
     fn assert_send<T: Send>() {}
-    assert_send::<Graph<Threaded>>();
-    let (mut graph, (numbers_in, remotes_in, found, total)) = Graph::build_threaded(|b| {
+    assert_send::<Runtime<Threaded>>();
+    let (mut graph, (numbers_in, remotes_in, found, total)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<Remote>();
         let found = remotes

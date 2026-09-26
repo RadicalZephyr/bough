@@ -8,9 +8,9 @@
 //! materializer, and using it twice is a compile error.
 //!
 //! ```
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //!
-//! let (graph, total) = Graph::build(|b| {
+//! let (graph, total) = Runtime::build(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (limit, _limit_in) = b.input_cell(10u32);
 //!     numbers
@@ -24,9 +24,9 @@
 //! A chain used twice does not compile:
 //!
 //! ```compile_fail,E0382
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //!
-//! let (graph, _) = Graph::build(|b| {
+//! let (graph, _) = Runtime::build(|b| {
 //!     let (numbers, _in) = b.input::<u32>();
 //!     let doubled = numbers.map(|n| n * 2);
 //!     let a = doubled.hold(b, 0u32);
@@ -38,9 +38,9 @@
 //! a context graph code cannot name or construct:
 //!
 //! ```compile_fail,E0433
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //!
-//! let (graph, _) = Graph::build(|b| {
+//! let (graph, _) = Runtime::build(|b| {
 //!     let (mut numbers, _in) = b.input::<u32>();
 //!     let _ = numbers.pull(&mut bough::Cx::new(b)); // error: no `Cx` in `bough`
 //! });
@@ -136,12 +136,12 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// [`Leaf`](crate::Leaf); one that is not `Trace` does not compile:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
     /// #[derive(Clone)]
     /// struct Label(&'static str);
     ///
-    /// let (graph, _) = Graph::build(|b| {
+    /// let (graph, _) = Runtime::build(|b| {
     ///     let (clicks, _clicks_in) = b.input::<()>();
     ///     let _ = clicks.map_to(Label("clicked")).node(b); // error: Label is not Trace
     /// });
@@ -246,10 +246,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Rc` event here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _count = numbers
     ///         .map(Rc::new)
@@ -289,10 +289,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// type; a `Threaded` graph refuses an `Rc` output here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
@@ -336,10 +336,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// stream of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
     /// });
@@ -389,20 +389,20 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// another, and before anything the I/O side sends next. Each is a
     /// whole transaction: cells step in it, a snapshot in a later child
     /// reads what an earlier one committed, and listeners run after each
-    /// child's commit. [`Graph::send`](crate::Graph::send) and
-    /// [`Graph::transaction`](crate::Graph::transaction) return after the
+    /// child's commit. [`Runtime::send`](crate::Runtime::send) and
+    /// [`Runtime::transaction`](crate::Runtime::transaction) return after the
     /// last of them, so a sample then reads what it committed. The build
     /// closure's transaction has children too: a split of a
     /// [`steps_with_current`](Cell::steps_with_current) built there runs
-    /// them before [`Graph::build`](crate::Graph::build) returns.
+    /// them before [`Runtime::build`](crate::Runtime::build) returns.
     ///
     /// ```
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (words_in, letters, count)) = Graph::build(|b| {
+    /// let (mut graph, (words_in, letters, count)) = Runtime::build(|b| {
     ///     let (words, words_in) = b.input::<Vec<char>>();
     ///     let letters = words.split(b).share(b);
     ///     let count = letters.accumulate(b, 0u32, |_, n| n + 1);
@@ -436,10 +436,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// must accept both types; a `Threaded` graph refuses `Rc` elements:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
     /// });
@@ -484,9 +484,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (starts_in, counts)) = Graph::build(|b| {
+    /// let (mut graph, (starts_in, counts)) = Runtime::build(|b| {
     ///     let (counts, counts_loop) = b.stream_loop::<u32>();
     ///     let again = counts.filter(|n| *n > 1).map(|n| n - 1).defer(b);
     ///     let (starts, starts_in) = b.input::<u32>();
@@ -516,10 +516,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Threaded` graph refuses `Rc` events:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
     /// });
@@ -560,16 +560,16 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// Tokens created inside `f` flow out as data. An input built there
     /// reaches I/O code as an event, and since a listener has no graph
     /// access, I/O code attaches listeners and sends to it after
-    /// [`Graph::send`](crate::Graph::send) returns: receive, then wire.
+    /// [`Runtime::send`](crate::Runtime::send) returns: receive, then wire.
     ///
     /// ```
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
     /// // Each event opens a counter of its own: an input and a hold over it.
-    /// let (mut graph, (open_in, opened)) = Graph::build(|b| {
+    /// let (mut graph, (open_in, opened)) = Runtime::build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -610,10 +610,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// accept its type; a `Threaded` graph refuses a construct of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
     /// });
@@ -708,7 +708,7 @@ impl<M: Mode> Build<M> {
     }
 }
 
-/// A materialized node: what [`Graph::listen`](crate::Graph::listen) accepts.
+/// A materialized node: what [`Runtime::listen`](crate::Runtime::listen) accepts.
 /// Adapter types do not implement it, so a chain cannot be listened to.
 ///
 /// Sealed, with hidden items: a listener reads a node the way its type

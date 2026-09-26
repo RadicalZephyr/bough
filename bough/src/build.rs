@@ -40,11 +40,11 @@ fn next_graph_id() -> u32 {
 
 /// The context every node-creating operation requires.
 ///
-/// It exists inside [`Graph::build`](crate::Graph::build) and inside
+/// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
-/// `listen`; I/O lives on [`Graph`](crate::Graph).
+/// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///
-/// It is the engine's core itself: a `Graph` owns one, and the build closure
+/// It is the engine's core itself: a `Runtime` owns one, and the build closure
 /// borrows it. So it has no lifetime parameter and no public constructor.
 pub struct Build<M: Mode = Local> {
     pub(crate) graph_id: u32,
@@ -175,9 +175,9 @@ impl<M: Mode> Build<M> {
     /// when the definition steps.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (ticks_in, count)) = Graph::build(|b| {
+    /// let (mut graph, (ticks_in, count)) = Runtime::build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
     ///     let (ticks, ticks_in) = b.input::<()>();
     ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
@@ -231,9 +231,9 @@ impl<M: Mode> Build<M> {
     /// may also close with a [`Cell`], giving a forward that only reads.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (names_in, members)) = Graph::build(|b| {
+    /// let (mut graph, (names_in, members)) = Runtime::build(|b| {
     ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
     ///     let (names, names_in) = b.input::<String>();
     ///     // A name joins once: the snapshot reads the members before the instant.
@@ -269,10 +269,10 @@ impl<M: Mode> Build<M> {
     /// forward's own node, so a stream loop adds no node to its definition.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
-    /// let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    /// let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
     ///     let (sums, sums_loop) = b.stream_loop::<u32>();
     ///     let total = sums.hold(b, 0u32);
     ///     let (numbers, numbers_in) = b.input::<u32>();
@@ -322,9 +322,9 @@ impl<M: Mode> Build<M> {
     /// stale-token error. Here the map emits a cell nothing else names:
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (pick_in, shown)) = Graph::build(|b| {
+    /// let (mut graph, (pick_in, shown)) = Runtime::build(|b| {
     ///     let english = b.constant("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (pick, pick_in) = b.input::<bool>();
@@ -361,7 +361,7 @@ impl<M: Mode> Build<M> {
     }
 
     /// Connects an [`InputSlot`] to an input, so that
-    /// [`pump`](crate::Graph::pump) drains it (RFD 7).
+    /// [`pump`](crate::Runtime::pump) drains it (RFD 7).
     ///
     /// Callable more than once for one input, one slot per producer; the
     /// driver drains slots in connection order, each pending one as a
@@ -402,9 +402,9 @@ impl<M: Mode> Build<M> {
 /// Consumed by `close`, so a loop cannot close twice:
 ///
 /// ```compile_fail,E0382
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, _) = Runtime::build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
 ///     let (ticks, _ticks_in) = b.input::<()>();
 ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
@@ -416,9 +416,9 @@ impl<M: Mode> Build<M> {
 /// It cannot be used from inside a `construct` closure either:
 ///
 /// ```compile_fail,E0507
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (graph, _) = Graph::build(|b| {
+/// let (graph, _) = Runtime::build(|b| {
 ///     let (events, _in) = b.input::<u32>();
 ///     let (forward, closer) = b.cell_loop::<u32>();
 ///     let _out = events.construct(b, move |b, n| {
@@ -455,9 +455,9 @@ impl<A: 'static> CellLoop<A> {
 /// Its forward is a [`State`], which has no stream view:
 ///
 /// ```compile_fail,E0599
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, _) = Runtime::build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
 ///     let _joins = members.steps(b); // error: no method named `steps` found for struct `State`
 /// });
@@ -467,9 +467,9 @@ impl<A: 'static> CellLoop<A> {
 /// only with a `Cell`:
 ///
 /// ```compile_fail,E0308
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, _) = Runtime::build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
 ///     let (names, _names_in) = b.input::<String>();
 ///     let joined = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
@@ -518,10 +518,10 @@ impl<A: 'static> StreamLoop<A> {
     /// `Threaded` graph refuses a loop of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, _) = Runtime::build_threaded(|b| {
     ///     let (_counts, counts_loop) = b.stream_loop::<Rc<u32>>();
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     counts_loop.close(b, numbers.map(Rc::new)); // error: Rc is not Send

@@ -6,7 +6,7 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::{CollectionPolicy, Graph, Input, Lift, Source, State};
+use bough::{CollectionPolicy, Input, Lift, Runtime, Source, State};
 
 /// Everything one run observed: each listener's events in order, the
 /// cells' final values, and the global interleaving of listener calls.
@@ -36,7 +36,7 @@ fn schedule() -> Vec<Sends> {
 }
 
 fn run(seed: Option<u64>) -> Run {
-    let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
+    let (mut graph, (inputs, streams, cells)) = Runtime::build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (bump, bump_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -155,7 +155,7 @@ fn a_merge_of_simultaneous_sends_calls_its_function_once_under_every_seed() {
     for seed in [None, Some(0), Some(1), Some(2), Some(3), Some(99)] {
         let calls = Rc::new(std::cell::Cell::new(0u32));
         let counter = calls.clone();
-        let (mut graph, (left_in, right_in, merged)) = Graph::build(move |b| {
+        let (mut graph, (left_in, right_in, merged)) = Runtime::build(move |b| {
             let (left, left_in) = b.input::<u32>();
             let (right, right_in) = b.input::<u32>();
             let left = left.share(b);
@@ -186,7 +186,7 @@ fn a_merge_of_simultaneous_sends_calls_its_function_once_under_every_seed() {
 #[test]
 fn snapshots_and_gates_read_the_value_before_the_instant_under_every_seed() {
     for seed in [None, Some(0), Some(5), Some(17), Some(1 << 40)] {
-        let (mut graph, (numbers_in, limit_in, open_in, clipped, gated)) = Graph::build(|b| {
+        let (mut graph, (numbers_in, limit_in, open_in, clipped, gated)) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let numbers = numbers.share(b);
             let (limit, limit_in) = b.input_cell(10u32);
@@ -222,7 +222,7 @@ fn run_cells(seed: Option<u64>) -> (Run, [u32; 5]) {
         move || calls[k].set(calls[k].get() + 1)
     };
     let (c0, c1, c2, c3, c4) = (counted(0), counted(1), counted(2), counted(3), counted(4));
-    let (mut graph, (inputs, streams, cells, states)) = Graph::build(move |b| {
+    let (mut graph, (inputs, streams, cells, states)) = Runtime::build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -361,7 +361,7 @@ fn every_shuffle_seed_gives_the_same_cells_steps_and_function_calls() {
 fn run_loops(seed: Option<u64>) -> (Run, u32) {
     let calls = Rc::new(StdCell::new(0u32));
     let count = calls.clone();
-    let (mut graph, (inputs, streams, cells, states)) = Graph::build(move |b| {
+    let (mut graph, (inputs, streams, cells, states)) = Runtime::build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -512,7 +512,7 @@ fn every_shuffle_seed_gives_the_same_loops_values_and_events() {
 /// the countdown. Listeners on every stream and cell. Each child instant is
 /// shuffled as any transaction is, by its own serial.
 fn run_children(seed: Option<u64>) -> Run {
-    let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
+    let (mut graph, (inputs, streams, cells)) = Runtime::build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -625,7 +625,7 @@ fn every_shuffle_seed_gives_the_same_children_and_events() {
 fn run_switches(seed: Option<u64>) -> (Run, [u32; 2], Option<[u64; 2]>) {
     let calls = [Rc::new(StdCell::new(0u32)), Rc::new(StdCell::new(0u32))];
     let counted = calls.clone();
-    let (mut graph, (inputs, streams, cells)) = Graph::build(move |b| {
+    let (mut graph, (inputs, streams, cells)) = Runtime::build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -734,13 +734,13 @@ fn run_switches(seed: Option<u64>) -> (Run, [u32; 2], Option<[u64; 2]>) {
 /// The nodes the evaluation loop ran plus those pulled out of order, and
 /// the relinks, since the graph was built.
 #[cfg(feature = "statistics")]
-fn runs_and_relinks(graph: &Graph) -> Option<[u64; 2]> {
+fn runs_and_relinks(graph: &Runtime) -> Option<[u64; 2]> {
     let s = graph.statistics();
     Some([s.evaluations + s.pulls, s.relinks])
 }
 
 #[cfg(not(feature = "statistics"))]
-fn runs_and_relinks(_: &Graph) -> Option<[u64; 2]> {
+fn runs_and_relinks(_: &Runtime) -> Option<[u64; 2]> {
     None
 }
 
@@ -783,7 +783,7 @@ fn every_shuffle_seed_gives_the_same_switches_values_and_events() {
 /// with the `statistics` feature the nodes run, in order, pulled out of it
 /// or new: each node runs once per instant whatever the order.
 fn run_constructs(seed: Option<u64>, policy: CollectionPolicy) -> (Run, usize, Option<u64>) {
-    let (mut graph, (inputs, streams, cells)) = Graph::build(|b| {
+    let (mut graph, (inputs, streams, cells)) = Runtime::build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -890,13 +890,13 @@ fn run_constructs(seed: Option<u64>, policy: CollectionPolicy) -> (Run, usize, O
 /// The nodes run since the graph was built: in order, pulled out of it,
 /// or as nodes new in their instant.
 #[cfg(feature = "statistics")]
-fn node_runs(graph: &Graph) -> Option<u64> {
+fn node_runs(graph: &Runtime) -> Option<u64> {
     let s = graph.statistics();
     Some(s.evaluations + s.pulls + s.new_nodes)
 }
 
 #[cfg(not(feature = "statistics"))]
-fn node_runs(_: &Graph) -> Option<u64> {
+fn node_runs(_: &Runtime) -> Option<u64> {
     None
 }
 

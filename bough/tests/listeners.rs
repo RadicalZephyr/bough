@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{Graph, Listener, PoisonedError, SendError, Source, TokenError, Trace, Tracer};
+use bough::{Listener, PoisonedError, Runtime, SendError, Source, TokenError, Trace, Tracer};
 
 /// A shared log and a closure that appends to it.
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
@@ -32,7 +32,7 @@ fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
 
 #[test]
 fn a_stream_listener_takes_each_event() {
-    let (mut graph, (numbers_in, doubled)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, doubled)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.map(|n| n * 2).node(b))
     });
@@ -46,7 +46,7 @@ fn a_stream_listener_takes_each_event() {
 #[test]
 fn a_listener_on_an_input_sees_the_folded_event_of_a_coalescing_input() {
     let (mut graph, (words, words_in)) =
-        Graph::build(|b| b.input_coalescing(|a: String, b| a + &b));
+        Runtime::build(|b| b.input_coalescing(|a: String, b| a + &b));
     let (seen, on) = recorder();
     graph.listen(words, on).keep();
     graph.transaction(|tx| {
@@ -58,7 +58,7 @@ fn a_listener_on_an_input_sees_the_folded_event_of_a_coalescing_input() {
 
 #[test]
 fn every_listener_of_a_shared_stream_gets_a_clone_in_registration_order() {
-    let (mut graph, (words_in, words)) = Graph::build(|b| {
+    let (mut graph, (words_in, words)) = Runtime::build(|b| {
         let (words, words_in) = b.input::<String>();
         (words_in, words.share(b))
     });
@@ -77,7 +77,7 @@ fn every_listener_of_a_shared_stream_gets_a_clone_in_registration_order() {
 
 #[test]
 fn a_listener_on_never_never_runs() {
-    let (mut graph, (numbers_in, nothing)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, nothing)) = Runtime::build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();
         (numbers_in, b.never::<u32>())
     });
@@ -89,7 +89,7 @@ fn a_listener_on_never_never_runs() {
 
 #[test]
 fn listen_cell_fires_at_registration_and_on_every_step_including_to_an_equal_value() {
-    let (mut graph, (level, level_in)) = Graph::build(|b| b.input_cell(5u32));
+    let (mut graph, (level, level_in)) = Runtime::build(|b| b.input_cell(5u32));
     let (seen, mut on) = recorder();
     graph.listen_cell(level, move |v| on(*v)).keep();
     assert_eq!(*seen.borrow(), [5], "fires at registration");
@@ -101,7 +101,7 @@ fn listen_cell_fires_at_registration_and_on_every_step_including_to_an_equal_val
 
 #[test]
 fn listen_steps_does_not_fire_at_registration() {
-    let (mut graph, (level, level_in)) = Graph::build(|b| b.input_cell(5u32));
+    let (mut graph, (level, level_in)) = Runtime::build(|b| b.input_cell(5u32));
     let (seen, mut on) = recorder();
     graph.listen_steps(level, move |v| on(*v)).keep();
     assert!(seen.borrow().is_empty());
@@ -111,7 +111,7 @@ fn listen_steps_does_not_fire_at_registration() {
 
 #[test]
 fn a_listener_on_a_constant_fires_only_at_registration() {
-    let (mut graph, (numbers_in, three)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, three)) = Runtime::build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();
         (numbers_in, b.constant(3u32))
     });
@@ -139,7 +139,7 @@ impl Trace for Loud {
 fn listeners_run_after_commit_and_see_committed_values() {
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
     let initial = Loud(0, log.clone());
-    let (mut graph, (loud_in, ticks_in, held, ticks)) = Graph::build(move |b| {
+    let (mut graph, (loud_in, ticks_in, held, ticks)) = Runtime::build(move |b| {
         let (loud, loud_in) = b.input::<Loud>();
         let held = loud.hold(b, initial);
         let (ticks, ticks_in) = b.input::<u32>();
@@ -170,7 +170,7 @@ fn listeners_run_after_commit_and_see_committed_values() {
 fn a_marked_hold_that_did_not_step_stays_quiet() {
     // F4: a hold behind a filter that rejects is reached by marking and
     // does not step, so its cell listeners do not fire.
-    let (mut graph, (numbers_in, big)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, big)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.filter(|n| *n > 5).hold(b, 0u32))
     });
@@ -199,7 +199,7 @@ fn a_marked_hold_that_did_not_step_stays_quiet() {
 
 #[test]
 fn keep_keeps_a_listener_and_unlisten_or_dropping_the_handle_stops_one() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -220,7 +220,7 @@ fn keep_keeps_a_listener_and_unlisten_or_dropping_the_handle_stops_one() {
 
 #[test]
 fn a_listener_dropped_inside_another_listener_stops_at_once() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -245,7 +245,7 @@ fn a_listener_dropped_inside_another_listener_stops_at_once() {
 
 #[test]
 fn a_listener_may_drop_its_own_handle() {
-    let (mut graph, (numbers_in, numbers)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, numbers)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -262,7 +262,7 @@ fn a_listener_may_drop_its_own_handle() {
 }
 
 /// Every later call on a poisoned graph fails.
-fn assert_poisoned(graph: &mut Graph, numbers_in: bough::Input<u32>, level: bough::Cell<u32>) {
+fn assert_poisoned(graph: &mut Runtime, numbers_in: bough::Input<u32>, level: bough::Cell<u32>) {
     assert_eq!(graph.try_send(numbers_in, 9), Err(SendError::Poisoned));
     assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
     assert_eq!(graph.try_sample(level).err(), Some(TokenError::Poisoned));
@@ -285,7 +285,7 @@ fn assert_poisoned(graph: &mut Graph, numbers_in: bough::Input<u32>, level: boug
 
 #[test]
 fn a_panic_in_a_listener_poisons_the_graph() {
-    let (mut graph, (numbers_in, level)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, level)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -304,7 +304,7 @@ fn a_panic_in_a_listener_poisons_the_graph() {
 
 #[test]
 fn a_panic_in_a_function_of_the_graph_poisons_it() {
-    let (mut graph, (numbers_in, level)) = Graph::build(|b| {
+    let (mut graph, (numbers_in, level)) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let level = numbers
             .map(|n| if n == 2 { panic!("user function") } else { n })
@@ -319,7 +319,7 @@ fn a_panic_in_a_function_of_the_graph_poisons_it() {
 
 #[test]
 fn a_panic_in_a_listener_at_registration_leaves_the_graph_usable() {
-    let (mut graph, (level, level_in)) = Graph::build(|b| b.input_cell(1u32));
+    let (mut graph, (level, level_in)) = Runtime::build(|b| b.input_cell(1u32));
     let result = catch_unwind(AssertUnwindSafe(|| {
         graph.listen_cell(level, |_| panic!("at registration"))
     }));
@@ -330,8 +330,8 @@ fn a_panic_in_a_listener_at_registration_leaves_the_graph_usable() {
 
 #[test]
 fn a_foreign_token_is_an_error_from_the_listen_and_sample_entries() {
-    let (mut graph, _) = Graph::build(|b| b.input::<u32>().1);
-    let (_other, (stream, shared, level)) = Graph::build(|b| {
+    let (mut graph, _) = Runtime::build(|b| b.input::<u32>().1);
+    let (_other, (stream, shared, level)) = Runtime::build(|b| {
         let (numbers, _in) = b.input::<u32>();
         let shared = b.input::<u32>().0.share(b);
         (numbers, shared, b.constant(1u32))
@@ -361,7 +361,7 @@ fn a_foreign_token_is_an_error_from_the_listen_and_sample_entries() {
 #[test]
 fn listeners_of_a_threaded_graph_run_on_the_driving_thread() {
     use std::sync::{Arc, Mutex};
-    let (mut graph, (numbers_in, numbers, total)) = Graph::build_threaded(|b| {
+    let (mut graph, (numbers_in, numbers, total)) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let total = numbers.map(|n| n * 10).hold(b, 0u64);

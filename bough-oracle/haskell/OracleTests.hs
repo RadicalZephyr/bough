@@ -574,7 +574,7 @@ childTests = test [
         let out = B.construct (B.input [([2], ())]) (\_ -> B.defer <$> B.stepsWithCurrent c)
         assertEqual "outer" [[2]] (map fst (D.occs out))
         assertEqual "inner" [([2,0],'b')] (D.occs (snd (head (D.occs out)))),
-    "Graph::sample after k sees grandchildren of k" ~: do
+    "Runtime::sample after k sees grandchildren of k" ~: do
         let h = build (B.hold (B.split (B.split (B.input [([1],[[1],[2,3 :: Int]])]))) 0)
         assertEqual "after 1" 3 (B.ioSample h 1)
         assertEqual "after 0" 0 (B.ioSample h 0)

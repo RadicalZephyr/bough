@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 
 use bough::{
-    Cell, CollectionPolicy, Graph, Input, Shared, Source, State, Stream, TokenError, Trace,
+    Cell, CollectionPolicy, Input, Runtime, Shared, Source, State, Stream, TokenError, Trace,
 };
 
 /// A type with no `Trace`, which only a skipped field may have.
@@ -37,7 +37,7 @@ struct Screen {
 /// else names it, and is stale.
 #[test]
 fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
-    let (mut graph, screen) = Graph::build(|b| {
+    let (mut graph, screen) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let events = clicks.share(b);
         let first = events.hold(b, 0u32);
@@ -111,7 +111,7 @@ struct Tagged<T, U> {
 fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
     let pages_out = Rc::new(RefCell::new(None));
     let pages_in = pages_out.clone();
-    let (mut graph, (routes_in, route, tagged, pair)) = Graph::build(move |b| {
+    let (mut graph, (routes_in, route, tagged, pair)) = Runtime::build(move |b| {
         let (routes, routes_in) = b.input::<Route>();
         let route = routes.hold(b, Route::Home);
         let pages = [b.constant(1u32), b.constant(2u32), b.constant(3u32)];
@@ -189,7 +189,7 @@ struct Shadow {
 
 #[test]
 fn degenerate_shapes_derive_and_trace() {
-    let (mut graph, cells) = Graph::build(|b| {
+    let (mut graph, cells) = Runtime::build(|b| {
         let unit = b.constant(Unit);
         let skipped = b.constant(AllSkipped { opaque: Opaque(5) });
         let empty = b.constant(None::<Empty>);
@@ -228,7 +228,7 @@ struct Members {
 /// since `Remote` and `pump` are the I/O edge's stage.
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
-    let (mut graph, (joins, messages, outbound)) = Graph::build_threaded(|b| {
+    let (mut graph, (joins, messages, outbound)) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(

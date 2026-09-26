@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{CollectionPolicy, Graph, Lift, Source};
+use crate::{CollectionPolicy, Lift, Runtime, Source};
 
 /// Builds and drives the smoke graph with one of the two graph
 /// constructors. A macro rather than a function generic over the mode: the
@@ -317,9 +317,9 @@ macro_rules! smoke_edge {
 /// each mode the target has, and returns a sum of the final values.
 #[doc(hidden)]
 pub fn smoke() -> u32 {
-    let local = smoke_graph!(Graph::build) + smoke_edge!(Graph::build);
+    let local = smoke_graph!(Runtime::build) + smoke_edge!(Runtime::build);
     #[cfg(target_has_atomic = "ptr")]
-    let threaded = smoke_graph!(Graph::build_threaded) + smoke_edge!(Graph::build_threaded);
+    let threaded = smoke_graph!(Runtime::build_threaded) + smoke_edge!(Runtime::build_threaded);
     #[cfg(not(target_has_atomic = "ptr"))]
     let threaded = local;
     local + threaded

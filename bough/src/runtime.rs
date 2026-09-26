@@ -48,14 +48,14 @@ use crate::trace::{Trace, Tracer};
 /// the I/O API.
 ///
 /// The graph is entered from exactly one place at a time. Graph code never
-/// holds a `Graph`; every public entry point checks the
-/// transaction-in-progress flag, so a `Graph` smuggled into graph code fails
+/// holds a `Runtime`; every public entry point checks the
+/// transaction-in-progress flag, so a `Runtime` smuggled into graph code fails
 /// at the entry. The same flag is the poison: only a transaction that
 /// finishes clears it, so an entry that finds it set outside a transaction
 /// reports `Poisoned`. That holds where a panic unwinds and where a panic is
 /// a trap alike, since neither needs code to run on the way out (RFD 5).
 ///
-/// `Graph<Threaded>` is `Send` because every field is: the engine stores
+/// `Runtime<Threaded>` is `Send` because every field is: the engine stores
 /// each value, closure and chain in the mode's carrier, which is
 /// `Box<dyn Any + Send>` there. No `unsafe impl` says so.
 ///
@@ -74,7 +74,7 @@ use crate::trace::{Trace, Tracer};
 /// listened to before the next transaction, or it may be lost. Collection
 /// is automatic by default, and never runs inside a transaction; see
 /// [`CollectionPolicy`].
-pub struct Graph<M: Mode = Local> {
+pub struct Runtime<M: Mode = Local> {
     build: Build<M>,
     /// The build closure's return value, traced once: the permanent roots.
     roots: Vec<Token>,
@@ -97,7 +97,7 @@ pub struct Graph<M: Mode = Local> {
 
 /// Transaction zero: nothing is started, so the new-node phase runs every
 /// node the closure built, dependencies first.
-fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Graph<M>, R) {
+fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtime<M>, R) {
     let mut build = Build::<M>::new();
     let id = build.graph_id;
     build.begin();
@@ -113,7 +113,7 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Graph<
     build.finish();
     let mut tracer = Tracer::new();
     r.trace(&mut tracer);
-    let graph = Graph {
+    let graph = Runtime {
         build,
         roots: tracer.visited,
         anchors: Vec::new(),
@@ -127,7 +127,7 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Graph<
     (graph, r)
 }
 
-impl Graph<Local> {
+impl Runtime<Local> {
     /// Builds a `Local` graph. The closure gets the only [`Build`] context;
     /// whatever it returns is the edge of the graph and its permanent root
     /// set, which is why `R: Trace`.
@@ -136,13 +136,13 @@ impl Graph<Local> {
     /// which a [`split`](crate::Source::split) or a
     /// [`defer`](crate::Source::defer) that fires in it starts, run before
     /// `build` returns.
-    pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Graph<Local>, R) {
+    pub fn build<R: Trace>(f: impl FnOnce(&mut Build<Local>) -> R) -> (Runtime<Local>, R) {
         build_graph(f)
     }
 }
 
 #[cfg(target_has_atomic = "ptr")]
-impl Graph<Threaded> {
+impl Runtime<Threaded> {
     /// Builds a `Threaded` graph, which is `Send`; every value and closure it
     /// stores must be `Send`.
     ///
@@ -151,7 +151,7 @@ impl Graph<Threaded> {
     /// function.
     pub fn build_threaded<R: Trace + Send>(
         f: impl FnOnce(&mut Build<Threaded>) -> R,
-    ) -> (Graph<Threaded>, R) {
+    ) -> (Runtime<Threaded>, R) {
         build_graph(f)
     }
 }
@@ -159,7 +159,7 @@ impl Graph<Threaded> {
 /// What the same-thread handle needs of the graph it shares, which it
 /// cannot borrow while the graph is busy.
 #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-impl Graph<Local> {
+impl Runtime<Local> {
     /// The inbox: its poison mirror, its guard and the driver's waker,
     /// read while the graph is busy.
     pub(crate) fn inbox(&self) -> Arc<Inbox> {
@@ -172,7 +172,7 @@ impl Graph<Local> {
         self.released.clone()
     }
 
-    /// [`listen`](Graph::listen), with the flag of a [`Listener`] the
+    /// [`listen`](Runtime::listen), with the flag of a [`Listener`] the
     /// handle gave out before the graph could register it. A cleared flag
     /// means the listener was dropped first, and nothing registers.
     pub(crate) fn listen_flagged<S, F>(&mut self, flag: LocalFlag, source: S, f: F)
@@ -190,8 +190,8 @@ impl Graph<Local> {
         }
     }
 
-    /// [`listen_cell`](Graph::listen_cell), with a flag, as
-    /// [`listen_flagged`](Graph::listen_flagged). The first call runs now,
+    /// [`listen_cell`](Runtime::listen_cell), with a flag, as
+    /// [`listen_flagged`](Runtime::listen_flagged). The first call runs now,
     /// when the listener is registered.
     pub(crate) fn listen_cell_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, mut f: F)
     where
@@ -209,8 +209,8 @@ impl Graph<Local> {
         self.attach_flag(i, f, call_cell::<Local, C::Value, F>, flag);
     }
 
-    /// [`listen_steps`](Graph::listen_steps), with a flag, as
-    /// [`listen_flagged`](Graph::listen_flagged).
+    /// [`listen_steps`](Runtime::listen_steps), with a flag, as
+    /// [`listen_flagged`](Runtime::listen_flagged).
     pub(crate) fn listen_steps_flagged<C, F>(&mut self, flag: LocalFlag, cell: C, f: F)
     where
         C: CellRef,
@@ -225,8 +225,8 @@ impl Graph<Local> {
         }
     }
 
-    /// [`anchor`](Graph::anchor), with the flag of an [`Anchor`] the
-    /// handle gave out, as [`listen_flagged`](Graph::listen_flagged).
+    /// [`anchor`](Runtime::anchor), with the flag of an [`Anchor`] the
+    /// handle gave out, as [`listen_flagged`](Runtime::listen_flagged).
     pub(crate) fn anchor_flagged<T: Trace + ?Sized>(&mut self, flag: LocalFlag, value: &T) {
         self.enter();
         if !flag.is_live() {
@@ -296,7 +296,7 @@ where
     part::<M, F>(f)(v)
 }
 
-impl<M: Mode> Graph<M> {
+impl<M: Mode> Runtime<M> {
     /// Whether a transaction never finished. Every entry checks this, and
     /// one that finds it set mirrors it into the inbox, so that remote
     /// sends fail from then on (RFD 6).
@@ -331,7 +331,7 @@ impl<M: Mode> Graph<M> {
 
     /// The token check of a panicking entry whose operation, on a collected
     /// node, the semantics cannot observe: a foreign token panics, and a
-    /// stale one is [`stale_operation`](Graph::stale_operation), `None`.
+    /// stale one is [`stale_operation`](Runtime::stale_operation), `None`.
     fn checked(&mut self, token: Token, what: &str) -> Option<u32> {
         match self.build.lookup(token) {
             Ok(i) => Some(i),
@@ -353,7 +353,7 @@ impl<M: Mode> Graph<M> {
             panic!(
                 "bough: {what}: its token is stale. A node no root reaches is collected; \
                  anchor or listen to what I/O code keeps a token of. In a release build this \
-                 is a no-op that `Graph::stale_operations` counts"
+                 is a no-op that `Runtime::stale_operations` counts"
             );
         }
         self.stale_operations += 1;
@@ -401,7 +401,7 @@ impl<M: Mode> Graph<M> {
     ///
     /// Panics on a foreign token or a poisoned graph. Sending to a collected
     /// input is unobservable by the semantics: a panic in debug builds and a
-    /// no-op in release builds, which [`stale_operations`](Graph::stale_operations)
+    /// no-op in release builds, which [`stale_operations`](Runtime::stale_operations)
     /// counts.
     ///
     /// A collection that is due runs first, before the transaction opens.
@@ -414,7 +414,7 @@ impl<M: Mode> Graph<M> {
         self.send_without_collecting(input, value);
     }
 
-    /// [`send`](Graph::send) without the collection that may run first. The
+    /// [`send`](Runtime::send) without the collection that may run first. The
     /// same-thread handle's queue sends this way: its sends are the I/O
     /// code a transaction's listeners asked for, and no collection runs
     /// between a transaction and that code.
@@ -435,7 +435,7 @@ impl<M: Mode> Graph<M> {
         self.build.finish();
     }
 
-    /// [`send`](Graph::send), returning the error instead of panicking.
+    /// [`send`](Runtime::send), returning the error instead of panicking.
     pub fn try_send<A: 'static>(&mut self, input: Input<A>, value: A) -> Result<(), SendError>
     where
         M: Accepts<A>,
@@ -462,7 +462,7 @@ impl<M: Mode> Graph<M> {
     /// Several sends in one instant.
     ///
     /// The sends are simultaneous: nothing runs until `f` returns, so their
-    /// order inside `f` does not matter. As with [`send`](Graph::send), the
+    /// order inside `f` does not matter. As with [`send`](Runtime::send), the
     /// transaction's listeners and its child transactions run before it
     /// returns. A panic inside `f`, including one from
     /// [`Transaction::send`], escapes the transaction and poisons the graph.
@@ -473,9 +473,9 @@ impl<M: Mode> Graph<M> {
         self.transaction_without_collecting(f)
     }
 
-    /// [`transaction`](Graph::transaction) without the collection that may
+    /// [`transaction`](Runtime::transaction) without the collection that may
     /// run first, for the same-thread handle's queue, as
-    /// [`send_without_collecting`](Graph::send_without_collecting).
+    /// [`send_without_collecting`](Runtime::send_without_collecting).
     pub(crate) fn transaction_without_collecting<R>(
         &mut self,
         f: impl FnOnce(&mut Transaction<'_, M>) -> R,
@@ -487,7 +487,7 @@ impl<M: Mode> Graph<M> {
         r
     }
 
-    /// [`transaction`](Graph::transaction), returning the error instead of
+    /// [`transaction`](Runtime::transaction), returning the error instead of
     /// panicking.
     pub fn try_transaction<R>(
         &mut self,
@@ -507,18 +507,18 @@ impl<M: Mode> Graph<M> {
     /// A chain cannot be listened to:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, events) = Graph::build(|b| b.input::<u32>().0);
+    /// let (mut graph, events) = Runtime::build(|b| b.input::<u32>().0);
     /// let _l = graph.listen(events.map(|n| n + 1), |n| println!("{n}")); // error: Map<..> is not a Node
     /// ```
     ///
     /// A linear stream cannot be listened to twice:
     ///
     /// ```compile_fail,E0382
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, events) = Graph::build(|b| b.input::<u32>().0);
+    /// let (mut graph, events) = Runtime::build(|b| b.input::<u32>().0);
     /// let _a = graph.listen(events, |n| println!("{n}"));
     /// let _b = graph.listen(events, |n| println!("{n}")); // error: use of moved value
     /// ```
@@ -536,7 +536,7 @@ impl<M: Mode> Graph<M> {
         }
     }
 
-    /// [`listen`](Graph::listen), returning the error instead of panicking.
+    /// [`listen`](Runtime::listen), returning the error instead of panicking.
     pub fn try_listen<S, F>(&mut self, source: S, f: F) -> Result<Listener<M>, TokenError>
     where
         S: Node,
@@ -572,7 +572,7 @@ impl<M: Mode> Graph<M> {
         self.attach(i, f, call_cell::<M, C::Value, F>)
     }
 
-    /// [`listen_cell`](Graph::listen_cell), returning the error instead of
+    /// [`listen_cell`](Runtime::listen_cell), returning the error instead of
     /// panicking.
     pub fn try_listen_cell<C, F>(&mut self, cell: C, mut f: F) -> Result<Listener<M>, TokenError>
     where
@@ -589,7 +589,7 @@ impl<M: Mode> Graph<M> {
     /// nothing at registration. The I/O form of
     /// [`steps`](crate::Cell::steps), Sodium's `updates`. The cell is a
     /// [`Cell`](crate::Cell) or a [`State`](crate::State), as for
-    /// [`listen_cell`](Graph::listen_cell).
+    /// [`listen_cell`](Runtime::listen_cell).
     pub fn listen_steps<C, F>(&mut self, cell: C, f: F) -> Listener<M>
     where
         C: CellRef,
@@ -603,7 +603,7 @@ impl<M: Mode> Graph<M> {
         }
     }
 
-    /// [`listen_steps`](Graph::listen_steps), returning the error instead of
+    /// [`listen_steps`](Runtime::listen_steps), returning the error instead of
     /// panicking.
     pub fn try_listen_steps<C, F>(&mut self, cell: C, f: F) -> Result<Listener<M>, TokenError>
     where
@@ -668,9 +668,9 @@ impl<M: Mode> Graph<M> {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (open_in, opened)) = Graph::build(|b| {
+    /// let (mut graph, (open_in, opened)) = Runtime::build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -692,7 +692,7 @@ impl<M: Mode> Graph<M> {
     ///
     /// Panics on a foreign token or a poisoned graph. Anchoring a collected
     /// node is a panic in a debug build and, in a release build, a no-op
-    /// that [`stale_operations`](Graph::stale_operations) counts: the handle
+    /// that [`stale_operations`](Runtime::stale_operations) counts: the handle
     /// anchors the value's other nodes.
     pub fn anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Anchor<M> {
         self.enter();
@@ -712,7 +712,7 @@ impl<M: Mode> Graph<M> {
         Anchor { alive: Some(flag) }
     }
 
-    /// [`anchor`](Graph::anchor), returning the error instead of panicking.
+    /// [`anchor`](Runtime::anchor), returning the error instead of panicking.
     /// A value with a stale or foreign token anchors nothing.
     pub fn try_anchor<T: Trace + ?Sized>(&mut self, value: &T) -> Result<Anchor<M>, TokenError> {
         let mut tracer = Tracer::new();
@@ -740,9 +740,9 @@ impl<M: Mode> Graph<M> {
     /// a send:
     ///
     /// ```compile_fail,E0502
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (numbers_in, latest)) = Graph::build(|b| {
+    /// let (mut graph, (numbers_in, latest)) = Runtime::build(|b| {
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     (numbers_in, numbers.hold(b, 0u32))
     /// });
@@ -756,7 +756,7 @@ impl<M: Mode> Graph<M> {
         self.build.value::<C::Value>(i)
     }
 
-    /// [`sample`](Graph::sample), returning the error instead of panicking.
+    /// [`sample`](Runtime::sample), returning the error instead of panicking.
     pub fn try_sample<C: CellRef>(&self, cell: C) -> Result<&C::Value, TokenError> {
         let i = self.lookup(cell.token())?;
         Ok(self.build.value::<C::Value>(i))
@@ -781,7 +781,7 @@ impl<M: Mode> Graph<M> {
         self.collect_now();
     }
 
-    /// [`collect_garbage`](Graph::collect_garbage), returning the error
+    /// [`collect_garbage`](Runtime::collect_garbage), returning the error
     /// instead of panicking.
     pub fn try_collect_garbage(&mut self) -> Result<(), PoisonedError> {
         if self.poisoned() {
@@ -865,7 +865,7 @@ impl<M: Mode> Graph<M> {
     /// or by another thread, waits for the next pump, whose wake it has
     /// already made, so a listener that always sends cannot keep a pump
     /// from returning. A collection that is due runs before each
-    /// transaction opens, as for [`send`](Graph::send).
+    /// transaction opens, as for [`send`](Runtime::send).
     ///
     /// A unit runs as a transaction the driver opens, and its closure sends
     /// into it. A unit whose send fails is dropped whole, with none of its
@@ -876,7 +876,7 @@ impl<M: Mode> Graph<M> {
     /// transaction it runs poisons it. A send to an input collected before
     /// the pump, from a unit or a slot, is a send to a collected input: a
     /// panic in a debug build, and in a release build a no-op that
-    /// [`stale_operations`](Graph::stale_operations) counts, and the unit's
+    /// [`stale_operations`](Runtime::stale_operations) counts, and the unit's
     /// other sends run. A stale slot is disconnected and its event dropped.
     /// A double send inside a unit, or a remote transaction's token from
     /// another graph, panics in both builds. A panic leaves the rest pending
@@ -885,7 +885,7 @@ impl<M: Mode> Graph<M> {
         self.pump_between(&mut |_| {});
     }
 
-    /// [`pump`](Graph::pump), running `between` after each slot's and each
+    /// [`pump`](Runtime::pump), running `between` after each slot's and each
     /// unit's transaction, before the next one opens and before the
     /// collection that may run first. The same-thread handle runs its
     /// queue there, so that a listener can wire what one unit built before
@@ -904,7 +904,7 @@ impl<M: Mode> Graph<M> {
         }
     }
 
-    /// [`pump`](Graph::pump), returning the error instead of panicking. The
+    /// [`pump`](Runtime::pump), returning the error instead of panicking. The
     /// first slot or unit that fails is dropped, and the error returned;
     /// the rest stay pending for the next call.
     pub fn try_pump(&mut self) -> Result<(), PumpError> {
@@ -1048,7 +1048,7 @@ impl<M: Mode> Graph<M> {
 
     /// An endpoint any thread uses to send into this graph: each send, or
     /// each remote transaction, is queued as one unit, which the driver runs
-    /// as one transaction at its next [`pump`](Graph::pump) (RFD 6).
+    /// as one transaction at its next [`pump`](Runtime::pump) (RFD 6).
     ///
     /// Every remote of a graph shares its one inbox, made with the graph.
     /// Panics on a poisoned graph.
@@ -1063,7 +1063,7 @@ impl<M: Mode> Graph<M> {
         }
     }
 
-    /// [`remote`](Graph::remote), returning the error instead of panicking.
+    /// [`remote`](Runtime::remote), returning the error instead of panicking.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
@@ -1089,14 +1089,14 @@ pub enum CollectionPolicy {
     /// never pays. The first transaction after the build collects what the
     /// build closure built and did not root.
     Automatic,
-    /// Only on [`Graph::collect_garbage`]: for a frame loop that collects at
+    /// Only on [`Runtime::collect_garbage`]: for a frame loop that collects at
     /// the end of a frame, or a high-rate loop that chooses when it pays.
     Manual,
 }
 
 /// Several sends in one instant; the only I/O-side use of the word.
 pub struct Transaction<'g, M: Mode> {
-    graph: &'g mut Graph<M>,
+    graph: &'g mut Runtime<M>,
 }
 
 impl<M: Mode> Transaction<'_, M> {
@@ -1107,7 +1107,7 @@ impl<M: Mode> Transaction<'_, M> {
     /// A send to a collected input is unobservable by the semantics: a
     /// panic in a debug build, which poisons the graph too, and in a release
     /// build a no-op that
-    /// [`Graph::stale_operations`](Graph::stale_operations) counts.
+    /// [`Runtime::stale_operations`](Runtime::stale_operations) counts.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A)
     where
         M: Accepts<A>,
@@ -1181,7 +1181,7 @@ impl<M: Mode> Drop for Listener<M> {
 }
 
 /// The handle that keeps a node alive from I/O code without listening to
-/// it, one of the three kinds of root, from [`Graph::anchor`]. Dropping it
+/// it, one of the three kinds of root, from [`Runtime::anchor`]. Dropping it
 /// removes the root, and the node is collected at a later collection if
 /// nothing else reaches it. It borrows nothing from the graph, and carries
 /// the mode for the same reason a [`Listener`] does.
@@ -1219,7 +1219,7 @@ impl<M: Mode> Drop for Anchor<M> {
 ///
 /// A send pushes a unit into the graph's inbox and wakes the driver; it
 /// never blocks on the graph, and allocates on the sending thread. Each
-/// unit is one transaction, run by [`Graph::pump`] in arrival order: a
+/// unit is one transaction, run by [`Runtime::pump`] in arrival order: a
 /// [`transaction`](Remote::transaction) makes its sends simultaneous, and
 /// two units are never merged. A remote works with a `Local` graph; what it
 /// carries must be `Send`. The graph's poison is mirrored into the inbox by
@@ -1231,9 +1231,9 @@ impl<M: Mode> Drop for Anchor<M> {
 /// use std::rc::Rc;
 /// use std::thread;
 ///
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+/// let (mut graph, (numbers_in, total)) = Runtime::build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
 /// });
@@ -1258,9 +1258,9 @@ impl<M: Mode> Drop for Anchor<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::Graph;
+/// use bough::Runtime;
 ///
-/// let (graph, shared_in) = Graph::build(|b| b.input::<Rc<u32>>().1);
+/// let (graph, shared_in) = Runtime::build(|b| b.input::<Rc<u32>>().1);
 /// graph.remote().send(shared_in, Rc::new(1)); // error: Rc is not Send
 /// ```
 ///
@@ -1305,7 +1305,7 @@ impl Remote {
     /// driver thread inside a transaction. A send to a dropped graph cannot
     /// be observed: a panic in a debug build and a no-op in a release
     /// build. Whether the input is collected, or was by the time the driver
-    /// pumps, is graph knowledge, found at [`Graph::pump`].
+    /// pumps, is graph knowledge, found at [`Runtime::pump`].
     pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) {
         match self.try_send(input, value) {
             Ok(()) => {}
@@ -1408,7 +1408,7 @@ fn dropped_graph() {
 /// it opened for the unit, so they are simultaneous.
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
-/// failed send here is found at [`Graph::pump`], which drops the whole unit
+/// failed send here is found at [`Runtime::pump`], which drops the whole unit
 /// and reports it; the closure's later sends are ignored.
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -1447,7 +1447,7 @@ impl RemoteTransaction<'_> {
 #[cfg(test)]
 mod tests {
     use crate::engine::slot;
-    use crate::{Graph, Local, Source};
+    use crate::{Local, Runtime, Source};
 
     /// Claim 1, read off the data plane: a linear consumer moves the event
     /// out of its dependency's slot, and a shared slot keeps its event for
@@ -1456,7 +1456,7 @@ mod tests {
     fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
         // The consumers are returned, so that they are roots: a consumer no
         // root reaches is collected at the first send, and takes nothing.
-        let (mut graph, (linear_in, shared_in, shared, _consumers)) = Graph::build(|b| {
+        let (mut graph, (linear_in, shared_in, shared, _consumers)) = Runtime::build(|b| {
             let (linear, linear_in) = b.input::<u32>();
             let latest = linear.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
@@ -1465,7 +1465,7 @@ mod tests {
             let same = shared.hold(b, 0u32);
             (linear_in, shared_in, shared, [latest, plus, same])
         });
-        let data = |graph: &Graph, index: u32| {
+        let data = |graph: &Runtime, index: u32| {
             *slot::<Local, u32>(&graph.build.store.data[index as usize])
         };
         graph.send(linear_in, 5);

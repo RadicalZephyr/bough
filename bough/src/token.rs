@@ -29,7 +29,7 @@ pub(crate) mod sealed {
 ///
 /// Used by [`Build::depends`](crate::Build::depends), which takes a slice of
 /// any tokens. Every token type is also [`Trace`](crate::Trace), visiting
-/// itself, so [`Graph::anchor`](crate::Graph::anchor), which takes any
+/// itself, so [`Runtime::anchor`](crate::Runtime::anchor), which takes any
 /// value that holds tokens, takes a single token too.
 pub trait TokenRef: sealed::Sealed {}
 
@@ -69,20 +69,20 @@ pub struct Cell<A> {
 ///
 /// A `State` is read like a [`Cell`]. `sample`, `snapshot`, `gate`,
 /// `map_cell`, `lift` and the cell listeners on
-/// [`Graph`](crate::Graph) accept either, through
+/// [`Runtime`](crate::Runtime) accept either, through
 /// [`CellRef`](crate::CellRef); `map_cell` over a `State` is a `State`, and
 /// so is a `lift` with a `State` among its inputs. What a `State` lacks is
 /// a stream view. `steps` and `steps_with_current` carry a cell's value
 /// after the instant, during the instant, and an in-place accumulator's
 /// function runs only at commit, after every reader has seen the state
 /// from before the instant. The listeners read after commit, so
-/// [`Graph::listen_steps`](crate::Graph::listen_steps) and
-/// [`Graph::listen_cell`](crate::Graph::listen_cell) work on a `State`.
+/// [`Runtime::listen_steps`](crate::Runtime::listen_steps) and
+/// [`Runtime::listen_cell`](crate::Runtime::listen_cell) work on a `State`.
 ///
 /// ```compile_fail,E0599
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, _) = Runtime::build(|b| {
 ///     let (names, _names_in) = b.input::<String>();
 ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     let _joined = members.steps(b); // error: no method named `steps` found for struct `State`
@@ -93,7 +93,7 @@ pub struct State<A> {
     event: PhantomData<fn() -> A>,
 }
 
-/// The I/O side of an input: the token that [`Graph::send`](crate::Graph::send)
+/// The I/O side of an input: the token that [`Runtime::send`](crate::Runtime::send)
 /// takes.
 ///
 /// `Copy`, because several I/O sources may drive one input and because

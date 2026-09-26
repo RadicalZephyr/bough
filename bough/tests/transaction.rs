@@ -4,7 +4,7 @@
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use bough::{Graph, PoisonedError, SendError, TransactionSendError};
+use bough::{PoisonedError, Runtime, SendError, TransactionSendError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -23,7 +23,7 @@ fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
 
 #[test]
 fn the_build_closure_runs_as_transaction_zero_and_returns_its_edge() {
-    let (graph, (_numbers_in, _limit, _never)) = Graph::build(|b| {
+    let (graph, (_numbers_in, _limit, _never)) = Runtime::build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();
         let limit = b.constant(10u32);
         let never = b.never::<u32>();
@@ -34,7 +34,7 @@ fn the_build_closure_runs_as_transaction_zero_and_returns_its_edge() {
 
 #[test]
 fn a_second_send_to_a_non_coalescing_input_is_a_double_send() {
-    let (mut graph, (a_in, b_in)) = Graph::build(|b| {
+    let (mut graph, (a_in, b_in)) = Runtime::build(|b| {
         let (_a, a_in) = b.input::<u32>();
         let (_b, b_in) = b.input::<u32>();
         (a_in, b_in)
@@ -56,7 +56,7 @@ fn a_second_send_to_a_non_coalescing_input_is_a_double_send() {
 
 #[test]
 fn a_double_send_through_send_panics_and_poisons_the_graph() {
-    let (mut graph, a_in) = Graph::build(|b| b.input::<u32>().1);
+    let (mut graph, a_in) = Runtime::build(|b| b.input::<u32>().1);
     let result = catch_unwind(AssertUnwindSafe(|| {
         graph.transaction(|tx| {
             tx.send(a_in, 1);
@@ -72,7 +72,7 @@ fn a_double_send_through_send_panics_and_poisons_the_graph() {
 
 #[test]
 fn a_coalescing_input_accepts_several_sends_in_one_transaction() {
-    let (mut graph, a_in) = Graph::build(|b| b.input_coalescing(|x: u32, y| x + y).1);
+    let (mut graph, a_in) = Runtime::build(|b| b.input_coalescing(|x: u32, y| x + y).1);
     let results = graph.transaction(|tx| (tx.try_send(a_in, 1), tx.try_send(a_in, 2)));
     assert_eq!(results, (Ok(()), Ok(())));
     graph.transaction(|tx| {
@@ -84,7 +84,7 @@ fn a_coalescing_input_accepts_several_sends_in_one_transaction() {
 
 #[test]
 fn a_panic_in_a_coalescing_function_poisons_the_graph() {
-    let (mut graph, a_in) = Graph::build(|b| {
+    let (mut graph, a_in) = Runtime::build(|b| {
         b.input_coalescing(|_: u32, _: u32| -> u32 { panic!("user code") })
             .1
     });
@@ -100,8 +100,8 @@ fn a_panic_in_a_coalescing_function_poisons_the_graph() {
 
 #[test]
 fn a_token_from_another_graph_is_an_error_and_leaves_the_graph_usable() {
-    let (mut first, first_in) = Graph::build(|b| b.input::<u32>().1);
-    let (mut second, second_in) = Graph::build(|b| b.input::<u32>().1);
+    let (mut first, first_in) = Runtime::build(|b| b.input::<u32>().1);
+    let (mut second, second_in) = Runtime::build(|b| b.input::<u32>().1);
     assert_eq!(first.try_send(second_in, 1), Err(SendError::ForeignGraph));
     assert_eq!(
         first.transaction(|tx| tx.try_send(second_in, 1)),
@@ -117,9 +117,9 @@ fn a_token_from_another_graph_is_an_error_and_leaves_the_graph_usable() {
 
 #[test]
 fn a_foreign_token_in_graph_code_panics() {
-    let (_other, stranger) = Graph::build(|b| b.constant(1u32));
+    let (_other, stranger) = Runtime::build(|b| b.constant(1u32));
     let result = catch_unwind(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let _ = stranger.sample(b);
         })
     });
@@ -129,8 +129,8 @@ fn a_foreign_token_in_graph_code_panics() {
 #[test]
 fn swapping_the_build_context_for_another_graphs_is_caught() {
     let result = catch_unwind(|| {
-        Graph::build(|outer| {
-            Graph::build(|inner| core::mem::swap(outer, inner));
+        Runtime::build(|outer| {
+            Runtime::build(|inner| core::mem::swap(outer, inner));
         })
     });
     assert!(panic_text(result).contains("swapped for another graph's"));
@@ -139,7 +139,7 @@ fn swapping_the_build_context_for_another_graphs_is_caught() {
 #[cfg(feature = "statistics")]
 #[test]
 fn statistics_count_instants_and_nothing_else_on_an_unconsumed_input() {
-    let (mut graph, a_in) = Graph::build(|b| b.input::<u32>().1);
+    let (mut graph, a_in) = Runtime::build(|b| b.input::<u32>().1);
     let built: bough::Statistics = graph.statistics();
     assert_eq!(built.transactions, 1, "transaction zero");
     assert_eq!(built.new_nodes, 1, "the input ran once in transaction zero");

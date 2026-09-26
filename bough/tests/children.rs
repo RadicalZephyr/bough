@@ -21,7 +21,7 @@ use std::fmt::Debug;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{Graph, SendError, Source, TokenError};
+use bough::{Runtime, SendError, Source, TokenError};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];
@@ -45,18 +45,18 @@ fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
 /// The instants run since the graph was built, with the `statistics`
 /// feature.
 #[cfg(feature = "statistics")]
-fn instants(graph: &Graph) -> Option<u64> {
+fn instants(graph: &Runtime) -> Option<u64> {
     Some(graph.statistics().transactions)
 }
 
 #[cfg(not(feature = "statistics"))]
-fn instants(_: &Graph) -> Option<u64> {
+fn instants(_: &Runtime) -> Option<u64> {
     None
 }
 
 /// Drives the graph once and returns the instants that ran: the
 /// transaction's own and one per child transaction, at any depth.
-fn counted(graph: &mut Graph, drive: impl FnOnce(&mut Graph)) -> Option<u64> {
+fn counted(graph: &mut Runtime, drive: impl FnOnce(&mut Runtime)) -> Option<u64> {
     let before = instants(graph);
     drive(graph);
     Some(instants(graph)? - before?)
@@ -84,7 +84,7 @@ fn assert_instants<const N: usize>(seen: [Option<u64>; N], expected: [u64; N]) {
 #[test]
 fn two_splits_in_one_instant_share_child_indices() {
     let (events, last, counts) = every_seed(|seed| {
-        let (mut graph, (l_in, r_in, merged, held)) = Graph::build(|b| {
+        let (mut graph, (l_in, r_in, merged, held)) = Runtime::build(|b| {
             let (l, l_in) = b.input::<Vec<u32>>();
             let (r, r_in) = b.input::<Vec<u32>>();
             let right = r.split(b);
@@ -143,7 +143,7 @@ fn two_splits_in_one_instant_share_child_indices() {
 #[test]
 fn children_run_depth_first_and_a_split_may_fire_inside_its_own_children() {
     let (items, both, counts) = every_seed(|seed| {
-        let (mut graph, (lists_in, others_in, items, both)) = Graph::build(|b| {
+        let (mut graph, (lists_in, others_in, items, both)) = Runtime::build(|b| {
             let (fwd, fwd_loop) = b.stream_loop::<Vec<u32>>();
             let items = fwd.split(b).share(b);
             let (lists, lists_in) = b.input::<Vec<u32>>();
@@ -188,7 +188,7 @@ fn children_run_depth_first_and_a_split_may_fire_inside_its_own_children() {
 #[test]
 fn r7_a_loop_through_split_feeds_back_at_nested_child_instants() {
     let (items, counts) = every_seed(|seed| {
-        let (mut graph, (lists_in, items)) = Graph::build(|b| {
+        let (mut graph, (lists_in, items)) = Runtime::build(|b| {
             let (fwd, fwd_loop) = b.stream_loop::<Vec<u32>>();
             let items = fwd.split(b).share(b);
             let (lists, lists_in) = b.input::<Vec<u32>>();
@@ -219,7 +219,7 @@ fn r7_a_loop_through_split_feeds_back_at_nested_child_instants() {
 #[test]
 fn nested_splits_run_the_inner_children_before_the_next_outer_child() {
     let (merged, counts) = every_seed(|seed| {
-        let (mut graph, (lists_in, merged)) = Graph::build(|b| {
+        let (mut graph, (lists_in, merged)) = Runtime::build(|b| {
             let (lists, lists_in) = b.input::<Vec<Vec<u32>>>();
             let rows = lists.split(b).share(b);
             let items = rows.split(b);
@@ -257,7 +257,7 @@ fn nested_splits_run_the_inner_children_before_the_next_outer_child() {
 #[test]
 fn a_hold_stepping_in_a_child_is_read_by_a_snapshot_in_the_next() {
     let run = every_seed(|seed| {
-        let (mut graph, (lists_in, seen, held, doubled, total)) = Graph::build(|b| {
+        let (mut graph, (lists_in, seen, held, doubled, total)) = Runtime::build(|b| {
             let (lists, lists_in) = b.input::<Vec<u32>>();
             let items = lists.split(b).share(b);
             let held = items.hold(b, 0u32);
@@ -303,7 +303,7 @@ fn a_hold_stepping_in_a_child_is_read_by_a_snapshot_in_the_next() {
 #[test]
 fn listen_steps_on_a_cell_stepping_in_two_children_fires_twice_in_order() {
     let run = every_seed(|seed| {
-        let (mut graph, (lists_in, held)) = Graph::build(|b| {
+        let (mut graph, (lists_in, held)) = Runtime::build(|b| {
             let (lists, lists_in) = b.input::<Vec<u32>>();
             (lists_in, lists.split(b).hold(b, 0u32))
         });
@@ -328,7 +328,7 @@ fn listen_steps_on_a_cell_stepping_in_two_children_fires_twice_in_order() {
 
 /// Transaction zero has children (finding F11): a steps_with_current built
 /// in the build fires at [0], a split of it fires its elements at [0,0],
-/// [0,1] and [0,2], and Graph::build runs them before it returns. The seed
+/// [0,1] and [0,2], and Runtime::build runs them before it returns. The seed
 /// is set after the build, so it moves only the transaction after it.
 /// Stage4.hs, `txZero`:
 ///
@@ -340,7 +340,7 @@ fn listen_steps_on_a_cell_stepping_in_two_children_fires_twice_in_order() {
 #[test]
 fn transaction_zero_runs_its_children_before_build_returns() {
     let run = every_seed(|seed| {
-        let (mut graph, (rows_in, sum, last)) = Graph::build(|b| {
+        let (mut graph, (rows_in, sum, last)) = Runtime::build(|b| {
             let (rows, rows_in) = b.input_cell(vec![1u32, 2, 3]);
             let items = rows.steps_with_current(b).split(b).share(b);
             let sum = items.accumulate(b, 0u32, |i, s| s + i);
@@ -369,7 +369,7 @@ fn transaction_zero_runs_its_children_before_build_returns() {
 #[test]
 fn a_split_of_an_empty_list_emits_nothing() {
     let (items, counts) = every_seed(|seed| {
-        let (mut graph, (lists_in, items)) = Graph::build(|b| {
+        let (mut graph, (lists_in, items)) = Runtime::build(|b| {
             let (lists, lists_in) = b.input::<Vec<u32>>();
             (lists_in, lists.split(b))
         });
@@ -409,7 +409,7 @@ impl Iterator for Restarts {
 #[test]
 fn a_split_ends_at_its_iterators_first_none() {
     let (events, counts) = every_seed(|seed| {
-        let (mut graph, (starts_in, others_in, merged)) = Graph::build(|b| {
+        let (mut graph, (starts_in, others_in, merged)) = Runtime::build(|b| {
             let (starts, starts_in) = b.input::<()>();
             let (others, others_in) = b.input::<Vec<u32>>();
             let others = others.split(b);
@@ -446,7 +446,7 @@ fn a_split_ends_at_its_iterators_first_none() {
 #[test]
 fn a_split_and_a_defer_share_child_index_0() {
     let (merged, defers, counts) = every_seed(|seed| {
-        let (mut graph, (inputs, merged, defers)) = Graph::build(|b| {
+        let (mut graph, (inputs, merged, defers)) = Runtime::build(|b| {
             let (lists, lists_in) = b.input::<Vec<u32>>();
             let (numbers, numbers_in) = b.input::<u32>();
             let (others, others_in) = b.input::<u32>();
@@ -514,7 +514,7 @@ fn a_split_and_a_defer_share_child_index_0() {
 #[test]
 fn a_countdown_loop_through_defer_ends_with_its_filter() {
     let (events, holds, counts) = every_seed(|seed| {
-        let (mut graph, (input_in, s, held)) = Graph::build(|b| {
+        let (mut graph, (input_in, s, held)) = Runtime::build(|b| {
             let (fwd, fwd_loop) = b.stream_loop::<i64>();
             let again = fwd.map(|n| n - 1).filter(|n| *n > 0).defer(b);
             let (input, input_in) = b.input::<i64>();
@@ -548,7 +548,7 @@ fn a_deep_defer_loop_does_not_grow_the_stack() {
     let run = std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(|| {
-            let (mut graph, (input_in, count, last)) = Graph::build(|b| {
+            let (mut graph, (input_in, count, last)) = Runtime::build(|b| {
                 let (fwd, fwd_loop) = b.stream_loop::<i64>();
                 let again = fwd.map(|n| n - 1).filter(|n| *n > 0).defer(b);
                 let (input, input_in) = b.input::<i64>();
@@ -579,7 +579,7 @@ fn a_deep_defer_loop_does_not_grow_the_stack() {
 #[test]
 fn a_cell_loop_through_a_defer_of_its_steps_is_legal_where_f3_is_refused() {
     let (steps, count) = every_seed(|seed| {
-        let (mut graph, (ticks_in, count)) = Graph::build(|b| {
+        let (mut graph, (ticks_in, count)) = Runtime::build(|b| {
             let (count, count_loop) = b.cell_loop::<i64>();
             let (ticks, ticks_in) = b.input::<i64>();
             let again = count.steps(b).filter(|n| *n < 3).map(|n| n + 1).defer(b);
@@ -599,7 +599,7 @@ fn a_cell_loop_through_a_defer_of_its_steps_is_legal_where_f3_is_refused() {
     assert_eq!(count, 3);
 
     let refused = catch_unwind(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (count, count_loop) = b.cell_loop::<i64>();
             let (ticks, _ticks_in) = b.input::<i64>();
             let again = count.steps(b).filter(|n| *n < 3).map(|n| n + 1);
@@ -615,7 +615,7 @@ fn a_cell_loop_through_a_defer_of_its_steps_is_legal_where_f3_is_refused() {
 }
 
 /// Transaction zero has children (finding F11): a steps_with_current built
-/// in the build fires at [0], a defer of it at [0,0], and Graph::build runs
+/// in the build fires at [0], a defer of it at [0,0], and Runtime::build runs
 /// that child before it returns. The child reads what [0] committed: a
 /// hold of the steps_with_current itself. Stage4.hs, `txZero`:
 ///
@@ -628,7 +628,7 @@ fn a_cell_loop_through_a_defer_of_its_steps_is_legal_where_f3_is_refused() {
 #[test]
 fn a_defer_of_steps_with_current_built_in_the_build_fires_before_build_returns() {
     let run = every_seed(|seed| {
-        let (mut graph, (level_in, held, direct, seen)) = Graph::build(|b| {
+        let (mut graph, (level_in, held, direct, seen)) = Runtime::build(|b| {
             let (level, level_in) = b.input_cell(3i64);
             let current = level.steps_with_current(b).share(b);
             let direct = current.hold(b, 0i64);
@@ -637,7 +637,7 @@ fn a_defer_of_steps_with_current_built_in_the_build_fires_before_build_returns()
             let seen = deferred.snapshot(direct, |d, h| d + h).hold(b, 0i64);
             (level_in, held, direct, seen)
         });
-        let values = |g: &Graph| (*g.sample(held), *g.sample(direct), *g.sample(seen));
+        let values = |g: &Runtime| (*g.sample(held), *g.sample(direct), *g.sample(seen));
         let built = (values(&graph), instants(&graph));
         graph.set_shuffle_seed(seed);
         let after = counted(&mut graph, |g| g.send(level_in, 4));
@@ -655,12 +655,12 @@ fn a_defer_of_steps_with_current_built_in_the_build_fires_before_build_returns()
 /// and the one that emits it, or its elements.
 #[test]
 fn a_split_and_a_defer_are_two_nodes_each() {
-    let (graph, _) = Graph::build(|b| {
+    let (graph, _) = Runtime::build(|b| {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         (lists_in, lists.map(|l| l).split(b))
     });
     assert_eq!(graph.live_nodes(), 3);
-    let (graph, _) = Graph::build(|b| {
+    let (graph, _) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.map(|n| n + 1).defer(b))
     });
@@ -672,7 +672,7 @@ fn a_split_and_a_defer_are_two_nodes_each() {
 /// whole; the panicking child had committed; the child after it never ran.
 #[test]
 fn a_panic_in_a_childs_listener_poisons_the_graph() {
-    let (mut graph, (lists_in, items, held)) = Graph::build(|b| {
+    let (mut graph, (lists_in, items, held)) = Runtime::build(|b| {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         let items = lists.split(b).share(b);
         (lists_in, items, items.hold(b, 0u32))
@@ -697,7 +697,7 @@ fn a_panic_in_a_childs_listener_poisons_the_graph() {
 /// transaction, so a panic in it poisons the graph too.
 #[test]
 fn a_panic_in_a_splits_iterator_poisons_the_graph() {
-    let (mut graph, (lists_in, items)) = Graph::build(|b| {
+    let (mut graph, (lists_in, items)) = Runtime::build(|b| {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         // The event is a lazy iterator, whose `next` the scheduler calls.
         let items = lists

@@ -1,6 +1,6 @@
 //! Threading modes (RFD 6).
 //!
-//! A [`Graph`](crate::Graph) is `Local` by default. In `Threaded` mode every
+//! A [`Runtime`](crate::Runtime) is `Local` by default. In `Threaded` mode every
 //! value and closure the graph stores must be `Send`, checked once at each
 //! materialization and at `listen`, and the graph itself is `Send`. Tokens
 //! are plain integers and `Send` in every mode. `Threaded` exists only where
@@ -12,7 +12,7 @@
 //! carrier: `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
 //! Exactly two functions build a carrier: [`Accepts::erase`], whose
 //! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send`, which
-//! requires `T: Send` itself. So `Graph<Threaded>: Send` is derived by the
+//! requires `T: Send` itself. So `Runtime<Threaded>: Send` is derived by the
 //! compiler from the field types, with no `unsafe impl`, and a materializer
 //! that forgets an `Accepts` bound fails to compile inside the engine.
 //!
@@ -20,18 +20,18 @@
 //!
 //! ```compile_fail,E0277
 //! fn assert_send<T: Send>() {}
-//! assert_send::<bough::Graph<bough::Local>>(); // error: dyn Any cannot be sent between threads
+//! assert_send::<bough::Runtime<bough::Local>>(); // error: dyn Any cannot be sent between threads
 //! ```
 //!
 //! A `Threaded` graph refuses a closure that captures something that is not
 //! `Send`, at the materializer that stores it:
 //!
 //! ```compile_fail,E0277
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //! use std::rc::Rc;
 //!
 //! let offset = Rc::new(5u32);
-//! let (_graph, _) = Graph::build_threaded(move |b| {
+//! let (_graph, _) = Runtime::build_threaded(move |b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _held = numbers.map(move |n| n + *offset).hold(b, 0u32); // error: Rc is not Send
 //! });

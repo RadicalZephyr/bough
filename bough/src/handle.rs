@@ -4,7 +4,7 @@
 //! A GTK signal handler or a DOM closure is `Fn + 'static`, and the host
 //! can run it while the graph is busy: a listener writes to a widget, and
 //! the widget runs its handler at once. Code there cannot hold
-//! `&mut Graph`. So an [`Owner`] moves the graph behind an `Rc`, and I/O
+//! `&mut Runtime`. So an [`Owner`] moves the graph behind an `Rc`, and I/O
 //! code holds an [`Io`]: a weak, `Clone`, same-thread handle to it.
 //!
 //! A call through an `Io` runs as soon as the graph is free: now if it is
@@ -22,7 +22,7 @@
 //! run takes the calls queued when it starts. A call made during a run
 //! waits for the next one and wakes the driver, so a listener that always
 //! sends cannot keep a call from returning, as with
-//! [`pump`](Graph::pump). [`Io::pump`] also runs the queue after each slot
+//! [`pump`](Runtime::pump). [`Io::pump`] also runs the queue after each slot
 //! and each remote unit, so a listener can wire what one unit built before
 //! the next unit's collection.
 //!
@@ -60,17 +60,17 @@ use core::cell::{Cell as CoreCell, RefCell};
 use crate::cell::CellRef;
 use crate::engine::edge::Inbox;
 use crate::error::{IoError, NowError};
-use crate::graph::{Anchor, Graph, Listener, Transaction};
 use crate::mode::{FlagOps, Local, LocalFlag};
+use crate::runtime::{Anchor, Listener, Runtime, Transaction};
 use crate::source::Node;
 use crate::token::Input;
 use crate::trace::Trace;
 
 /// A call that waits for the graph.
-type Call = Box<dyn FnOnce(&mut Graph<Local>)>;
+type Call = Box<dyn FnOnce(&mut Runtime<Local>)>;
 
 struct Inner {
-    graph: RefCell<Graph<Local>>,
+    graph: RefCell<Runtime<Local>>,
     /// The calls made while the graph was busy, in the order they were made.
     queue: RefCell<VecDeque<Call>>,
     /// The graph's inbox, whose poison mirror, guard and waker can be read
@@ -85,7 +85,7 @@ struct Inner {
 impl Inner {
     /// Runs the calls queued when it starts, in order, each with the graph.
     /// A call they make waits for the next run.
-    fn run_queue(&self, graph: &mut Graph<Local>) {
+    fn run_queue(&self, graph: &mut Runtime<Local>) {
         let queued = self.queue.borrow().len();
         for _ in 0..queued {
             let Some(call) = self.queue.borrow_mut().pop_front() else {
@@ -97,7 +97,7 @@ impl Inner {
 
     /// The end of a call on an idle graph: runs what it asked for, and
     /// wakes the driver if calls are left for a later run.
-    fn finish(&self, graph: &mut Graph<Local>) {
+    fn finish(&self, graph: &mut Runtime<Local>) {
         self.run_queue(graph);
         if !self.queue.borrow().is_empty() {
             self.inbox.wake();
@@ -114,7 +114,7 @@ pub struct Owner(Rc<Inner>);
 
 impl Owner {
     /// Moves a built graph behind the owner.
-    pub fn new(graph: Graph<Local>) -> Owner {
+    pub fn new(graph: Runtime<Local>) -> Owner {
         let (inbox, released) = (graph.inbox(), graph.released());
         Owner(Rc::new(Inner {
             graph: RefCell::new(graph),
@@ -147,9 +147,9 @@ impl Drop for Owner {
 /// transaction that ran the listener:
 ///
 /// ```
-/// use bough::{Graph, Owner, Source};
+/// use bough::{Runtime, Owner, Source};
 ///
-/// let (graph, (a_in, b_in, a, b)) = Graph::build(|build| {
+/// let (graph, (a_in, b_in, a, b)) = Runtime::build(|build| {
 ///     let (a, a_in) = build.input::<u32>();
 ///     let (b, b_in) = build.input::<u32>();
 ///     (a_in, b_in, a.hold(build, 0), b.hold(build, 0))
@@ -177,10 +177,10 @@ pub struct Io(Weak<Inner>);
 impl Io {
     /// Sends one value in a transaction of its own, now or right after the
     /// call in progress. When it runs now, a collection that is due runs
-    /// first, as for [`Graph::send`]; a send that waited runs without one.
+    /// first, as for [`Runtime::send`]; a send that waited runs without one.
     ///
     /// A send to a collected input, or a token from another graph, follows
-    /// [`Graph::send`] when the send runs, which may be later.
+    /// [`Runtime::send`] when the send runs, which may be later.
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
         self.request(
             true,
@@ -188,7 +188,7 @@ impl Io {
         )
     }
 
-    /// Several sends in one instant, as [`Graph::transaction`], now or
+    /// Several sends in one instant, as [`Runtime::transaction`], now or
     /// right after the call in progress.
     pub fn transaction(
         &self,
@@ -200,7 +200,7 @@ impl Io {
         )
     }
 
-    /// Listens to a materialized node, as [`Graph::listen`], now or right
+    /// Listens to a materialized node, as [`Runtime::listen`], now or right
     /// after the call in progress. The [`Listener`] is handed out at once,
     /// so dropping it before the listener is registered means it never is.
     ///
@@ -217,7 +217,7 @@ impl Io {
             .map(Listener::from_flag)
     }
 
-    /// Listens to a cell, as [`Graph::listen_cell`], now or right after the
+    /// Listens to a cell, as [`Runtime::listen_cell`], now or right after the
     /// call in progress. The first call, with the current value, runs when
     /// the listener is registered.
     pub fn listen_cell<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
@@ -229,7 +229,7 @@ impl Io {
             .map(Listener::from_flag)
     }
 
-    /// Listens to a cell's steps, as [`Graph::listen_steps`], now or right
+    /// Listens to a cell's steps, as [`Runtime::listen_steps`], now or right
     /// after the call in progress.
     pub fn listen_steps<C, F>(&self, cell: C, f: F) -> Result<Listener, IoError>
     where
@@ -240,7 +240,7 @@ impl Io {
             .map(Listener::from_flag)
     }
 
-    /// Anchors what `value` holds, as [`Graph::anchor`], now or right after
+    /// Anchors what `value` holds, as [`Runtime::anchor`], now or right after
     /// the call in progress. No collection runs in between, so a listener
     /// can anchor what it is handed.
     pub fn anchor<T: Trace + 'static>(&self, value: T) -> Result<Anchor, IoError> {
@@ -252,7 +252,7 @@ impl Io {
     /// What waited runs first, so the read sees it. A read inside another
     /// read sees the same committed values.
     ///
-    /// Panics on a stale or foreign token, as [`Graph::sample`] does.
+    /// Panics on a stale or foreign token, as [`Runtime::sample`] does.
     pub fn with_sample<C: CellRef, R>(
         &self,
         cell: C,
@@ -283,7 +283,7 @@ impl Io {
 
     /// The graph itself, if it is idle: for setup, and for what the handle
     /// does not wrap. What waited runs first, and what `f` asked for after.
-    pub fn with_graph<R>(&self, f: impl FnOnce(&mut Graph<Local>) -> R) -> Result<R, NowError> {
+    pub fn with_graph<R>(&self, f: impl FnOnce(&mut Runtime<Local>) -> R) -> Result<R, NowError> {
         let inner = self.0.upgrade().ok_or(NowError::Gone)?;
         if inner.inbox.inside() {
             return Err(NowError::FromGraphCode);
@@ -298,7 +298,7 @@ impl Io {
         Ok(r)
     }
 
-    /// Runs every pending slot and remote unit, as [`Graph::pump`], if the
+    /// Runs every pending slot and remote unit, as [`Runtime::pump`], if the
     /// graph is not busy. The queue runs after each slot's and each unit's
     /// transaction, before the next one opens and before its collection:
     /// a listener can wire what one unit built before the next unit runs.
@@ -321,7 +321,7 @@ impl Io {
     /// the registration.
     fn register(
         &self,
-        register: impl FnOnce(&mut Graph<Local>, LocalFlag) + 'static,
+        register: impl FnOnce(&mut Runtime<Local>, LocalFlag) + 'static,
     ) -> Result<LocalFlag, IoError> {
         let released = self.0.upgrade().ok_or(IoError::Gone)?.released.clone();
         let flag = LocalFlag::live(&released);

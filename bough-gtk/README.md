@@ -15,7 +15,7 @@ GTK runs a signal handler at once, even while the graph is busy:
 - `listen_cell` calls its listener as it registers, and a widget write
   in that call runs a handler.
 
-With the graph behind `Rc<RefCell<Graph>>`, each of these is a double
+With the graph behind `Rc<RefCell<Runtime>>`, each of these is a double
 borrow. A panic cannot unwind through a gtk-rs handler, so the process
 aborts. With the handle, a call made while the graph is busy waits and
 runs right after the transaction.
@@ -73,7 +73,7 @@ the scenarios whose names contain it: `cargo test -- entry`.
 ## What is missing
 
 - A panic still aborts. A stale token in a call that waited panics in a
-  debug build when the call runs, and `Io::pump` panics as `Graph::pump`
+  debug build when the call runs, and `Io::pump` panics as `Runtime::pump`
   does. The handle has no `try_` forms yet.
 - `sync_store` only appends and removes; it does not move rows.
 - Nothing tests a real scroll. When the investigation scrolled from code,

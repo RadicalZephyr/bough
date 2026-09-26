@@ -204,8 +204,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
-    Build, Cell, CellLoop, CellRef, Graph, InputSlot, Lift, Listener, Local, Node, Shared, Source,
-    State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
+    Build, Cell, CellLoop, CellRef, InputSlot, Lift, Listener, Local, Node, Runtime, Shared,
+    Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
 
 use crate::program::{
@@ -257,8 +257,8 @@ impl<S: Source<Event = i64> + Send> Chain for S {}
 /// Implemented for [`Local`] and [`Threaded`](bough::Threaded) by one macro, so both run the
 /// same builder: see the module documentation.
 pub trait EngineMode: bough::Mode {
-    /// `Graph::build` or `Graph::build_threaded`.
-    fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Graph<Self>, R);
+    /// `Runtime::build` or `Runtime::build_threaded`.
+    fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Runtime<Self>, R);
     /// `b.input()`.
     fn input(b: &mut Build<Self>) -> (Stream<i64>, bough::Input<i64>);
     /// `b.input_coalescing(f)`.
@@ -358,19 +358,19 @@ pub trait EngineMode: bough::Mode {
     ) -> Stream<A>;
     /// `graph.listen(node, f)`.
     fn listen<S: Node<Event = i64>>(
-        graph: &mut Graph<Self>,
+        graph: &mut Runtime<Self>,
         node: S,
         f: StreamSink,
     ) -> Listener<Self>;
     /// `graph.listen_cell(cell, f)`.
     fn listen_cell<C: CellRef>(
-        graph: &mut Graph<Self>,
+        graph: &mut Runtime<Self>,
         cell: C,
         f: CellSink<C::Value>,
     ) -> Listener<Self>;
     /// `graph.listen_steps(cell, f)`.
     fn listen_steps<C: CellRef>(
-        graph: &mut Graph<Self>,
+        graph: &mut Runtime<Self>,
         cell: C,
         f: CellSink<C::Value>,
     ) -> Listener<Self>;
@@ -390,8 +390,8 @@ macro_rules! engine_mode {
         impl EngineMode for $mode {
             const FUSED: usize = $fused;
 
-            fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Graph<Self>, R) {
-                Graph::$build(f)
+            fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Runtime<Self>, R) {
+                Runtime::$build(f)
             }
             fn input(b: &mut Build<Self>) -> (Stream<i64>, bough::Input<i64>) {
                 b.input()
@@ -545,21 +545,21 @@ macro_rules! engine_mode {
                 cell.steps_with_current(b)
             }
             fn listen<S: Node<Event = i64>>(
-                graph: &mut Graph<Self>,
+                graph: &mut Runtime<Self>,
                 node: S,
                 f: StreamSink,
             ) -> Listener<Self> {
                 graph.listen(node, f)
             }
             fn listen_cell<C: CellRef>(
-                graph: &mut Graph<Self>,
+                graph: &mut Runtime<Self>,
                 cell: C,
                 f: CellSink<C::Value>,
             ) -> Listener<Self> {
                 graph.listen_cell(cell, f)
             }
             fn listen_steps<C: CellRef>(
-                graph: &mut Graph<Self>,
+                graph: &mut Runtime<Self>,
                 cell: C,
                 f: CellSink<C::Value>,
             ) -> Listener<Self> {
@@ -2458,7 +2458,7 @@ impl CellToken {
     }
 
     /// Its value now, from I/O code.
-    fn sample_graph<M: EngineMode>(self, graph: &Graph<M>) -> i64 {
+    fn sample_graph<M: EngineMode>(self, graph: &Runtime<M>) -> i64 {
         match self {
             CellToken::Integer(cell) => *graph.sample(cell),
             CellToken::IntegerState(state) => *graph.sample(state),
@@ -3679,7 +3679,7 @@ fn build_program<M: EngineMode>(
 /// How to drive one run of a program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunOptions {
-    /// `Graph::set_shuffle_seed`, set before the first transaction: `None`
+    /// `Runtime::set_shuffle_seed`, set before the first transaction: `None`
     /// runs the plain order.
     pub shuffle_seed: Option<u64>,
     /// Permutes the sends of each transaction with this seed: the sends to
@@ -3687,7 +3687,7 @@ pub struct RunOptions {
     /// sends keep their order, so a coalescing input folds the same values
     /// in the same order. `None` sends in the schedule's order.
     pub permute_sends: Option<u64>,
-    /// `Graph::set_collect_after_every_transaction`, set before the first
+    /// `Runtime::set_collect_after_every_transaction`, set before the first
     /// transaction: collection runs as every transaction opens, not when
     /// the automatic policy chooses, so that a node the program still
     /// needs that no root reaches is collected at once, and its next use
@@ -3838,7 +3838,7 @@ impl Recorder {
     /// Listens to observed node `position`, and files the calls a cell's
     /// listeners make at registration.
     fn attach<M: EngineMode>(
-        graph: &mut Graph<M>,
+        graph: &mut Runtime<M>,
         position: usize,
         observed: Observed,
         log: &Log,
@@ -3968,7 +3968,7 @@ impl Recorder {
     }
 
     /// Samples a cell after the transaction and its children.
-    fn end_transaction<M: EngineMode>(&mut self, graph: &Graph<M>) {
+    fn end_transaction<M: EngineMode>(&mut self, graph: &Runtime<M>) {
         if let Recorder::Cell {
             cell,
             observation: EngineObservation::Cell { samples, .. },

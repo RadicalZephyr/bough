@@ -14,7 +14,7 @@
 //!
 //! Each run is a scope: a loop the closure declares must close in it. And a
 //! run that ends with the build context of another graph in its place, which
-//! `mem::swap` with a nested `Graph::build`'s context can do in safe code,
+//! `mem::swap` with a nested `Runtime::build`'s context can do in safe code,
 //! panics before touching the arena, which poisons the graph.
 
 use super::Marker;

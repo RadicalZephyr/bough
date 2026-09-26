@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use bough::{Cell, Graph, Input, Io, IoError, Shared, Source, Trace};
+use bough::{Cell, Input, Io, IoError, Runtime, Shared, Source, Trace};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 
@@ -48,8 +48,8 @@ pub struct App {
     pub clock: Cell<String>,
 }
 
-pub fn build() -> (Graph, App) {
-    Graph::build(|b| {
+pub fn build() -> (Runtime, App) {
+    Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
         let counter_label = count.map_cell(b, |n| format!("Clicked {n} times"));

@@ -8,7 +8,7 @@
 
 use std::hint::black_box;
 
-use bough::{Cell, Graph, Input, Source};
+use bough::{Cell, Input, Runtime, Source};
 
 /// Rounds of [`payload`]: about 55 ns of the user's own work on the machine
 /// the stage 1 bar was measured on.
@@ -43,14 +43,14 @@ fn last(x: u64) -> u64 {
 /// node, or with `share` two nodes and one real hop. `heavy` puts one
 /// [`payload`] call in the first adapter.
 pub struct Shallow {
-    pub graph: Graph,
+    pub graph: Runtime,
     pub input: Input<u64>,
     pub out: Cell<u64>,
 }
 
 impl Shallow {
     pub fn new(share: bool, heavy: bool) -> Self {
-        let (graph, (input, out)) = Graph::build(|b| {
+        let (graph, (input, out)) = Runtime::build(|b| {
             let (numbers, input) = b.input::<u64>();
             let mapped = numbers.map(move |x| if heavy { payload(x) } else { first(x) });
             let out = if share {
@@ -99,14 +99,14 @@ pub const FRAME_INPUTS: usize = 1000;
 /// hold of it, a snapshot of that hold into a second hold, a filtered node
 /// and its hold, and a gated hold.
 pub struct Frame {
-    pub graph: Graph,
+    pub graph: Runtime,
     pub inputs: Vec<Input<u64>>,
     pub outs: Vec<Cell<u64>>,
 }
 
 impl Frame {
     pub fn new() -> Self {
-        let (graph, (inputs, outs)) = Graph::build(|b| {
+        let (graph, (inputs, outs)) = Runtime::build(|b| {
             let (open, _open_in) = b.input_cell(true);
             let mut inputs = Vec::with_capacity(FRAME_INPUTS);
             let mut outs = Vec::with_capacity(FRAME_INPUTS * 4);

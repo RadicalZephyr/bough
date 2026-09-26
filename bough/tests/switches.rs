@@ -26,7 +26,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use bough::{
-    Build, Cell, Graph, Input, Lift, Local, PoisonedError, SendError, Shared, Source, State,
+    Build, Cell, Input, Lift, Local, PoisonedError, Runtime, SendError, Shared, Source, State,
     Stream, TokenError, Trace, Transaction,
 };
 
@@ -65,7 +65,7 @@ fn send<A: Copy + 'static>(input: Input<A>, value: A) -> Send {
 }
 
 /// Runs one transaction with `sends` in their order, or reversed.
-fn run(graph: &mut Graph, sends: &[Send], reversed: bool) {
+fn run(graph: &mut Runtime, sends: &[Send], reversed: bool) {
     graph.transaction(|tx| {
         if reversed {
             sends.iter().rev().for_each(|s| s(tx));
@@ -111,7 +111,7 @@ fn by_instant<T: Clone>(logs: &[Vec<T>]) -> ByInstant<T> {
 /// steps by instant and each cell's samples, after the build and after
 /// each transaction.
 fn drive<L: Clone + 'static, C: Clone + 'static>(
-    graph: &mut Graph,
+    graph: &mut Runtime,
     order: Order,
     schedule: &[Vec<Send>],
     logs: &[Cell<Vec<L>>],
@@ -168,18 +168,18 @@ fn panic_message<R>(f: impl FnOnce() -> R) -> String {
 /// The out-of-order pulls, the evaluations in order and the relinks since
 /// the graph was built, with the `statistics` feature.
 #[cfg(feature = "statistics")]
-fn counts(graph: &Graph) -> Option<[u64; 3]> {
+fn counts(graph: &Runtime) -> Option<[u64; 3]> {
     let s = graph.statistics();
     Some([s.pulls, s.evaluations, s.relinks])
 }
 
 #[cfg(not(feature = "statistics"))]
-fn counts(_: &Graph) -> Option<[u64; 3]> {
+fn counts(_: &Runtime) -> Option<[u64; 3]> {
     None
 }
 
 /// What `drive` did to the counters: pulls, evaluations, relinks.
-fn counted(graph: &mut Graph, drive: impl FnOnce(&mut Graph)) -> Option<[u64; 3]> {
+fn counted(graph: &mut Runtime, drive: impl FnOnce(&mut Runtime)) -> Option<[u64; 3]> {
     let before = counts(graph);
     drive(graph);
     let after = counts(graph)?;
@@ -199,7 +199,7 @@ fn counted(graph: &mut Graph, drive: impl FnOnce(&mut Graph)) -> Option<[u64; 3]
 #[test]
 fn the_switch_stream_vector_restated_with_inputs() {
     let events = every_order(|order| {
-        let (mut graph, (s1_in, s2_in, sel_in, log)) = Graph::build(|b| {
+        let (mut graph, (s1_in, s2_in, sel_in, log)) = Runtime::build(|b| {
             let (s1, s1_in) = b.input::<char>();
             let (s2, s2_in) = b.input::<char>();
             let (sel, sel_in) = b.input::<()>();
@@ -233,7 +233,7 @@ struct SwitchCVector {
 
 /// The switch's steps by instant and its samples.
 fn switch_c_vector(v: &SwitchCVector, order: Order) -> (Vec<(usize, char)>, Vec<char>) {
-    let (mut graph, (inputs, sel_in, log, sw)) = Graph::build(|b| {
+    let (mut graph, (inputs, sel_in, log, sw)) = Runtime::build(|b| {
         let (c1, c1_in) = b.input_cell('a');
         let (c2, c2_in) = b.input_cell(v.c2);
         let (c3, c3_in) = b.input_cell('1');
@@ -337,7 +337,7 @@ fn the_switch_cell_vectors_restated_with_inputs() {
 fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_orders() {
     let program = |x_first: bool, seed: Option<u64>| {
         let (calls, c) = counter();
-        let (mut graph, (sel_in, x_in, sc, log)) = Graph::build(move |b| {
+        let (mut graph, (sel_in, x_in, sc, log)) = Runtime::build(move |b| {
             let (sel, sel_in) = b.input::<()>();
             let (x, x_in) = b.input::<u32>();
             let a = b.constant(1u32);
@@ -415,7 +415,7 @@ fn claim5_a_switch_cell_reads_its_new_inner_after_the_instant_in_both_send_order
 #[test]
 fn r3_steps_of_a_map_cell_over_a_loop_closed_with_a_switch_cell() {
     let steps = every_order(|order| {
-        let (mut graph, (sel_in, x_in, log)) = Graph::build(|b| {
+        let (mut graph, (sel_in, x_in, log)) = Runtime::build(|b| {
             let (c, closer) = b.cell_loop::<u32>();
             let m = c.map_cell(b, |v| v + 1);
             let log = log_steps(b, m);
@@ -455,7 +455,7 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
     ];
     for permutation in permutations {
         let (steps, samples) = every_order(|order| {
-            let (mut graph, (sa_in, sb_in, x_in, log, top)) = Graph::build(|b| {
+            let (mut graph, (sa_in, sb_in, x_in, log, top)) = Runtime::build(|b| {
                 let (sa, sa_in) = b.input::<()>();
                 let (sb, sb_in) = b.input::<()>();
                 let (x, x_in) = b.input::<u32>();
@@ -493,7 +493,7 @@ fn r4_nested_switch_cells_switch_together_in_every_send_order() {
 #[test]
 fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
     let steps = every_order(|order| {
-        let (mut graph, (sel_in, x_in, log)) = Graph::build(|b| {
+        let (mut graph, (sel_in, x_in, log)) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>();
             let (x, x_in) = b.input::<u32>();
             let x = x.share(b);
@@ -523,7 +523,7 @@ fn r5_steps_of_a_lift_over_a_switch_cell_at_the_switch_instant() {
 #[test]
 fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
     let samples = every_order(|order| {
-        let (mut graph, (sel_in, cur)) = Graph::build(|b| {
+        let (mut graph, (sel_in, cur)) = Runtime::build(|b| {
             let (outer, closer) = b.cell_loop::<Cell<u32>>();
             let cur = outer.switch_cell(b);
             let (sel, sel_in) = b.input::<()>();
@@ -545,8 +545,8 @@ fn r8_a_switch_cell_over_a_loop_cell_that_is_not_closed_yet() {
 /// the loop the switch defines, a cell computed from the switch itself at
 /// the same instant, which the text cannot evaluate. With `steps`, a steps
 /// view of the loop reads the switch after the instant.
-fn r10(steps: bool) -> (Graph, Input<()>, Cell<u32>) {
-    let (graph, (sel_in, c, _steps)) = Graph::build(|b| {
+fn r10(steps: bool) -> (Runtime, Input<()>, Cell<u32>) {
+    let (graph, (sel_in, c, _steps)) = Runtime::build(|b| {
         let (sel, sel_in) = b.input::<()>(); // node 1
         let a = b.constant(1u32); // node 2
         let (c, closer) = b.cell_loop::<u32>(); // node 3
@@ -563,7 +563,7 @@ fn r10(steps: bool) -> (Graph, Input<()>, Cell<u32>) {
 }
 
 /// Every entry reports the poison after a panic escaped a transaction.
-fn assert_poisoned(graph: &mut Graph, input: Input<()>, cell: Cell<u32>) {
+fn assert_poisoned(graph: &mut Runtime, input: Input<()>, cell: Cell<u32>) {
     assert_eq!(graph.try_send(input, ()), Err(SendError::Poisoned));
     assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
     assert_eq!(graph.try_sample(cell).err(), Some(TokenError::Poisoned));
@@ -626,7 +626,7 @@ fn r10b_the_relink_check_finds_the_cycle_without_a_reader() {
 #[test]
 fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (sel_in, logs, cells)) = Graph::build(|b| {
+        let (mut graph, (sel_in, logs, cells)) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>();
             let sel = sel.share(b);
             let x = b.constant(1u32);
@@ -667,7 +667,7 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
 #[test]
 fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
     for seed in SEEDS {
-        let (mut graph, (sel_in, top)) = Graph::build(|b| {
+        let (mut graph, (sel_in, top)) = Runtime::build(|b| {
             let (sel, sel_in) = b.input::<()>(); // node 1
             let one = b.constant(1u32); // node 2
             let first = b.constant(one); // node 3
@@ -699,7 +699,7 @@ fn a_read_in_relink_around_a_cycle_its_check_would_refuse_panics_and_poisons() {
 #[test]
 fn a_first_link_that_closes_a_cycle_is_refused_in_the_build() {
     let message = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (c, closer) = b.cell_loop::<u32>(); // node 1
             let m = c.map_cell(b, |v| v + 1); // node 2
             let outer = b.constant(m); // node 3
@@ -725,7 +725,7 @@ fn a_first_link_that_closes_a_cycle_is_refused_in_the_build() {
 /// build.
 #[test]
 fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
-    let (mut graph, (x_in, sel_in, total)) = Graph::build(|b| {
+    let (mut graph, (x_in, sel_in, total)) = Runtime::build(|b| {
         let (x, x_in) = b.input::<u32>(); // node 1
         let x = x.share(b); // node 2
         let (sel, sel_in) = b.input::<()>(); // node 3
@@ -751,7 +751,7 @@ fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
     assert_eq!(graph.try_send(x_in, 1), Err(SendError::Poisoned));
 
     let at_build = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (outer, closer) = b.cell_loop::<Shared<u32>>(); // node 1
             let out = outer.switch_stream(b).share(b); // nodes 2 and 3
             let derived = out.map(|v| v + 1).share(b); // node 4
@@ -781,7 +781,7 @@ fn a_switch_stream_that_selects_a_stream_computed_from_itself_is_refused() {
 #[test]
 fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
     let (events, relinks) = every_order(|order| {
-        let (mut graph, (a_in, z_in, sel_in, log)) = Graph::build(|b| {
+        let (mut graph, (a_in, z_in, sel_in, log)) = Runtime::build(|b| {
             let (a, a_in) = b.input::<char>();
             let (z, z_in) = b.input::<char>();
             let (sel, sel_in) = b.input::<()>();
@@ -830,7 +830,7 @@ fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
 fn switch_stream_loop_through_its_selection() {
     for linear in [false, true] {
         let events = every_order(|order| {
-            let (mut graph, (ticks_in, log)) = Graph::build(|b| {
+            let (mut graph, (ticks_in, log)) = Runtime::build(|b| {
                 let (fwd, closer) = b.stream_loop::<u32>();
                 let out = fwd.share(b);
                 let (ticks, ticks_in) = b.input::<u32>();
@@ -888,7 +888,7 @@ fn switch_stream_loop_through_its_selection() {
 fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
     for through_loop in [true, false] {
         let events = every_order(|order| {
-            let (mut graph, (a_in, z_in, pick_in, log)) = Graph::build(|b| {
+            let (mut graph, (a_in, z_in, pick_in, log)) = Runtime::build(|b| {
                 let (a, a_in) = b.input::<char>();
                 let (z, z_in) = b.input::<char>();
                 let (a, z) = (a.share(b), z.share(b));
@@ -944,7 +944,7 @@ fn a_switch_stream_over_a_loop_forward_or_a_map_cell_follows_its_selection() {
 #[test]
 fn a_switch_stream_whose_outer_steps_at_its_creation_moves_at_that_commit() {
     let events = every_order(|order| {
-        let (mut graph, (a_in, z_in, log)) = Graph::build(|b| {
+        let (mut graph, (a_in, z_in, log)) = Runtime::build(|b| {
             let p = b.constant('p').steps_with_current(b);
             let (a, a_in) = b.input::<char>();
             let a = p.or_else(b, a).share(b);
@@ -981,7 +981,7 @@ fn a_switch_stream_whose_outer_steps_at_its_creation_moves_at_that_commit() {
 #[test]
 fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
     let events = every_order(|order| {
-        let (mut graph, (x_in, log)) = Graph::build(|b| {
+        let (mut graph, (x_in, log)) = Runtime::build(|b| {
             let (outer, closer) = b.cell_loop::<Shared<char>>();
             let out = outer.switch_stream(b);
             let log = log_events(b, out);
@@ -1012,7 +1012,7 @@ fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
 fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
     for linear in [false, true] {
         let events = every_order(|order| {
-            let (mut graph, (a_in, z_in, pick_in, log)) = Graph::build(|b| {
+            let (mut graph, (a_in, z_in, pick_in, log)) = Runtime::build(|b| {
                 let (a, a_in) = b.input::<char>();
                 let (z, z_in) = b.input::<char>();
                 let (pick, pick_in) = b.input::<bool>();
@@ -1064,7 +1064,7 @@ fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
 #[test]
 fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x_in, y_in, sel_in, logs, sw)) = Graph::build(|b| {
+        let (mut graph, (x_in, y_in, sel_in, logs, sw)) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(1u32);
             let (hy, y_in) = b.input_cell(2u32);
             let (sel, sel_in) = b.input::<bool>();
@@ -1103,7 +1103,7 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
 fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
     let (steps, calls) = every_order(|order| {
         let (calls, c) = counter();
-        let (mut graph, (pick_in, c1_in, c2_in, log)) = Graph::build(move |b| {
+        let (mut graph, (pick_in, c1_in, c2_in, log)) = Runtime::build(move |b| {
             let (pick, pick_in) = b.input_cell(false);
             let (c1, c1_in) = b.input_cell(1u32);
             let (c2, c2_in) = b.input_cell(10u32);
@@ -1137,7 +1137,7 @@ fn a_switch_cell_whose_outer_is_a_map_cell_reads_it_after_the_instant() {
 #[test]
 fn a_switch_cell_steps_when_its_outer_selects_the_inner_it_follows() {
     let steps = every_order(|order| {
-        let (mut graph, (x_in, sel_in, log)) = Graph::build(|b| {
+        let (mut graph, (x_in, sel_in, log)) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(1u32);
             let (sel, sel_in) = b.input::<()>();
             let outer = sel.map(move |_| hx).hold(b, hx);
@@ -1171,7 +1171,7 @@ fn a_switch_cell_steps_when_its_outer_selects_the_inner_it_follows() {
 #[test]
 fn a_switch_cell_steps_at_its_creation() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x_in, sel_in, logs, cells)) = Graph::build(|b| {
+        let (mut graph, (x_in, sel_in, logs, cells)) = Runtime::build(|b| {
             let (hx, x_in) = b.input_cell(4u32);
             let (sel, sel_in) = b.input::<()>();
             let five = b.constant(5u32);
@@ -1227,7 +1227,7 @@ fn a_switch_cell_steps_at_its_creation() {
 #[test]
 fn nested_switches_in_every_send_order() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (leaves, picks, logs, cells)) = Graph::build(|b| {
+        let (mut graph, (leaves, picks, logs, cells)) = Runtime::build(|b| {
             let (l1, l1_in) = b.input_cell(10u32);
             let (l2, l2_in) = b.input_cell(20u32);
             let (l3, l3_in) = b.input_cell(30u32);
@@ -1315,7 +1315,7 @@ fn nested_switches_in_every_send_order() {
 fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
     let program = |x_first: bool, seed: Option<u64>| {
         let (calls, c) = counter();
-        let (mut graph, (x_in, sel_in, log, sw)) = Graph::build(move |b| {
+        let (mut graph, (x_in, sel_in, log, sw)) = Runtime::build(move |b| {
             let (x, x_in) = b.input::<u32>();
             let (sel, sel_in) = b.input::<()>();
             let h = x.hold(b, 0u32);
@@ -1386,7 +1386,7 @@ fn a_switch_to_a_map_cell_over_a_hold_stepping_at_the_switch_instant() {
 #[test]
 fn switches_move_at_each_child_instant() {
     let (steps, samples) = every_order(|order| {
-        let (mut graph, (x1_in, x2_in, lists_in, log, sw, cells)) = Graph::build(|b| {
+        let (mut graph, (x1_in, x2_in, lists_in, log, sw, cells)) = Runtime::build(|b| {
             let (c1, x1_in) = b.input_cell(1u32);
             let (c2, x2_in) = b.input_cell(2u32);
             let c3 = b.constant(3u32);
@@ -1411,7 +1411,7 @@ fn switches_move_at_each_child_instant() {
     assert_eq!(samples, [1, 3, 5, 21]);
 
     let events = every_order(|order| {
-        let (mut graph, (inputs, picks_in, log, streams)) = Graph::build(|b| {
+        let (mut graph, (inputs, picks_in, log, streams)) = Runtime::build(|b| {
             let (a, a_in) = b.input::<Vec<char>>();
             let (z, z_in) = b.input::<Vec<char>>();
             let a = a.split(b).share(b);
@@ -1450,7 +1450,7 @@ fn switches_move_at_each_child_instant() {
 #[test]
 fn a_switch_cell_over_states_steps_as_a_state() {
     let (heard, lengths) = every_order(|order| {
-        let (mut graph, (names_in, pick_in, current, lengths)) = Graph::build(|b| {
+        let (mut graph, (names_in, pick_in, current, lengths)) = Runtime::build(|b| {
             let (names, names_in) = b.input::<String>();
             let names = names.share(b);
             let push = |n: String, v: &mut Vec<String>| v.push(n);
@@ -1511,7 +1511,7 @@ fn send_string(input: Input<String>, value: &'static str) -> Send {
 #[test]
 fn a_second_switch_stream_over_a_cell_of_linear_streams_is_refused() {
     let message = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (clicks, _clicks_in) = b.input::<u32>();
             let current = b.constant(clicks);
             let _first = current.switch_stream(b);
@@ -1531,7 +1531,7 @@ fn a_second_switch_stream_over_a_cell_of_linear_streams_is_refused() {
 #[test]
 fn a_switch_stream_on_a_loop_forward_and_one_on_its_definition_are_refused() {
     let at_close = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (forward, closer) = b.cell_loop::<Stream<u32>>();
             let _on_forward = forward.switch_stream(b);
             let (clicks, _clicks_in) = b.input::<u32>();
@@ -1542,7 +1542,7 @@ fn a_switch_stream_on_a_loop_forward_and_one_on_its_definition_are_refused() {
     });
     assert!(at_close.contains("two switch_streams"), "{at_close}");
     let after_close = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (f1, closer1) = b.cell_loop::<Stream<u32>>();
             let (f2, closer2) = b.cell_loop::<Stream<u32>>();
             let _on_f1 = f1.switch_stream(b);
@@ -1562,7 +1562,7 @@ fn a_switch_stream_on_a_loop_forward_and_one_on_its_definition_are_refused() {
 /// Shared streams may have any number of switches over them.
 #[test]
 fn a_cell_of_shared_streams_may_have_several_switch_streams() {
-    let (mut graph, (clicks_in, first, second)) = Graph::build(|b| {
+    let (mut graph, (clicks_in, first, second)) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let clicks = clicks.share(b);
         let current = b.constant(clicks);
@@ -1587,7 +1587,7 @@ fn a_cell_of_shared_streams_may_have_several_switch_streams() {
 /// commit and panics, which poisons the graph.
 #[test]
 fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_poisons() {
-    let (mut graph, (s1_in, sel_in, taken, direct)) = Graph::build(|b| {
+    let (mut graph, (s1_in, sel_in, taken, direct)) = Runtime::build(|b| {
         let (s1, s1_in) = b.input::<u32>(); // node 1
         let c1 = b.constant(s1); // node 2
         let direct = c1.switch_stream(b); // node 3
@@ -1621,7 +1621,7 @@ fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_p
 #[test]
 fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build() {
     let message = panic_message(|| {
-        Graph::build(|b| {
+        Runtime::build(|b| {
             let (s1, _s1_in) = b.input::<u32>();
             let c1 = b.constant(s1);
             let _direct = c1.switch_stream(b);
@@ -1649,7 +1649,7 @@ fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build(
 #[test]
 fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
     let (first, second) = every_order(|order| {
-        let (mut graph, (inputs, sel_in, logs)) = Graph::build(|b| {
+        let (mut graph, (inputs, sel_in, logs)) = Runtime::build(|b| {
             let (s1, s1_in) = b.input::<u32>();
             let (s2, s2_in) = b.input::<u32>();
             let (s3, s3_in) = b.input::<u32>();
