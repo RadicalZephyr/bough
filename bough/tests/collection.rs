@@ -1016,6 +1016,37 @@ fn into_parts_leaves_the_root_with_the_anchor_and_keep_keeps_it() {
     assert_eq!(*graph.sample(kept), 2, "kept for the graph's life");
 }
 
+/// A construct can anchor what it sends out: the row reaches I/O code
+/// already rooted, so it survives the collections after it without I/O
+/// code anchoring it, and goes at the first collection after the last of
+/// its clones drops.
+#[test]
+fn a_construct_can_anchor_what_it_sends_out() {
+    let (mut graph, (open_in, opened)) = Runtime::build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let opened = open.construct(b, |b, start| {
+            let (bumps, bumps_in) = b.input::<u32>();
+            let count = bumps.accumulate(b, start, |n, c| c + n);
+            b.anchor((bumps_in, count))
+        });
+        (open_in, opened)
+    });
+    graph.set_collect_after_every_transaction(true);
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let log = received.clone();
+    graph
+        .listen(opened, move |row| log.borrow_mut().push(row))
+        .keep();
+    graph.send(open_in, 10);
+    graph.send(open_in, 20); // a collection opens this transaction
+    let (bumps_in, count) = *received.borrow()[0];
+    graph.send(bumps_in, 5);
+    assert_eq!(*graph.sample(count), 15, "the row outlived two collections");
+    received.borrow_mut().remove(0);
+    graph.send(open_in, 30); // the collection before it frees the row
+    assert_eq!(graph.try_sample(count).err(), Some(TokenError::Stale));
+}
+
 // ----------------------------------------------------------- operations on collected nodes
 
 /// Operations on a collected node (RFD 3, RFD 5). The `try_` forms return

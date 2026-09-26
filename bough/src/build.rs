@@ -12,7 +12,9 @@ use crate::engine::edge::{Connection, Drain};
 use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
+use crate::guard::{Liveness, Released};
 use crate::mode::{Accepts, Erase, Local, Mode};
+use crate::runtime::{Anchor, Anchored};
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::slot::InputSlot;
 use crate::source::Source;
@@ -56,6 +58,12 @@ pub struct Build<M: Mode = Local> {
     pub(crate) s: Sched,
     /// The I/O edge: connected slots, the inbox and the driver's waker.
     pub(crate) edge: Edge,
+    /// The anchored nodes, each with the liveness its anchor shares. A
+    /// released anchor is taken out at the next collection.
+    pub(crate) anchors: Vec<(u32, Liveness)>,
+    /// The count of released guards, which every guard's state shares, so
+    /// that a release needs no graph access.
+    pub(crate) released: Released,
 }
 
 impl<M: Mode> Build<M> {
@@ -68,7 +76,53 @@ impl<M: Mode> Build<M> {
             in_tx: false,
             s: Sched::default(),
             edge: Edge::new(graph_id),
+            anchors: Vec::new(),
+            released: Released::new(),
         }
+    }
+
+    /// Anchors what a build closure or a
+    /// [`construct`](crate::Source::construct) closure sends out to I/O
+    /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
+    /// [`Anchored`] it returns carries the value, and roots every token its
+    /// [`Trace`] finds until the last of its clones drops. A construct that
+    /// returns one sends its row to the edge already rooted, so the I/O code
+    /// that receives it needn't anchor it.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Runtime, Source};
+    ///
+    /// let (mut graph, (open_in, opened)) = Runtime::build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         b.anchor((bumps_in, count))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
+    /// graph.send(bumps_in, 5);
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    pub fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        // Every token is checked before any is rooted.
+        let nodes: Vec<u32> = tracer.visited.into_iter().map(|t| self.check(t)).collect();
+        let flag = Liveness::new(&self.released);
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+        Anchored::new(value, Anchor::new(Some(flag)))
     }
 
     /// The hold of an input cell. Its chain is the input's own stream token,

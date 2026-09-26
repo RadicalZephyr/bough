@@ -32,7 +32,9 @@ use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionS
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::error::{RemoteSendError, RemoteTransactionError};
-use crate::guard::{Liveness, Released};
+use crate::guard::Liveness;
+#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
+use crate::guard::Released;
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, Local, Mode};
@@ -74,13 +76,8 @@ pub struct Runtime<M: Mode = Local> {
     build: Build<M>,
     /// The build closure's return value, traced once: the permanent roots.
     roots: Vec<Token>,
-    /// The anchored nodes, each with the liveness its anchor shares. A
-    /// released anchor is taken out at the next collection.
-    anchors: Vec<(u32, Liveness)>,
-    /// The count of released guards, which every guard's state shares, so
-    /// that a release needs no graph access.
-    released: Released,
-    /// `released` as the last collection found it.
+    /// The build context's count of released guards as the last
+    /// collection found it.
     released_before: usize,
     /// Live nodes after the last collection, zero before the first.
     baseline: usize,
@@ -112,8 +109,6 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
     let graph = Runtime {
         build,
         roots: tracer.visited,
-        anchors: Vec::new(),
-        released: Released::new(),
         released_before: 0,
         baseline: 0,
         policy: CollectionPolicy::Automatic,
@@ -165,7 +160,7 @@ impl Runtime<Local> {
     /// The count of released guards, for the liveness of a guard made while
     /// the graph is busy.
     pub(crate) fn released(&self) -> Released {
-        self.released.clone()
+        self.build.released.clone()
     }
 
     /// [`listen`](Runtime::listen), with the liveness of a [`Listener`] the
@@ -234,7 +229,7 @@ impl Runtime<Local> {
             .filter_map(|token| self.checked(token, ANCHOR))
             .collect();
         for i in nodes {
-            self.anchors.push((i, flag.clone()));
+            self.build.anchors.push((i, flag.clone()));
         }
     }
 }
@@ -355,7 +350,10 @@ impl<M: Mode> Runtime<M> {
 
     /// Guards released since the last collection.
     fn released_since(&self) -> usize {
-        self.released.count().wrapping_sub(self.released_before)
+        self.build
+            .released
+            .count()
+            .wrapping_sub(self.released_before)
     }
 
     /// Runs a collection if one is due, as a transaction opens: under the
@@ -380,8 +378,8 @@ impl<M: Mode> Runtime<M> {
 
     /// Collects now, and starts counting toward the next one.
     fn collect_now(&mut self) {
-        let released = self.released.count();
-        self.build.collect(&self.roots, &mut self.anchors);
+        let released = self.build.released.count();
+        self.build.collect(&self.roots);
         self.released_before = released;
         self.baseline = self.build.store.live;
         self.build.store.allocated = 0;
@@ -621,7 +619,7 @@ impl<M: Mode> Runtime<M> {
     where
         M: Accepts<F>,
     {
-        let flag = Liveness::new(&self.released);
+        let flag = Liveness::new(&self.build.released);
         self.attach_flag(i, f, call, flag.clone());
         Listener::new(Some(flag))
     }
@@ -700,9 +698,9 @@ impl<M: Mode> Runtime<M> {
             .into_iter()
             .filter_map(|token| self.checked(token, ANCHOR))
             .collect();
-        let flag = Liveness::new(&self.released);
+        let flag = Liveness::new(&self.build.released);
         for i in nodes {
-            self.anchors.push((i, flag.clone()));
+            self.build.anchors.push((i, flag.clone()));
         }
         Anchored::new(value, Anchor::new(Some(flag)))
     }
@@ -712,13 +710,13 @@ impl<M: Mode> Runtime<M> {
     pub fn try_anchor<T: Trace>(&mut self, value: T) -> Result<Anchored<T>, TokenError> {
         let mut tracer = Tracer::new();
         value.trace(&mut tracer);
-        let start = self.anchors.len();
-        let flag = Liveness::new(&self.released);
+        let start = self.build.anchors.len();
+        let flag = Liveness::new(&self.build.released);
         for token in tracer.visited {
             match self.lookup(token) {
-                Ok(i) => self.anchors.push((i, flag.clone())),
+                Ok(i) => self.build.anchors.push((i, flag.clone())),
                 Err(error) => {
-                    self.anchors.truncate(start);
+                    self.build.anchors.truncate(start);
                     return Err(error);
                 }
             }
@@ -1194,7 +1192,7 @@ pub struct Anchor {
 }
 
 impl Anchor {
-    fn new(alive: Option<Liveness>) -> Self {
+    pub(crate) fn new(alive: Option<Liveness>) -> Self {
         Anchor { alive }
     }
 

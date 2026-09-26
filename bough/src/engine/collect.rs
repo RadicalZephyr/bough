@@ -33,7 +33,6 @@ use core::mem;
 
 use super::{Data, LISTENERS, LIVE, NOOP, WATCHED, cell, in_place, slot_mut};
 use crate::build::Build;
-use crate::guard::Liveness;
 use crate::mode::Mode;
 use crate::token::Token;
 use crate::trace::{Trace, Tracer};
@@ -68,10 +67,9 @@ pub(crate) fn trace_in_place<M: Mode, S: Trace + 'static>(
 
 impl<M: Mode> Build<M> {
     /// Collects every node that no root reaches, and returns how many it
-    /// freed. `roots` is the build closure's return value; `anchors` are
-    /// the anchors taken with `Runtime::anchor`, from which the dropped ones
-    /// are removed here.
-    pub(crate) fn collect(&mut self, roots: &[Token], anchors: &mut Vec<(u32, Liveness)>) -> usize {
+    /// freed. `roots` is the build closure's return value. The released
+    /// anchors are taken out of `anchors` here.
+    pub(crate) fn collect(&mut self, roots: &[Token]) -> usize {
         assert!(
             !self.in_tx,
             "bough: the graph is poisoned: a panic escaped an earlier transaction"
@@ -88,8 +86,9 @@ impl<M: Mode> Build<M> {
                 self.shade(&mut gray, epoch, i);
             }
         }
-        anchors.retain(|(_, flag)| flag.is_live());
-        for &(i, _) in anchors.iter() {
+        self.anchors.retain(|(_, flag)| flag.is_live());
+        for k in 0..self.anchors.len() {
+            let i = self.anchors[k].0;
             self.shade(&mut gray, epoch, i);
         }
         self.shade_listened(&mut gray, epoch);
@@ -247,9 +246,8 @@ mod tests {
         let mut b = Build::<Local>::new();
         let first = constants(&mut b, 3);
         assert_eq!(indices(&first), [1, 2, 3]);
-        let mut anchors = Vec::new();
-        assert_eq!(b.collect(&first[..2], &mut anchors), 1);
-        assert_eq!(b.collect(&first[1..2], &mut anchors), 1);
+        assert_eq!(b.collect(&first[..2]), 1);
+        assert_eq!(b.collect(&first[1..2]), 1);
         assert_eq!(b.store.free.iter().copied().collect::<Vec<_>>(), [3, 1]);
         let again = constants(&mut b, 3);
         assert_eq!(indices(&again), [3, 1, 4]);
@@ -270,8 +268,7 @@ mod tests {
         let slot = first[0].index;
         b.store.cold[slot as usize].generation = u32::MAX - 1;
         let old = b.token(slot);
-        let mut anchors = Vec::new();
-        assert_eq!(b.collect(&first[1..], &mut anchors), 1);
+        assert_eq!(b.collect(&first[1..]), 1);
         assert_eq!(b.store.retired, 1);
         assert!(b.store.free.is_empty(), "a retired slot is not free");
         assert_eq!(b.store.cold[slot as usize].generation, u32::MAX);
@@ -279,7 +276,7 @@ mod tests {
         let again = constants(&mut b, 1);
         assert_eq!(indices(&again), [3], "a new slot, not the retired one");
         // Retired for good: the next free and reuse go elsewhere too.
-        assert_eq!(b.collect(&again, &mut anchors), 1);
+        assert_eq!(b.collect(&again), 1);
         assert_eq!(indices(&constants(&mut b, 1)), [2]);
     }
 }
