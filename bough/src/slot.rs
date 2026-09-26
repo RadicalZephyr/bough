@@ -2,6 +2,7 @@
 
 use core::any::Any;
 use core::mem;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Waker;
 
 use crate::engine::edge::{Drain, Lock};
@@ -66,6 +67,10 @@ use crate::engine::edge::{Drain, Lock};
 /// pending event.
 pub struct InputSlot<A> {
     fold: fn(A, A) -> A,
+    /// Whether an event is pending, for the pump to read between units
+    /// without the lock. Stored under the lock; a load and a store are all
+    /// a Cortex-M0 has.
+    pending: AtomicBool,
     state: Lock<Pending<A>>,
 }
 
@@ -85,6 +90,7 @@ impl<A: Send> InputSlot<A> {
     pub const fn new(fold: fn(A, A) -> A) -> Self {
         InputSlot {
             fold,
+            pending: AtomicBool::new(false),
             state: Lock::new(Pending {
                 event: None,
                 waker: None,
@@ -108,6 +114,7 @@ impl<A: Send> InputSlot<A> {
                 Some(pending) => (self.fold)(pending, value),
                 None => value,
             });
+            self.pending.store(true, Ordering::Relaxed);
             s.waker.clone()
         });
         if let Some(waker) = waker {
@@ -142,12 +149,18 @@ impl<A: Send + 'static> Drain for InputSlot<A> {
         old.is_ok()
     }
 
-    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) -> bool {
-        let Some(event) = self.state.with(|s| s.event.take()) else {
-            return false;
-        };
-        fire(&mut Some(event));
-        true
+    fn pending(&self) -> bool {
+        self.pending.load(Ordering::Relaxed)
+    }
+
+    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) {
+        let event = self.state.with(|s| {
+            self.pending.store(false, Ordering::Relaxed);
+            s.event.take()
+        });
+        if let Some(event) = event {
+            fire(&mut Some(event));
+        }
     }
 
     fn set_waker(&self, waker: Option<Waker>) {
@@ -158,6 +171,7 @@ impl<A: Send + 'static> Drain for InputSlot<A> {
     fn disconnect(&self) {
         let (event, waker) = self.state.with(|s| {
             s.graph = 0;
+            self.pending.store(false, Ordering::Relaxed);
             (s.event.take(), s.waker.take())
         });
         drop((event, waker));

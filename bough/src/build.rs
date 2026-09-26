@@ -435,7 +435,9 @@ impl<M: Mode> Build<M> {
     /// tasks and the opposite of the NVIC's numbers, and equal priorities
     /// in connection order. It drains each pending slot as a transaction
     /// of its own, and each at most once per pump, so two slots are never
-    /// simultaneous, even on one input. Callable more than once for one
+    /// simultaneous, even on one input. A slot written while the pump runs
+    /// drains next, after the unit running then, unless it has drained in
+    /// that pump already. Callable more than once for one
     /// input, one slot per producer. The slot's fold and the input's
     /// coalescing function are independent: the fold combines a burst
     /// between two pumps, the coalescing function combines two sends inside

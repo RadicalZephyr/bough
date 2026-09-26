@@ -109,10 +109,12 @@ pub(crate) trait Drain: Sync {
     /// Connects the slot to graph `graph`, with the graph's waker if it has
     /// one. False if the slot is connected already.
     fn connect(&self, graph: u32, waker: Option<&Waker>) -> bool;
+    /// Whether an event is pending, read without the lock. A write that
+    /// races the read shows at a later one.
+    fn pending(&self) -> bool;
     /// Takes the pending event, if there is one, and hands it to `fire` as
-    /// an `&mut Option<A>`, after the lock is released. Returns whether
-    /// there was one.
-    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) -> bool;
+    /// an `&mut Option<A>`, after the lock is released.
+    fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any));
     /// Replaces the waker a write wakes.
     fn set_waker(&self, waker: Option<Waker>);
     /// Forgets the graph and the waker, and drops a pending event.

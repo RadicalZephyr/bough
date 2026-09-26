@@ -855,23 +855,24 @@ impl<M: Mode> Runtime<M> {
         self.stale_operations
     }
 
-    /// Runs every pending input slot as a transaction of its own, higher
-    /// priority first and each at most once, then the calls both handles,
-    /// an [`Io`] and a
-    /// [`RemoteIo`], made before the pump began, in the order they were
-    /// made: a send or a transaction as one transaction, and a
-    /// registration (RFD 6, RFD 7). Two slots are never simultaneous; a
-    /// unit is exactly as simultaneous as its sends.
+    /// Runs every pending input slot as a transaction of its own, and the
+    /// calls both handles, an [`Io`] and a [`RemoteIo`], made before the
+    /// pump began, in the order they were made: a send or a transaction as
+    /// one transaction, and a registration (RFD 6, RFD 7). After each whole
+    /// unit, children included, the highest-priority pending slot runs
+    /// next, and a call runs only when no slot is pending. Two slots are
+    /// never simultaneous; a unit is exactly as simultaneous as its sends.
     ///
     /// Called by the driver from wherever it sits: a thread the waker wakes,
     /// a future's `poll`, or a bare-metal main loop. Latency is the distance
     /// from a send to the next pump. A slot written while the pump runs, by
-    /// a listener or by another thread, is drained now if its turn has not
-    /// come and at the next pump otherwise. A call made after the pump
-    /// began, by a listener feeding back or by another thread, waits for
-    /// the next pump, whose wake it has already made, so a listener that
-    /// always sends cannot keep a pump from returning. A collection that is
-    /// due runs after each unit, as for [`send`](Runtime::send).
+    /// a listener, an interrupt or another thread, pre-empts what's next,
+    /// unless it has drained in this pump already: each slot drains at most
+    /// once per pump. A call made after the pump began waits for the next
+    /// pump, whose wake it has already made. So a listener that always
+    /// sends, or always writes a slot, cannot keep a pump from returning. A
+    /// collection that is due runs after each unit, as for
+    /// [`send`](Runtime::send).
     ///
     /// A unit, a remote's or an `Io`'s, runs as a transaction the driver
     /// opens, and its closure sends into it. A unit whose send fails is
@@ -911,14 +912,21 @@ impl<M: Mode> Runtime<M> {
         self.pump_all(false).map_err(|(error, _)| error)
     }
 
-    /// The slots, then both handles' calls, in the order they were made.
-    /// With `skip_stale`, the panicking pump's release build, a stale send
-    /// is counted and skipped rather than returned.
+    /// One unit at a time: the highest-priority pending slot, if there is
+    /// one, and a call otherwise. With `skip_stale`, the panicking pump's
+    /// release build, a stale send is counted and skipped rather than
+    /// returned.
     fn pump_all(&mut self, skip_stale: bool) -> Result<(), Stop> {
         let limit = self.begin_pump();
-        #[cfg(any(feature = "std", feature = "critical-section"))]
-        self.pump_slots(skip_stale)?;
-        self.pump_calls(limit, skip_stale)
+        loop {
+            #[cfg(any(feature = "std", feature = "critical-section"))]
+            if self.pump_slot(skip_stale)? {
+                continue;
+            }
+            if !self.pump_call(limit, skip_stale)? {
+                return Ok(());
+            }
+        }
     }
 
     /// A pump begins: it takes the next serial, so each slot drains once in
@@ -948,49 +956,48 @@ impl<M: Mode> Runtime<M> {
         }
     }
 
-    /// The calls both handles made before `limit`, oldest first: a unit as
-    /// one transaction, a registration, or an `Io`'s call. A call made
-    /// during the pump, by a listener feeding back or by another thread,
-    /// waits for the next pump, so a listener that always sends cannot
-    /// keep one pump from returning.
-    fn pump_calls(&mut self, limit: usize, skip_stale: bool) -> Result<(), Stop> {
-        loop {
-            let io = self.build.io.front().filter(|&stamp| before(stamp, limit));
-            #[cfg(all(
-                target_has_atomic = "ptr",
-                any(feature = "std", feature = "critical-section")
-            ))]
-            let remote = self
+    /// The oldest call either handle made before `limit`: a unit as one
+    /// transaction, a registration, or an `Io`'s call. False if there is
+    /// none. A call made during the pump, by a listener feeding back or by
+    /// another thread, waits for the next pump, so a listener that always
+    /// sends cannot keep one pump from returning.
+    fn pump_call(&mut self, limit: usize, skip_stale: bool) -> Result<bool, Stop> {
+        let io = self.build.io.front().filter(|&stamp| before(stamp, limit));
+        #[cfg(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        ))]
+        let remote = self
+            .build
+            .edge
+            .inbox
+            .front()
+            .filter(|&stamp| before(stamp, limit));
+        #[cfg(not(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        )))]
+        let remote: Option<usize> = None;
+        let io_first = match (io, remote) {
+            (None, None) => return Ok(false),
+            (Some(io), Some(remote)) => before(io, remote),
+            (io, _) => io.is_some(),
+        };
+        if io_first {
+            let call = self
                 .build
-                .edge
-                .inbox
-                .front()
-                .filter(|&stamp| before(stamp, limit));
-            #[cfg(not(all(
-                target_has_atomic = "ptr",
-                any(feature = "std", feature = "critical-section")
-            )))]
-            let remote: Option<usize> = None;
-            let io_first = match (io, remote) {
-                (None, None) => return Ok(()),
-                (Some(io), Some(remote)) => before(io, remote),
-                (io, _) => io.is_some(),
-            };
-            if io_first {
-                let call = self
-                    .build
-                    .io
-                    .pop()
-                    .expect("bough engine: the front call is there to pop");
-                call(self, skip_stale)?;
-                continue;
-            }
-            #[cfg(all(
-                target_has_atomic = "ptr",
-                any(feature = "std", feature = "critical-section")
-            ))]
-            self.pump_remote(skip_stale)?;
+                .io
+                .pop()
+                .expect("bough engine: the front call is there to pop");
+            call(self, skip_stale)?;
+            return Ok(true);
         }
+        #[cfg(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        ))]
+        self.pump_remote(skip_stale)?;
+        Ok(true)
     }
 
     /// The remote call at the front of the inbox: a unit as one
@@ -1039,44 +1046,41 @@ impl<M: Mode> Runtime<M> {
         Ok(())
     }
 
-    /// Each pending slot, higher priority first, as a transaction of its
-    /// own, and each at most once per pump. The event leaves the slot under
-    /// its lock, and the transaction runs after the lock is released.
+    /// The highest-priority pending slot that hasn't drained in this pump,
+    /// as a transaction of its own. False if there is none. The event leaves
+    /// the slot under its lock, and the transaction runs after the lock is
+    /// released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    fn pump_slots(&mut self, skip_stale: bool) -> Result<(), Stop> {
+    fn pump_slot(&mut self, skip_stale: bool) -> Result<bool, Stop> {
         let pump = self.build.edge.pumps;
-        let mut k = 0;
-        while k < self.build.edge.slots.len() {
-            let Connection {
-                input,
-                slot,
-                drained,
-                ..
-            } = self.build.edge.slots[k];
-            k += 1;
-            if drained == pump {
-                continue;
+        let Some(k) = self
+            .build
+            .edge
+            .slots
+            .iter()
+            .position(|connection| connection.drained != pump && connection.slot.pending())
+        else {
+            return Ok(false);
+        };
+        // Marked as it's picked, so the pump picks each slot at most once,
+        // and before its transaction runs, which may connect a slot ahead
+        // of it and move it.
+        self.build.edge.slots[k].drained = pump;
+        let Connection { input, slot, .. } = self.build.edge.slots[k];
+        let mut live = true;
+        slot.drain(&mut |event| match self.build.lookup(input) {
+            Ok(i) => {
+                self.build.begin();
+                let fire = self.build.store.ops[i as usize].fire;
+                fire(&mut self.build, i, event)
+                    .expect("bough engine: a slot's event is its transaction's only send");
+                self.build.finish();
+                self.collect_if_due();
             }
-            let mut live = true;
-            slot.drain(&mut |event| match self.build.lookup(input) {
-                Ok(i) => {
-                    // Marked before its transaction runs, which may connect
-                    // a slot ahead of it and move it.
-                    self.build.edge.slots[k - 1].drained = pump;
-                    self.build.begin();
-                    let fire = self.build.store.ops[i as usize].fire;
-                    fire(&mut self.build, i, event)
-                        .expect("bough engine: a slot's event is its transaction's only send");
-                    self.build.finish();
-                    self.collect_if_due();
-                }
-                // `connect` checked the graph, so the input was collected.
-                Err(_) => live = false,
-            });
-            if live {
-                continue;
-            }
-            k -= 1;
+            // `connect` checked the graph, so the input was collected.
+            Err(_) => live = false,
+        });
+        if !live {
             self.build.edge.slots.remove(k);
             slot.disconnect();
             if !skip_stale {
@@ -1084,7 +1088,7 @@ impl<M: Mode> Runtime<M> {
             }
             self.stale_operations += 1;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Registers the waker that a slot write, a remote send or a call
