@@ -1108,7 +1108,9 @@ impl<M: Mode> Runtime<M> {
     /// `input_cell` creates two, the input and the hold over it, and so do
     /// [`split`](crate::Source::split) and [`defer`](crate::Source::defer):
     /// the node that takes each event, and the one that emits it, or its
-    /// elements, in the child transactions. A cell or state loop's forward
+    /// elements, in the child transactions. [`unzip`](crate::Source::unzip)
+    /// creates three: the node that keeps each pair, and one for each half.
+    /// A cell or state loop's forward
     /// is a node of its own besides its definition; a stream loop's forward
     /// is the one node its definition's chain is fused into.
     pub fn live_nodes(&self) -> usize {
