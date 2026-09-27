@@ -45,7 +45,6 @@ mod tx;
 
 use core::any::Any;
 use core::cell::OnceCell;
-use core::mem;
 
 use alloc::vec::Vec;
 
@@ -372,15 +371,6 @@ pub(crate) struct Entry<M: Mode> {
     /// runtime drops.
     #[cfg(all(debug_assertions, feature = "std"))]
     pub(crate) once: bool,
-}
-
-impl<M: Mode> Entry<M> {
-    /// Spends a once-listener's entry as it fires. Its root ends, counted
-    /// as released now, and the entry shares `ownerless` from then on, so
-    /// dispatch and collection drop it as they drop one whose guard went.
-    pub(crate) fn spend(&mut self, ownerless: &Liveness) {
-        mem::replace(&mut self.flag, ownerless.clone()).spend();
-    }
 }
 
 /// The context of the hidden `Source::pull`: the build context, borrowed

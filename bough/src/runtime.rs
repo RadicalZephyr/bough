@@ -250,7 +250,7 @@ where
     let f = part::<M, Option<F>>(&mut e.f)
         .take()
         .expect("bough engine: a spent listener is not called");
-    e.spend(&b.ownerless);
+    b.spend(e);
     f(v);
 }
 
@@ -2296,5 +2296,28 @@ mod tests {
         // a linear stream, and both of its consumers cloned from it.
         assert_eq!(data(&graph, shared_in.token.index), None);
         assert_eq!(data(&graph, shared.token.index), Some(7));
+    }
+
+    /// Dispatch prunes a node's entries only when one died there. A spent
+    /// once-listener goes when its node's listeners have run; one whose
+    /// guard was dropped outside a dispatch goes at the node's next.
+    #[test]
+    fn dispatch_prunes_a_node_s_entries_only_when_one_died_there() {
+        let (mut graph, edge) = Runtime::build(|b| {
+            let (numbers, numbers_in) = b.input::<u32>();
+            (numbers_in, numbers.share(b))
+        });
+        let (numbers_in, numbers) = edge.keep();
+        let entries =
+            |graph: &Runtime| graph.build.store.listeners[numbers.token.index as usize].len();
+        graph.listen(numbers, |_| ()).keep();
+        graph.listen_once(numbers, |_| ()).keep();
+        graph.send(numbers_in, 1);
+        assert_eq!(entries(&graph), 1, "the spent one went");
+        let dropped = graph.listen(numbers, |_| ());
+        drop(dropped);
+        assert_eq!(entries(&graph), 2, "a dropped guard's entry waits");
+        graph.send(numbers_in, 2);
+        assert_eq!(entries(&graph), 1, "until the node's next dispatch");
     }
 }

@@ -30,6 +30,9 @@ pub(crate) struct Sched {
     pub(crate) relinks: Vec<u32>,
     /// Nodes with listeners that fired, in evaluation order.
     pub(crate) dispatch: Vec<u32>,
+    /// A once-listener was spent in the running node's dispatch, so the
+    /// node's entries need pruning after it.
+    pub(crate) spent: bool,
     /// `levels[d]`: the split and defer captures that fired in the running
     /// instant at child depth `d`, or in the one whose children are running
     /// there. The child scheduler's stack: the levels in progress are
