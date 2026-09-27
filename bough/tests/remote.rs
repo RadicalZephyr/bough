@@ -739,6 +739,84 @@ fn a_remote_once_listener_is_a_root_until_it_fires() {
     );
 }
 
+/// A listener tied to a remote's unit hears its stream there, children
+/// included, on the driver; a tied cell once hears the value once the
+/// unit is done. Into a `Threaded` runtime too.
+#[test]
+fn a_listener_tied_to_a_remote_unit_hears_its_children_on_the_driver() {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let later = numbers.defer(b).share(b);
+        (numbers_in, later, later.hold(b, 0u32))
+    });
+    let (numbers_in, later, latest) = edge.keep();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    let cell_heard = heard.clone();
+    thread::spawn(move || {
+        remote
+            .transaction(move |tx| {
+                tx.send(numbers_in, 1);
+                tx.listen_once(later, move |n| heard.send(n).unwrap());
+                tx.listen_cell_once(latest, move |n| cell_heard.send(*n * 10).unwrap());
+            })
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    graph.pump();
+    graph.send(numbers_in, 2);
+    assert_eq!(hearing.try_iter().collect::<Vec<_>>(), [1, 10]);
+}
+
+/// A listener tied to a remote's unit that heard nothing ends with its
+/// unit, as an `Io`'s does: a panic in a debug build, and dropped in a
+/// release build.
+#[test]
+fn a_listener_tied_to_a_remote_unit_that_heard_nothing_ends_with_it() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.filter(|n| *n > 5).share(b))
+    });
+    let (numbers_in, big) = edge.keep();
+    let remote = graph.remote_io();
+    let (heard, hearing) = mpsc::channel();
+    remote
+        .transaction(move |tx| {
+            tx.send(numbers_in, 3);
+            tx.listen_once(big, move |n| heard.send(n).unwrap());
+        })
+        .unwrap();
+    let result = catch_unwind(AssertUnwindSafe(|| graph.pump()));
+    if cfg!(debug_assertions) {
+        assert!(text(&*result.unwrap_err()).contains("heard nothing"));
+    } else {
+        assert!(result.is_ok(), "a release build drops it");
+    }
+    remote.send(numbers_in, 9).unwrap();
+    graph.pump();
+    assert!(hearing.try_recv().is_err(), "it ended with its unit");
+}
+
+/// A tied listen's token is checked where the unit runs: a foreign one is
+/// a failed call, which drops the unit whole, its sends included.
+#[test]
+fn a_remote_unit_whose_tied_listen_fails_is_dropped_whole() {
+    let (mut graph, (left_in, _right_in, merged)) = pair();
+    let seen = log(&mut graph, merged);
+    let (_other, other_edge) = Runtime::build(|b| b.input::<u32>().0.share(b));
+    let foreign = other_edge.keep();
+    let remote = graph.remote_io();
+    remote
+        .transaction(move |tx| {
+            tx.send(left_in, 1);
+            tx.listen_once(foreign, |_| ());
+        })
+        .unwrap();
+    assert_eq!(graph.try_pump(), Err(PumpError::ForeignGraph));
+    assert!(seen.borrow().is_empty(), "no send of the unit ran");
+}
+
 /// A remote anchor keeps its value alive until the `Anchored` drops, and
 /// the `Anchored` can come back from the thread that asked for it.
 #[test]

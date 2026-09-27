@@ -34,13 +34,19 @@ use crate::engine::{Cx, DoubleSend, Entry, LISTENERS, ListenerCall, TokenFault, 
 ))]
 use crate::error::IoError;
 use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::guard::Released;
 use crate::guard::{Liveness, before};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::io::{
-    AnchorTokens, Listen, ListenCell, ListenCellOnce, ListenOnce, Registration, Roots, Waiting,
+    AnchorTokens, Listen, ListenCell, ListenCellOnce, ListenOnce, Registration, Roots, TiedCell,
+    Waiting,
 };
 use crate::io::{Io, IoQueue};
 #[cfg(target_has_atomic = "ptr")]
@@ -157,7 +163,8 @@ impl Runtime<Local> {
     }
 
     /// Runs an `Io`'s unit as one transaction, which is dropped whole if a
-    /// call in it failed. A collection that is due runs after it.
+    /// call in it failed. Otherwise its tied cell calls run once it's done,
+    /// and then a collection if one is due.
     pub(crate) fn run_io_unit(
         &mut self,
         skip_stale: bool,
@@ -167,11 +174,16 @@ impl Runtime<Local> {
         let mut tx = IoTransaction {
             runtime: self,
             unit: UnitState::new(skip_stale),
+            tied: Tied::new(),
         };
         unit(&mut tx);
-        let IoTransaction { unit, .. } = tx;
-        self.end_unit(unit)?;
+        let IoTransaction { unit, tied, .. } = tx;
+        let silent = self.end_unit(unit, tied.streams)?;
+        for call in tied.cells {
+            call(&self.build);
+        }
         self.collect_if_due();
+        debug_assert!(!silent, "{SILENT}");
         Ok(())
     }
 }
@@ -203,6 +215,11 @@ pub(crate) type Stop = (PumpError, &'static str);
 const SEND: &str = "a send to a collected input";
 const LISTEN: &str = "a listener on a collected node";
 const ANCHOR: &str = "an anchor on a collected node";
+
+/// The debug-build panic for a listener tied to a unit that heard nothing.
+const SILENT: &str = "bough: a listener tied to a transaction heard nothing: its stream fired in \
+                      neither the transaction nor its child transactions. In a release build it \
+                      is dropped";
 
 /// A stream listener's call: take the event from a linear stream, clone it
 /// from a shared one.
@@ -426,11 +443,7 @@ impl<M: Mode> Runtime<M> {
         self.build.finish();
         let silent = self.end_tied(tied);
         self.collect_if_due();
-        debug_assert!(
-            !silent,
-            "bough: a listener tied to a transaction heard nothing: its stream fired in neither \
-             the transaction nor its child transactions. In a release build it is dropped"
-        );
+        debug_assert!(!silent, "{SILENT}");
         r
     }
 
@@ -835,6 +848,25 @@ impl<M: Mode> Runtime<M> {
         Ok(())
     }
 
+    /// A cell once-listener tied to a remote's unit, once the unit is done:
+    /// `f` runs with the value then. The unit checked the token, and nothing
+    /// is collected inside a unit.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    pub(crate) fn tied_cell<C, F>(&mut self, cell: C, f: F)
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value),
+    {
+        let i = self
+            .build
+            .lookup(cell.token())
+            .expect("bough engine: a unit's cell outlives the unit");
+        f(self.build.value::<C::Value>(i));
+    }
+
     /// [`anchor`](Runtime::anchor), as an `Io` asked for it, at the pump,
     /// for the tokens its value's [`Trace`] found when it was asked for.
     /// Every token is checked before any is rooted, so a token that stops
@@ -1211,7 +1243,8 @@ impl<M: Mode> Runtime<M> {
     }
 
     /// Runs a remote's unit as one transaction, as
-    /// [`run_io_unit`](Runtime::run_io_unit) runs an `Io`'s.
+    /// [`run_io_unit`](Runtime::run_io_unit) runs an `Io`'s. Its tied cell
+    /// calls run through this runtime's mode, which the unit doesn't know.
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
@@ -1221,26 +1254,46 @@ impl<M: Mode> Runtime<M> {
         let mut tx = RemoteTransaction {
             runtime: self,
             unit: UnitState::new(skip_stale),
+            streams: Vec::new(),
+            cells: Vec::new(),
         };
         unit(&mut tx);
-        let RemoteTransaction { unit, .. } = tx;
-        self.end_unit(unit)?;
+        let RemoteTransaction {
+            unit,
+            streams,
+            cells,
+            ..
+        } = tx;
+        let silent = self.end_unit(unit, streams)?;
+        for cell in cells {
+            M::register(self, cell, skip_stale)?;
+        }
         self.collect_if_due();
+        debug_assert!(!silent, "{SILENT}");
         Ok(())
     }
 
     /// Ends a unit a handle queued, once its closure has run. If a call in
     /// it failed, the unit is dropped whole: its transaction closes without
-    /// running, and the failure comes back. Otherwise the transaction runs,
-    /// children and all.
-    fn end_unit(&mut self, unit: UnitState) -> Result<(), Stop> {
+    /// running, its tied listeners go, and the failure comes back. Otherwise
+    /// the transaction runs, children and all, and the unit gives up its
+    /// tied stream listeners' guards. Returns whether one of those never
+    /// fired.
+    fn end_unit(&mut self, unit: UnitState, streams: Vec<Liveness>) -> Result<bool, Stop> {
         self.stale_operations += unit.skipped;
         if let Some(stop) = unit.fault {
             self.build.cancel();
+            for flag in streams {
+                flag.release();
+            }
             return Err(stop);
         }
         self.build.finish();
-        Ok(())
+        let mut silent = false;
+        for flag in streams {
+            silent |= flag.release();
+        }
+        Ok(silent)
     }
 
     /// The highest-priority pending slot that hasn't drained in this pump,
@@ -1372,6 +1425,23 @@ impl<M: Mode> Tied<M> {
             cells: Vec::new(),
         }
     }
+
+    /// Ties a once-listener on `runtime`'s node `i` to the unit, which
+    /// holds its guard.
+    fn once<F: 'static>(&mut self, runtime: &mut Runtime<M>, i: u32, f: F, call: ListenerCall<M>)
+    where
+        M: Accepts<F>,
+    {
+        let flag = Liveness::new(&runtime.build.released);
+        runtime.attach_once_flag(i, f, call, flag.clone());
+        self.streams.push(flag);
+    }
+
+    /// Ties a call with cell `i`'s value to the end of the unit.
+    fn cell_once<A: 'static>(&mut self, i: u32, f: impl FnOnce(&A) + 'static) {
+        self.cells
+            .push(Box::new(move |b: &Build<M>| f(b.value::<A>(i))));
+    }
 }
 
 impl<M: Mode> Transaction<'_, M> {
@@ -1436,7 +1506,8 @@ impl<M: Mode> Transaction<'_, M> {
         M: Accepts<F>,
     {
         if let Some(i) = self.graph.checked(source.node_token(), LISTEN) {
-            self.tie_once(i, f, call_stream_once::<M, S, F>);
+            self.tied
+                .once(self.graph, i, f, call_stream_once::<M, S, F>);
         }
     }
 
@@ -1450,7 +1521,8 @@ impl<M: Mode> Transaction<'_, M> {
         M: Accepts<F>,
     {
         let i = self.lookup(source.node_token())?;
-        self.tie_once(i, f, call_stream_once::<M, S, F>);
+        self.tied
+            .once(self.graph, i, f, call_stream_once::<M, S, F>);
         Ok(())
     }
 
@@ -1465,7 +1537,7 @@ impl<M: Mode> Transaction<'_, M> {
         F: FnOnce(&C::Value) + 'static,
     {
         if let Some(i) = self.graph.checked(cell.token(), LISTEN) {
-            self.tie_cell_once(i, f);
+            self.tied.cell_once(i, f);
         }
     }
 
@@ -1477,7 +1549,7 @@ impl<M: Mode> Transaction<'_, M> {
         F: FnOnce(&C::Value) + 'static,
     {
         let i = self.lookup(cell.token())?;
-        self.tie_cell_once(i, f);
+        self.tied.cell_once(i, f);
         Ok(())
     }
 
@@ -1487,24 +1559,6 @@ impl<M: Mode> Transaction<'_, M> {
             TokenFault::Foreign => TokenError::ForeignGraph,
             TokenFault::Stale => TokenError::Stale,
         })
-    }
-
-    /// Ties a once-listener on node `i` to this unit, which holds its
-    /// guard.
-    fn tie_once<F: 'static>(&mut self, i: u32, f: F, call: ListenerCall<M>)
-    where
-        M: Accepts<F>,
-    {
-        let flag = Liveness::new(&self.graph.build.released);
-        self.graph.attach_once_flag(i, f, call, flag.clone());
-        self.tied.streams.push(flag);
-    }
-
-    /// Ties a call with cell `i`'s value to the end of this unit.
-    fn tie_cell_once<A: 'static>(&mut self, i: u32, f: impl FnOnce(&A) + 'static) {
-        self.tied
-            .cells
-            .push(Box::new(move |b: &Build<M>| f(b.value::<A>(i))));
     }
 }
 
@@ -1960,16 +2014,18 @@ impl UnitState {
     }
 }
 
-/// The sends of one unit an [`Io`] queued, run on the driver inside the
-/// transaction it opened for the unit, so they are simultaneous. An `Io`'s
-/// runtime is `Local`, so nothing here need be `Send`.
+/// The calls of one unit an [`Io`] queued, run on the driver inside the
+/// transaction it opened for the unit, so its sends are simultaneous. An
+/// `Io`'s runtime is `Local`, so nothing here need be `Send`.
 ///
 /// Whether an input is collected or coalesces is graph knowledge, so a
-/// failed send here is found at [`Runtime::pump`], which drops the whole
-/// unit and reports it; the closure's later sends are ignored.
+/// failed call here is found at [`Runtime::pump`], which drops the whole
+/// unit and reports it; the closure's later calls are ignored.
 pub struct IoTransaction<'a> {
     runtime: &'a mut Runtime<Local>,
     unit: UnitState,
+    /// The once-listeners tied to the unit.
+    tied: Tied<Local>,
 }
 
 impl IoTransaction<'_> {
@@ -1990,6 +2046,43 @@ impl IoTransaction<'_> {
             self.unit.fail(fault, SEND);
         }
     }
+
+    /// Listens to a stream's next event in this unit, as
+    /// [`Transaction::listen_once`] does. A stale or foreign token is a
+    /// failed call, as for [`send`](IoTransaction::send).
+    pub fn listen_once<S, F>(&mut self, source: S, f: F)
+    where
+        S: Node,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + 'static,
+    {
+        if self.unit.failed() {
+            return;
+        }
+        match self.runtime.build.lookup(source.node_token()) {
+            Ok(i) => self
+                .tied
+                .once(self.runtime, i, f, call_stream_once::<Local, S, F>),
+            Err(fault) => self.unit.fail(fault.into(), LISTEN),
+        }
+    }
+
+    /// Hears a cell's value once this unit is done, as
+    /// [`Transaction::listen_cell_once`] does. A stale or foreign token is
+    /// a failed call, as for [`send`](IoTransaction::send).
+    pub fn listen_cell_once<C, F>(&mut self, cell: C, f: F)
+    where
+        C: CellRef,
+        F: FnOnce(&C::Value) + 'static,
+    {
+        if self.unit.failed() {
+            return;
+        }
+        match self.runtime.build.lookup(cell.token()) {
+            Ok(i) => self.tied.cell_once(i, f),
+            Err(fault) => self.unit.fail(fault.into(), LISTEN),
+        }
+    }
 }
 
 /// The driver's runtime, of either mode, as a remote unit's transaction
@@ -2002,6 +2095,12 @@ pub(crate) trait Driver {
     /// Starts `input` with the event in `event`, an `&mut Option<A>`, in
     /// the transaction the driver opened for the unit.
     fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault>;
+    /// Whether `token` names a live node of this graph.
+    fn check(&self, token: Token) -> Result<(), Fault>;
+    /// The count of released guards, which every guard's state shares.
+    fn released(&self) -> &Released;
+    /// Registers what the unit asked for, now.
+    fn register(&mut self, registration: Box<dyn Registration>) -> Result<(), Stop>;
 }
 
 #[cfg(all(
@@ -2014,11 +2113,37 @@ impl<M: Mode> Driver for Runtime<M> {
         let fire = self.build.store.ops[i as usize].fire;
         fire(&mut self.build, i, event).map_err(|DoubleSend| Fault::DoubleSend)
     }
+    fn check(&self, token: Token) -> Result<(), Fault> {
+        self.build.lookup(token).map(drop).map_err(Fault::from)
+    }
+    fn released(&self) -> &Released {
+        &self.build.released
+    }
+    fn register(&mut self, registration: Box<dyn Registration>) -> Result<(), Stop> {
+        M::register(self, registration, false)
+    }
 }
 
-/// The sends of one unit a [`RemoteIo`] queued, as an [`IoTransaction`]'s
-/// are an [`Io`]'s. The unit runs in a runtime whose mode the handle
-/// doesn't know, so the runtime is out of sight here.
+/// The calls of one unit a [`RemoteIo`] queued, as an [`IoTransaction`]
+/// runs an [`Io`]'s, but for one bound. The unit runs in a runtime whose
+/// mode the handle doesn't know, which may be `Threaded`, so a listener
+/// tied to it must be `Send`:
+///
+/// ```compile_fail,E0277
+/// use bough::{Runtime, Source};
+/// use std::rc::Rc;
+///
+/// let (graph, edge) = Runtime::build(|b| {
+///     let (numbers, numbers_in) = b.input::<u32>();
+///     (numbers_in, numbers.share(b))
+/// });
+/// let (numbers_in, numbers) = edge.keep();
+/// graph.remote_io().transaction(move |tx| {
+///     let seen = Rc::new(0);
+///     tx.listen_once(numbers, move |_| drop(seen)); // error: Rc is not Send
+///     tx.send(numbers_in, 1);
+/// });
+/// ```
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -2027,6 +2152,10 @@ pub struct RemoteTransaction<'a> {
     /// The driver's runtime, with its mode out of sight.
     runtime: &'a mut dyn Driver,
     unit: UnitState,
+    /// The guards of the stream once-listeners tied to the unit.
+    streams: Vec<Liveness>,
+    /// The cell ones, which register when the unit is done.
+    cells: Vec<Box<dyn Registration>>,
 }
 
 #[cfg(all(
@@ -2043,6 +2172,48 @@ impl RemoteTransaction<'_> {
         let mut event = Some(value);
         if let Err(fault) = self.runtime.start(input.token, &mut event) {
             self.unit.fail(fault, SEND);
+        }
+    }
+
+    /// Listens to a stream's next event in this unit, as
+    /// [`IoTransaction::listen_once`] does. The listener must be `Send`.
+    pub fn listen_once<S, F>(&mut self, source: S, f: F)
+    where
+        S: Node + Send,
+        S::Event: 'static,
+        F: FnOnce(S::Event) + Send + 'static,
+    {
+        if self.unit.failed() {
+            return;
+        }
+        if let Err(fault) = self.runtime.check(source.node_token()) {
+            return self.unit.fail(fault, LISTEN);
+        }
+        let flag = Liveness::new(self.runtime.released());
+        let listen = ListenOnce {
+            flag: flag.clone(),
+            source,
+            f,
+        };
+        self.runtime
+            .register(Box::new(listen))
+            .expect("bough engine: a checked token registers");
+        self.streams.push(flag);
+    }
+
+    /// Hears a cell's value once this unit is done, as
+    /// [`IoTransaction::listen_cell_once`] does. The call must be `Send`.
+    pub fn listen_cell_once<C, F>(&mut self, cell: C, f: F)
+    where
+        C: CellRef + Send,
+        F: FnOnce(&C::Value) + Send + 'static,
+    {
+        if self.unit.failed() {
+            return;
+        }
+        match self.runtime.check(cell.token()) {
+            Ok(()) => self.cells.push(Box::new(TiedCell { cell, f })),
+            Err(fault) => self.unit.fail(fault, LISTEN),
         }
     }
 }

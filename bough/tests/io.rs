@@ -511,6 +511,110 @@ fn a_queued_transactions_sends_are_simultaneous() {
     );
 }
 
+/// A listener tied to a queued unit hears its stream there, children
+/// included, as one tied to the runtime's own transaction does. An `Io`'s
+/// runtime is `Local`, so the listener needn't be `Send`: this one keeps
+/// an `Rc`.
+#[test]
+fn a_listener_tied_to_a_queued_unit_hears_its_children_and_needn_t_be_send() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let later = numbers.defer(b).share(b);
+        (numbers_in, later, later.hold(b, 0u32))
+    });
+    let (numbers_in, later, latest) = edge.keep();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let (stream_sink, cell_sink) = (heard.clone(), heard.clone());
+    io.transaction(move |tx| {
+        tx.send(numbers_in, 1);
+        tx.listen_once(later, move |n| stream_sink.borrow_mut().push(n));
+        tx.listen_cell_once(latest, move |n| cell_sink.borrow_mut().push(*n * 10));
+    })
+    .unwrap();
+    graph.pump();
+    graph.send(numbers_in, 2);
+    assert_eq!(
+        *heard.borrow(),
+        [1, 10],
+        "the child's event, then the value once the unit is done"
+    );
+}
+
+/// A listener tied to a queued unit that heard nothing panics in a debug
+/// build, once the unit is done, and is dropped in a release build: either
+/// way it ends with its unit, and the pump stays usable.
+#[test]
+fn a_listener_tied_to_a_queued_unit_that_heard_nothing_ends_with_it() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.filter(|n| *n > 5).share(b))
+    });
+    let (numbers_in, big) = edge.keep();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    io.transaction(move |tx| {
+        tx.send(numbers_in, 3);
+        tx.listen_once(big, move |n| sink.borrow_mut().push(n));
+    })
+    .unwrap();
+    let result = catch_unwind(AssertUnwindSafe(|| graph.pump()));
+    if cfg!(debug_assertions) {
+        assert!(panic_text(result).contains("heard nothing"));
+    } else {
+        assert!(result.is_ok(), "a release build drops it");
+    }
+    io.send(numbers_in, 9).unwrap();
+    graph.pump();
+    assert!(heard.borrow().is_empty(), "it ended with its unit");
+}
+
+/// A unit dropped whole takes its tied listeners with it: the stream one
+/// goes unheard, and the cell one never runs. A tied listener's stale
+/// token is a failed call too, which the pump names.
+#[test]
+fn a_dropped_unit_takes_its_tied_listeners_and_a_stale_one_drops_it() {
+    let (mut graph, (left_in, right_in, merged)) = pair();
+    let io = graph.io();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let (stream_sink, cell_sink) = (heard.clone(), heard.clone());
+    let (_other, other_edge) = Runtime::build(|b| b.input::<u32>().0.hold(b, 0u32));
+    let foreign = other_edge.keep();
+    io.transaction(move |tx| {
+        tx.listen_once(merged, move |n| stream_sink.borrow_mut().push(n));
+        tx.listen_cell_once(foreign, move |n| cell_sink.borrow_mut().push(*n));
+        tx.send(left_in, 1);
+    })
+    .unwrap();
+    assert_eq!(graph.try_pump(), Err(PumpError::ForeignGraph));
+    io.send(right_in, 2).unwrap();
+    graph.pump();
+    assert!(heard.borrow().is_empty(), "nothing of the unit ran");
+
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = *edge;
+    let _input = graph.anchor(numbers_in);
+    drop(edge);
+    graph.collect_garbage();
+    let io = graph.io();
+    io.transaction(move |tx| tx.listen_once(numbers, |_| ()))
+        .unwrap();
+    assert_eq!(graph.try_pump(), Err(PumpError::Stale));
+    io.transaction(move |tx| tx.listen_once(numbers, |_| ()))
+        .unwrap();
+    if cfg!(debug_assertions) {
+        let text = panic_text(catch_unwind(AssertUnwindSafe(|| graph.pump())));
+        assert!(text.contains("a listener on a collected node"), "{text}");
+    } else {
+        graph.pump();
+        assert_eq!(graph.stale_operations(), 1);
+    }
+}
+
 /// A queued unit whose send fails is dropped whole, as a remote's is:
 /// `try_pump` returns the error, none of the unit's sends run, and the
 /// calls behind it stay queued. The panicking pump panics and leaves the

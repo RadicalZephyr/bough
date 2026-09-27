@@ -658,6 +658,33 @@ where
     }
 }
 
+/// A cell once-listener tied to a remote's unit, whose call runs when the
+/// unit is done. It registers nothing, and roots nothing.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) struct TiedCell<C, F> {
+    pub(crate) cell: C,
+    pub(crate) f: F,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M, C, F> RegisterIn<M> for TiedCell<C, F>
+where
+    M: Mode,
+    C: CellRef,
+    F: FnOnce(&C::Value),
+{
+    fn register(self, runtime: &mut Runtime<M>, _skip_stale: bool) -> Result<(), Stop> {
+        runtime.tied_cell(self.cell, self.f);
+        Ok(())
+    }
+}
+
 /// An anchor a `RemoteIo` asked for: the tokens its value's `Trace` found.
 #[cfg(all(
     target_has_atomic = "ptr",
