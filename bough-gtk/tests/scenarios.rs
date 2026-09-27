@@ -15,7 +15,7 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bough::{Cell, Input, Io, IoError, NowError, Owner, Runtime, Source};
+use bough::{Cell, CellRef, Input, Io, IoError, Runtime, Source};
 use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
@@ -42,7 +42,7 @@ const SCENARIOS: &[(&str, fn())] = &[
         a_remote_send_from_a_thread,
     ),
     (
-        "rows_one_pump_opens_are_wired_between_its_units",
+        "rows_one_pump_opens_live_until_the_next_wires_them",
         rows_one_pump_opens,
     ),
     (
@@ -50,8 +50,16 @@ const SCENARIOS: &[(&str, fn())] = &[
         an_echo_is_not_cured_by_waiting,
     ),
     (
-        "dropping_the_owner_ends_the_driver",
-        dropping_the_owner_ends_the_driver,
+        "dropping_the_driver_drops_the_runtime",
+        dropping_the_driver_drops_the_runtime,
+    ),
+    (
+        "a_dropped_unit_is_logged_and_the_rest_runs",
+        a_dropped_unit_is_logged_and_the_rest_runs,
+    ),
+    (
+        "a_panic_as_the_runtime_drops_does_not_abort",
+        a_panic_as_the_runtime_drops_does_not_abort,
     ),
 ];
 
@@ -117,13 +125,42 @@ fn describe(status: ExitStatus) -> String {
 }
 
 /// Runs the main loop until it is quiet, so that X events, the frame
-/// clock and spawned futures have run.
+/// clock and spawned futures, the driver among them, have run.
 fn settle() {
     let context = glib::MainContext::default();
     for _ in 0..40 {
         while context.iteration(false) {}
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// Stands in for the driver where a scenario reads the runtime itself: it
+/// pumps and runs the main loop, a few times over, since a call made
+/// during a pump waits for the next one.
+fn drive(graph: &mut Runtime) {
+    let context = glib::MainContext::default();
+    for _ in 0..4 {
+        graph.pump();
+        while context.iteration(false) {}
+    }
+}
+
+/// A cell's value, read through the `Io`. The read waits for the next
+/// pump, which `settle` lets the driver run.
+fn sample<C>(io: &Io, cell: C) -> C::Value
+where
+    C: CellRef,
+    C::Value: Clone + 'static,
+{
+    let seen = Rc::new(RefCell::new(None));
+    let sink = seen.clone();
+    let _read = io
+        .listen_cell_once(cell, move |value: &C::Value| {
+            *sink.borrow_mut() = Some(value.clone())
+        })
+        .unwrap();
+    settle();
+    seen.borrow_mut().take().expect("the driver pumped")
 }
 
 fn window_with(child: &impl IsA<gtk::Widget>) -> gtk::Window {
@@ -174,8 +211,8 @@ fn list_view_labels(view: &gtk::ListView) -> Vec<String> {
 /// The baseline: a label bound to a cell, and a button with a sender.
 fn a_counter() {
     let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let click = gtk::Button::with_label("Click");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -188,6 +225,7 @@ fn a_counter() {
     for _ in 0..3 {
         click.emit_clicked();
     }
+    settle();
     check(
         "the label after 3 clicks",
         label.text().to_string(),
@@ -196,23 +234,25 @@ fn a_counter() {
 }
 
 /// Each row is a component built in the listener that hears of it, which
-/// registers its label's listener while the graph is busy. Removing a row
-/// drops its widget, which drops its listener, and a collection frees the
-/// row's nodes.
+/// registers its label's listener through the `Io` while the runtime
+/// pumps, for the next pump. Removing a row drops its widget, which drops
+/// its listener, and a collection frees the row's nodes. The scenario
+/// pumps by hand, as the driver would, so that it can read the runtime.
 fn rows_wire_themselves() {
-    let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let (mut graph, app) = app::build();
+    let io = graph.io();
     let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let _window = window_with(&list);
     let views = app::row_list(&io, app, &list).unwrap();
     for name in ["alpha", "beta", "gamma"] {
         bough_gtk::send(&io, app.add_in, name.to_string());
     }
-    let rows = io.with_sample(app.rows, |rows| rows.clone()).unwrap();
+    drive(&mut graph);
+    let rows = graph.sample(app.rows).clone();
     let bump = views.borrow()[&rows[1]].bump.clone();
     bump.emit_clicked();
     bump.emit_clicked();
+    drive(&mut graph);
     let labels = |rows: &[Row]| -> Vec<String> {
         rows.iter()
             .map(|row| views.borrow()[row].label.text().to_string())
@@ -224,20 +264,16 @@ fn rows_wire_themselves() {
         strings(&["alpha: 0", "beta: 2", "gamma: 0"]),
     );
 
-    let collect = || {
-        io.with_graph(|graph| {
-            graph.collect_garbage();
-            graph.live_nodes()
-        })
-        .unwrap()
-    };
-    let before = collect();
+    graph.collect_garbage();
+    let before = graph.live_nodes();
     let alpha = views.borrow()[&rows[0]].label.downgrade();
     let remove = views.borrow()[&rows[0]].remove.clone();
     remove.emit_clicked();
     drop(remove);
-    let after = collect();
-    let left = io.with_sample(app.rows, |rows| rows.clone()).unwrap();
+    drive(&mut graph);
+    graph.collect_garbage();
+    let after = graph.live_nodes();
+    let left = graph.sample(app.rows).clone();
     check(
         "the rows left",
         labels(&left),
@@ -252,25 +288,28 @@ fn rows_wire_themselves() {
     assert!(after < before, "the removed row's nodes are freed");
 }
 
-/// The model follows the `rows` cell from a listener, and GTK binds the
-/// new row inside that listener, while the graph is busy. The factory's
-/// bind registers through the handle, so the registration waits for the
-/// transaction, and the labels are right before the main loop runs.
+/// The model follows the `rows` cell from a listener, and GTK binds new
+/// rows inside that listener, while the runtime pumps. The factory's bind
+/// registers its label's listener through the `Io`, so the labels are
+/// right from the next pump, which for the driver is a turn of the main
+/// loop later: the paint probe's one late frame. The scenario pumps by
+/// hand, to show where that turn falls.
 fn a_list_view_binds_rows_inside_a_listener() {
-    let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let (mut graph, app) = app::build();
+    let io = graph.io();
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let syncing = Rc::new(StdCell::new(false));
     let busy_binds = Rc::new(StdCell::new(0));
     let factory = bough_gtk::list_factory(
         &io,
         || gtk::Label::new(None),
         clone!(
             #[strong]
+            syncing,
+            #[strong]
             busy_binds,
             move |io: &Io, row: &Row, label: &gtk::Label| {
-                // A read cannot wait, so it tells whether the graph is busy.
-                if io.with_sample(row.label, |_| ()) == Err(NowError::Busy) {
+                if syncing.get() {
                     busy_binds.set(busy_binds.get() + 1);
                 }
                 let shown = io.listen_cell(
@@ -298,7 +337,13 @@ fn a_list_view_binds_rows_inside_a_listener() {
         clone!(
             #[weak]
             store,
-            move |rows: &Vec<Row>| bough_gtk::sync_store(&store, rows)
+            #[strong]
+            syncing,
+            move |rows: &Vec<Row>| {
+                syncing.set(true);
+                bough_gtk::sync_store(&store, rows);
+                syncing.set(false);
+            }
         ),
     )
     .unwrap()
@@ -306,17 +351,24 @@ fn a_list_view_binds_rows_inside_a_listener() {
     for name in ["alpha", "beta", "gamma"] {
         bough_gtk::send(&io, app.add_in, name.to_string());
     }
-    println!("binds while the graph was busy: {}", busy_binds.get());
-    assert!(busy_binds.get() > 0, "GTK bound a row inside a listener");
+    graph.pump();
+    println!("binds inside the listener: {}", busy_binds.get());
+    assert!(busy_binds.get() > 0, "GTK bound a row inside the listener");
     check(
-        "the labels right after the sends, before the main loop runs",
+        "the labels after the pump that ran the sends",
+        list_view_labels(&view),
+        strings(&["", "", ""]),
+    );
+    graph.pump();
+    check(
+        "the labels after the next pump",
         list_view_labels(&view),
         strings(&["alpha: 0", "beta: 0", "gamma: 0"]),
     );
-    let rows = io.with_sample(app.rows, |rows| rows.clone()).unwrap();
+    let rows = graph.sample(app.rows).clone();
     bough_gtk::send(&io, rows[2].clicks_in, ());
     bough_gtk::send(&io, app.remove_in, rows[0]);
-    settle();
+    drive(&mut graph);
     check(
         "the labels after a click on gamma and removing alpha",
         list_view_labels(&view),
@@ -328,8 +380,8 @@ fn a_list_view_binds_rows_inside_a_listener() {
 /// sends nothing back.
 fn a_two_way_entry_settles() {
     let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
     let entry = gtk::Entry::new();
     let _window = window_with(&entry);
     let steps: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -344,6 +396,7 @@ fn a_two_way_entry_settles() {
     .unwrap()
     .keep();
     bough_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
+    settle(); // the pump registers both listeners
     entry.set_text("hello");
     settle();
     check("the entry shows", entry.text().to_string(), "HELLO".into());
@@ -354,13 +407,13 @@ fn a_two_way_entry_settles() {
     );
 }
 
-/// Registering a listener calls it at once, and here that call writes a
-/// check button, whose handler sends while the graph is busy. With a
-/// `RefCell` this aborted; through the handle the send waits.
+/// A cell listener's first call, at the pump, writes a check button,
+/// whose handler sends while the runtime pumps. With a `RefCell` this
+/// aborted; through the `Io` the send waits for the next pump.
 fn a_handler_the_first_call_sets_off() {
     let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
     let check_button = gtk::CheckButton::new();
     let _window = window_with(&check_button);
     bough_gtk::send(&io, app.flag_in, true);
@@ -386,29 +439,29 @@ fn a_handler_the_first_call_sets_off() {
     )
     .unwrap()
     .keep();
+    settle();
     check(
-        "toggles during registration",
+        "toggles from the listener's first call",
         toggles.borrow().clone(),
         vec![true],
     );
-    check("the flag", io.with_sample(app.flag, |on| *on), Ok(true));
+    check("the flag", sample(&io, app.flag), true);
 }
 
-/// Another thread sends through a `Remote`; the driver, a future on the
+/// Another thread sends through a `RemoteIo`; the driver, a future on the
 /// main loop, pumps when the send wakes it.
 fn a_remote_send_from_a_thread() {
     let (graph, app) = app::build();
-    let remote = graph.remote();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let remote = graph.remote_io();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let _window = window_with(&label);
     bough_gtk::bind_label(&io, app.clock, &label).unwrap();
-    let _driver = bough_gtk::spawn_driver(&io);
-    settle(); // the driver's first poll registers its waker
+    settle(); // the driver registers its waker, and the label's listener
     std::thread::spawn(move || {
         for n in 1..=3 {
-            remote.send(app.ticks_in, n);
+            remote.send(app.ticks_in, n).unwrap();
         }
     })
     .join()
@@ -423,9 +476,10 @@ fn a_remote_send_from_a_thread() {
 }
 
 /// Two remote units, one pump. Nothing in the graph holds a counter, so
-/// only what I/O code wires keeps one alive, and a collection runs before
-/// every transaction. The listener wires each counter through the handle,
-/// and the queue runs between the units, so both survive.
+/// only what I/O code wires keeps one alive, and a collection runs after
+/// every unit. The listener wires each counter through the `Io`, and the
+/// registration keeps its counter alive while it waits for the next pump,
+/// so both survive.
 fn rows_one_pump_opens() {
     let (mut graph, edge) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
@@ -437,9 +491,8 @@ fn rows_one_pump_opens() {
     });
     let (open_in, opened) = edge.keep();
     graph.set_collect_after_every_transaction(true);
-    let remote = graph.remote();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let remote = graph.remote_io();
+    let io = graph.io();
     let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let _window = window_with(&list);
     let inputs: Rc<RefCell<Vec<Input<u32>>>> = Rc::default();
@@ -473,16 +526,17 @@ fn rows_one_pump_opens() {
     )
     .unwrap()
     .keep();
-    let _driver = bough_gtk::spawn_driver(&io);
+    let _driver = bough_gtk::spawn_driver(graph);
     settle();
-    remote.send(open_in, 10);
-    remote.send(open_in, 20);
+    remote.send(open_in, 10).unwrap();
+    remote.send(open_in, 20).unwrap();
     settle();
     check("the labels", box_labels(&list), strings(&["10", "20"]));
     for input in inputs.borrow().iter() {
         // A counter that was collected would make this a stale send.
         bough_gtk::send(&io, *input, 1);
     }
+    settle();
     check(
         "the labels after a bump each",
         box_labels(&list),
@@ -496,8 +550,8 @@ fn rows_one_pump_opens() {
 /// handler here stops at 40 steps. Only blocking the handler fixes it.
 fn an_echo_is_not_cured_by_waiting() {
     let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
     let entry = gtk::Entry::new();
     let _window = window_with(&entry);
     let steps: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -511,8 +565,6 @@ fn an_echo_is_not_cured_by_waiting() {
     )
     .unwrap()
     .keep();
-    let _driver = bough_gtk::spawn_driver(&io);
-    settle();
     entry.connect_changed(clone!(
         #[strong]
         io,
@@ -538,6 +590,7 @@ fn an_echo_is_not_cured_by_waiting() {
     )
     .unwrap()
     .keep();
+    settle(); // the pump registers both listeners
     entry.set_text("hello");
     let first = steps.borrow().len();
     println!("steps when set_text returned: {:?}", steps.borrow());
@@ -551,31 +604,73 @@ fn an_echo_is_not_cured_by_waiting() {
     assert!(last >= 40, "the driver ran the echo on until the cap");
 }
 
-/// The window closes: the owner goes, its drop wakes the driver, and the
-/// driver ends. A handler that runs after it finds the graph gone.
-fn dropping_the_owner_ends_the_driver() {
+/// The window closes and drops the `Driver`: the pumping stops, and the
+/// runtime drops at the main loop's next turn. A call after that finds it
+/// gone.
+fn dropping_the_driver_drops_the_runtime() {
     let (graph, app) = app::build();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let io = graph.io();
+    let driver = bough_gtk::spawn_driver(graph);
+    let label = gtk::Label::new(None);
     let click = gtk::Button::with_label("Click");
-    let _window = window_with(&click);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    column.append(&click);
+    column.append(&label);
+    let _window = window_with(&column);
+    bough_gtk::bind_label(&io, app.counter_label, &label).unwrap();
     let clicked = bough_gtk::sender(&io, app.clicks_in);
     click.connect_clicked(move |_| clicked(()));
-    let ended = Rc::new(StdCell::new(false));
-    let driver = bough_gtk::spawn_driver(&io);
-    glib::spawn_future_local(clone!(
-        #[strong]
-        ended,
-        async move {
-            let _ = driver.await;
-            ended.set(true);
-        }
-    ));
+    click.emit_clicked();
     settle();
-    check("the driver ended while the owner lives", ended.get(), false);
-    drop(owner);
-    click.emit_clicked(); // ignored: the graph is gone
+    check(
+        "the label while the driver runs",
+        label.text().to_string(),
+        "Clicked 1 times".into(),
+    );
+    drop(driver);
+    click.emit_clicked(); // queued, and dropped with the runtime
     settle();
-    check("the driver ended once the owner went", ended.get(), true);
+    check(
+        "the label once the driver went",
+        label.text().to_string(),
+        "Clicked 1 times".into(),
+    );
+    check("a send now", io.send(app.clicks_in, ()), Err(IoError::Gone));
+}
+
+/// A unit the pump drops, here for a double send, is logged, and the
+/// driver pumps again for the call that waited behind it.
+fn a_dropped_unit_is_logged_and_the_rest_runs() {
+    let (graph, app) = app::build();
+    let io = graph.io();
+    let _driver = bough_gtk::spawn_driver(graph);
+    let label = gtk::Label::new(None);
+    let _window = window_with(&label);
+    bough_gtk::bind_label(&io, app.counter_label, &label).unwrap();
+    io.transaction(move |tx| {
+        tx.send(app.clicks_in, ());
+        tx.send(app.clicks_in, ());
+    })
+    .unwrap();
+    bough_gtk::send(&io, app.clicks_in, ());
+    settle();
+    check(
+        "the label",
+        label.text().to_string(),
+        "Clicked 1 times".into(),
+    );
+}
+
+/// In a debug build, a runtime that drops with a kept once-listener still
+/// waiting panics. glib drops the driver's future from C, where a panic
+/// would abort, so the driver catches it and logs it.
+fn a_panic_as_the_runtime_drops_does_not_abort() {
+    let (mut graph, app) = app::build();
+    graph.listen_once(app.opened, |_| ()).keep();
+    let io = graph.io();
+    let driver = bough_gtk::spawn_driver(graph);
+    settle();
+    drop(driver);
+    settle();
     check("a send now", io.send(app.clicks_in, ()), Err(IoError::Gone));
 }

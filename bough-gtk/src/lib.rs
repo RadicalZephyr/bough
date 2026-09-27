@@ -160,10 +160,10 @@ impl Drop for Owned {
 
 /// A factory for a list view whose model holds `T`s as
 /// `glib::BoxedAnyObject`s. `setup` makes a row's widget. `bind` wires it
-/// to its item through the handle, and returns the listeners, which are
+/// to its item through the `Io`, and returns the listeners, which are
 /// dropped when GTK unbinds the row. GTK binds at its own time, often
 /// inside a model change a listener made, which is why registration goes
-/// through the handle.
+/// through the `Io`.
 pub fn list_factory<T, W>(
     io: &Io,
     setup: impl Fn() -> W + 'static,
