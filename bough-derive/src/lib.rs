@@ -1,9 +1,10 @@
 //! Derive macros for bough.
 //!
 //! `#[derive(Trace)]` implements `bough::Trace` for a struct or an enum by
-//! tracing every field, and `#[trace(skip)]` leaves a field out. The `bough`
-//! crate re-exports it with its `derive` feature, so it is written
-//! `#[derive(bough::Trace)]` or, with the trait imported, `#[derive(Trace)]`.
+//! tracing every field, and `#[trace(skip)]` leaves a field out. It refuses
+//! a field whose type names `Anchored`. The `bough` crate re-exports it with
+//! its `derive` feature, so it is written `#[derive(bough::Trace)]` or, with
+//! the trait imported, `#[derive(Trace)]`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as TokenStream2, TokenTree};
@@ -24,6 +25,14 @@ use syn::{Data, DeriveInput, Fields, Ident, parse_macro_input, parse_quote};
 ///
 /// A type parameter that a traced field's type names is bound by `Trace`;
 /// one only skipped fields name is not bound.
+///
+/// A field whose type names `Anchored` is refused, skipped or not. A
+/// `Trace` type mustn't hide a guard: in graph state, an `Anchored`'s root
+/// could keep alive the node that holds it, and that node would never be
+/// freed. `Anchored` isn't `Trace`, so a traced field can't be one anyway,
+/// but `#[trace(skip)]` would hide it. The check goes by name, since a
+/// derive can't see types, so a type alias or a type parameter gets past
+/// it.
 #[proc_macro_derive(Trace, attributes(trace))]
 pub fn derive_trace(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -114,6 +123,7 @@ fn destructure(
         Fields::Named(named) => {
             let mut bound = Vec::new();
             for (i, field) in named.named.iter().enumerate() {
+                refuse_anchored(field)?;
                 if skipped(&field.attrs)? {
                     continue;
                 }
@@ -129,6 +139,7 @@ fn destructure(
         Fields::Unnamed(unnamed) => {
             let mut bound = Vec::new();
             for (i, field) in unnamed.unnamed.iter().enumerate() {
+                refuse_anchored(field)?;
                 if skipped(&field.attrs)? {
                     bound.push(quote! { _ });
                     continue;
@@ -152,6 +163,20 @@ fn visit(binding: &Ident, ty: &syn::Type) -> TokenStream2 {
     quote_spanned! {ty.span()=>
         ::bough::Trace::trace(#binding, tracer);
     }
+}
+
+/// Refuses a field whose type names `Anchored` anywhere, `Anchored<T>`,
+/// `bough::Anchored<T>` or `Vec<Leaf<Anchored<T>>>`, at the field's type.
+fn refuse_anchored(field: &syn::Field) -> syn::Result<()> {
+    let ty = &field.ty;
+    if names(&quote!(#ty), &format_ident!("Anchored")) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "a `Trace` type can't hold an `Anchored`, skipped or not: in graph state, its \
+             root could keep alive the node that holds it. Keep `Anchored` at the edge",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a field carries `#[trace(skip)]`. Any other `trace` attribute is
@@ -181,4 +206,38 @@ fn names(ty: &TokenStream2, param: &Ident) -> bool {
         TokenTree::Group(group) => names(&group.stream(), param),
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand;
+    use syn::{DeriveInput, parse_quote};
+
+    /// The error the derive gives for `input`, if it gives one.
+    fn error(input: DeriveInput) -> Option<String> {
+        expand(input).err().map(|error| error.to_string())
+    }
+
+    #[test]
+    fn a_field_whose_type_names_anchored_is_refused_skipped_or_not() {
+        let refused: [DeriveInput; 5] = [
+            parse_quote! { struct Row { #[trace(skip)] kept: Anchored<Input<u32>> } },
+            parse_quote! { struct Row { kept: Anchored<Input<u32>> } },
+            parse_quote! { struct Rows { rows: Vec<Leaf<Anchored<Input<u32>>>> } },
+            parse_quote! { struct Row(#[trace(skip)] bough::Anchored<Cell<u32>>); },
+            parse_quote! { enum Row { Open { #[trace(skip)] kept: Option<Anchored<Cell<u32>>> }, Shut } },
+        ];
+        for input in refused {
+            let text = error(input).expect("the derive refuses it");
+            assert!(text.contains("can't hold an `Anchored`"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_only_contains_anchored_derives() {
+        let input: DeriveInput = parse_quote! {
+            struct Row { thing: AnchoredThing, #[trace(skip)] others: Vec<Unanchored> }
+        };
+        assert_eq!(error(input), None);
+    }
 }

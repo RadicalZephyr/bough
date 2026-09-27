@@ -73,6 +73,13 @@ impl Tracer {
 /// misses a token only lets the collector free its node early, and the
 /// token's next use is a stale-token error: no memory is touched through a
 /// stale token.
+///
+/// A value also mustn't hide a guard, a [`Listener`](crate::Listener), an
+/// [`Anchor`](crate::Anchor) or an [`Anchored`](crate::Anchored). None of
+/// them is `Trace`, but a [`Leaf`] or a hand-written implementation could
+/// hide one, and in graph state its root could keep alive the node that
+/// holds it: a leak, not unsoundness. Stable Rust can't check that
+/// promise.
 #[cfg_attr(
     feature = "derive",
     doc = r#"
@@ -108,6 +115,21 @@ struct Screen {
 }
 ```
 
+A `Trace` type can't hold an `Anchored`, the guard a row takes to the
+edge, even in a skipped field; that's the common way to hide one. The
+derive goes by name, since it can't see types, so a type alias or a type
+parameter gets past it:
+
+```compile_fail
+use bough::{Anchored, Input, Trace};
+
+#[derive(Trace)]
+struct Row {
+    #[trace(skip)]
+    kept: Anchored<Input<u32>>, // error: a `Trace` type can't hold an `Anchored`
+}
+```
+
 `skip` is the one attribute:
 
 ```compile_fail
@@ -127,8 +149,8 @@ pub trait Trace {
     fn trace(&self, tracer: &mut Tracer);
 }
 
-/// A value of a foreign type that holds no tokens, wrapped so that it can
-/// live in a cell. The orphan rules forbid implementing `Trace` for another
+/// A value of a foreign type that holds no tokens and no guards, wrapped
+/// so that it can live in a cell. The orphan rules forbid implementing `Trace` for another
 /// crate's type, so a bare `tokio::sync::mpsc::Sender` cannot be a cell
 /// value, but `Leaf<Sender>` can: it traces nothing and derefs to the value.
 /// Inside a derived type, `#[trace(skip)]` on the field does the same job.
