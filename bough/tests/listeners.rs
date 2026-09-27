@@ -250,6 +250,59 @@ fn a_tied_listener_s_token_is_checked_when_it_is_tied() {
     assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
 }
 
+/// A shared stream and its input, for the drop checks below.
+fn shared_numbers() -> (Runtime, bough::Input<u32>, bough::Shared<u32>) {
+    let (graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    (graph, numbers_in, numbers)
+}
+
+#[test]
+fn a_kept_once_listener_that_never_fired_is_a_panic_when_its_runtime_drops_in_a_debug_build() {
+    let (mut graph, _numbers_in, numbers) = shared_numbers();
+    graph.listen_once(numbers, |_| ()).keep();
+    let result = catch_unwind(AssertUnwindSafe(move || drop(graph)));
+    if cfg!(debug_assertions) {
+        assert!(panic_text(result).contains("never fired"));
+    } else {
+        assert!(result.is_ok(), "a release build doesn't check");
+    }
+}
+
+#[test]
+fn the_drop_check_skips_what_may_rightly_go_unheard() {
+    let (mut graph, numbers_in, numbers) = shared_numbers();
+    graph.listen_once(numbers, |_| ()).keep();
+    graph.send(numbers_in, 1);
+    graph.listen(numbers, |_| ()).keep();
+    let _held = graph.listen_once(numbers, |_| ());
+    drop(graph.listen_once(numbers, |_| ()));
+    graph.io().listen_once(numbers, |_| ()).unwrap().keep();
+    drop(graph); // fired, not once, held, cancelled, and never registered
+
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let checked = numbers.map(|n| if n == 1 { panic!("graph code") } else { n });
+        (numbers_in, checked.share(b))
+    });
+    let (numbers_in, numbers) = edge.keep();
+    graph.listen_once(numbers, |_| ()).keep();
+    let result = catch_unwind(AssertUnwindSafe(|| graph.send(numbers_in, 1)));
+    assert_eq!(panic_text(result), "graph code");
+    drop(graph); // poisoned
+
+    let (mut graph, _numbers_in, numbers) = shared_numbers();
+    graph.listen_once(numbers, |_| ()).keep();
+    let result = catch_unwind(AssertUnwindSafe(move || {
+        let _graph = graph;
+        panic!("first");
+    }));
+    assert_eq!(panic_text(result), "first", "and no second panic to abort");
+}
+
 #[test]
 fn a_listener_on_a_constant_fires_only_at_registration() {
     let (mut graph, edge) = Runtime::build(|b| {

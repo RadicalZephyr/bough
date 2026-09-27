@@ -368,6 +368,10 @@ pub(crate) struct Entry<M: Mode> {
     pub(crate) flag: Liveness,
     pub(crate) f: M::Carrier,
     pub(crate) call: ListenerCall<M>,
+    /// A once-listener's, for the check a debug build makes when its
+    /// runtime drops.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) once: bool,
 }
 
 impl<M: Mode> Entry<M> {

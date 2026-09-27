@@ -672,7 +672,8 @@ impl<M: Mode> Runtime<M> {
     where
         M: Accepts<F>,
     {
-        self.push_entry(i, <M as Accepts<F>>::erase(Erase::Value(f)), call, flag);
+        let f = <M as Accepts<F>>::erase(Erase::Value(f));
+        self.push_entry(i, f, call, flag, false);
     }
 
     /// Registers a once-listener on node `i`, as [`attach`](Runtime::attach)
@@ -696,13 +697,29 @@ impl<M: Mode> Runtime<M> {
     {
         let mut slot = <M as Accepts<F>>::erase(Erase::Slot);
         *part::<M, Option<F>>(&mut slot) = Some(f);
-        self.push_entry(i, slot, call, flag);
+        self.push_entry(i, slot, call, flag, true);
     }
 
-    /// Adds a listener's entry to node `i`, with its closure erased.
-    fn push_entry(&mut self, i: u32, f: M::Carrier, call: ListenerCall<M>, flag: Liveness) {
+    /// Adds a listener's entry to node `i`, with its closure erased, and
+    /// whether it's a once-listener's.
+    fn push_entry(
+        &mut self,
+        i: u32,
+        f: M::Carrier,
+        call: ListenerCall<M>,
+        flag: Liveness,
+        once: bool,
+    ) {
         let store = &mut self.build.store;
-        store.listeners[i as usize].push(Entry { flag, f, call });
+        store.listeners[i as usize].push(Entry {
+            flag,
+            f,
+            call,
+            #[cfg(all(debug_assertions, feature = "std"))]
+            once,
+        });
+        #[cfg(not(all(debug_assertions, feature = "std")))]
+        let _ = once;
         store.hot[i as usize].flags |= LISTENERS;
     }
 
@@ -1706,6 +1723,35 @@ impl<T> Deref for Anchored<T> {
 impl<T: Clone> Clone for Anchored<T> {
     fn clone(&self) -> Self {
         Anchored::new(self.value.clone(), self.anchor.add_owner())
+    }
+}
+
+/// A debug build checks, as a runtime drops, that no once-listener whose
+/// handle was kept is still waiting to fire: that handle asked for the
+/// event, and gave up the means to let it go unheard. A held handle, or a
+/// runtime dropped while a panic unwinds or after one poisoned it, isn't
+/// checked, nor is one a handle asked for that no pump has registered.
+/// Without `std` there's no way to tell whether a panic is unwinding, so
+/// nothing is checked.
+#[cfg(all(debug_assertions, feature = "std"))]
+impl<M: Mode> Drop for Runtime<M> {
+    fn drop(&mut self) {
+        if std::thread::panicking() || self.build.in_tx {
+            return;
+        }
+        let waiting = self
+            .build
+            .store
+            .listeners
+            .iter()
+            .flatten()
+            .filter(|e| e.once && e.flag.is_live() && !e.flag.is_shared())
+            .count();
+        assert!(
+            waiting == 0,
+            "bough: the runtime dropped with {waiting} once-listener(s) kept but never fired. \
+             Hold the handle of one that may go unheard. A release build doesn't check this"
+        );
     }
 }
 

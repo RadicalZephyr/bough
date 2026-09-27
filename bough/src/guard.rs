@@ -194,6 +194,13 @@ impl Liveness {
         last
     }
 
+    /// Whether a share of the state other than this one is left: for an
+    /// entry, whether its guard is still held rather than kept.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) fn is_shared(&self) -> bool {
+        Ptr::strong_count(&self.0) > 1
+    }
+
     /// A state with no owner, which is never live: the one a runtime's
     /// spent entries share.
     pub(crate) fn ownerless(released: &Released) -> Self {
