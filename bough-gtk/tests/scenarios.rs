@@ -58,8 +58,8 @@ const SCENARIOS: &[(&str, fn())] = &[
         a_dropped_unit_is_logged_and_the_rest_runs,
     ),
     (
-        "a_panic_as_the_runtime_drops_does_not_abort",
-        a_panic_as_the_runtime_drops_does_not_abort,
+        "the_driver_ends_its_runtime_on_purpose",
+        the_driver_ends_its_runtime_on_purpose,
     ),
 ];
 
@@ -662,9 +662,10 @@ fn a_dropped_unit_is_logged_and_the_rest_runs() {
 }
 
 /// In a debug build, a runtime that drops with a kept once-listener still
-/// waiting panics. glib drops the driver's future from C, where a panic
-/// would abort, so the driver catches it and logs it.
-fn a_panic_as_the_runtime_drops_does_not_abort() {
+/// waiting panics, and glib drops the driver's future from C, where that
+/// panic would abort. An app may close with one waiting, so the driver
+/// ends its runtime on purpose, with `shutdown`, which skips the check.
+fn the_driver_ends_its_runtime_on_purpose() {
     let (mut graph, app) = app::build();
     graph.listen_once(app.opened, |_| ()).keep();
     let io = graph.io();

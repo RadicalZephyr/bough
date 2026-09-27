@@ -69,8 +69,9 @@ the scenarios whose names contain it: `cargo test -- entry`.
   loop's next turn, and later calls find it gone.
 - A unit the pump drops is logged, and the driver pumps again for what
   waited behind it.
-- A runtime that panics as it drops, as a debug build's check for a kept
-  once-listener does, doesn't abort: the driver catches it.
+- The driver ends its runtime on purpose, with `shutdown`, so a kept
+  once-listener still waiting doesn't set off a debug build's check. Its
+  panic would abort, since glib drops the runtime from C.
 - Waiting does not cure an echo. A two-way binding that does not block
   its own handler flips between "HELLO" and "" at every turn of the main
   loop, without an abort and without settling. `bind_entry` blocks the

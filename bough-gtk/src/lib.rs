@@ -15,7 +15,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::poll_fn;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::task::Poll;
 
@@ -109,10 +108,10 @@ where
 /// drops a unit is logged, and the driver pumps again for the rest. A
 /// poisoned runtime ends it.
 ///
-/// Dropping the `Driver` stops the pumping at once. The runtime drops with
-/// the future at the main loop's next turn, and from then on a call
-/// through an `Io` reports [`IoError::Gone`]. `tie(&window, driver)` ends
-/// it with the window.
+/// Dropping the `Driver` stops the pumping at once. The runtime ends with
+/// the future at the main loop's next turn, on purpose, with
+/// [`Runtime::shutdown`], and from then on a call through an `Io` reports
+/// [`IoError::Gone`]. `tie(&window, driver)` ends it with the window.
 #[must_use = "dropping the driver stops it"]
 pub struct Driver(glib::JoinHandle<()>);
 
@@ -143,17 +142,16 @@ pub fn spawn_driver(runtime: Runtime) -> Driver {
     })))
 }
 
-/// The runtime inside the driver's future. glib drops the future from the
-/// main loop, where a panic aborts, and a debug build's check as a runtime
-/// drops can panic, so this drop catches it. The panic hook has printed
-/// it by then.
+/// The runtime inside the driver's future. An app may close with a request
+/// still out, and a debug build's check for one panics as a runtime drops.
+/// glib drops the future from C, where that panic would abort, so this
+/// ends the runtime on purpose, with [`Runtime::shutdown`].
 struct Owned(Option<Runtime>);
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        let runtime = self.0.take();
-        if catch_unwind(AssertUnwindSafe(move || drop(runtime))).is_err() {
-            glib::g_critical!("bough-gtk", "the runtime panicked as it dropped");
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown();
         }
     }
 }
