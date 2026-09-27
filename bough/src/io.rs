@@ -65,6 +65,10 @@ pub(crate) struct Waiting<C> {
     /// When the call was made, among both handles' calls. Taken as the call
     /// is queued.
     pub(crate) stamp: usize,
+    /// A once-listener's registration, for the check a debug build makes
+    /// as its runtime drops. It exists only where the check does.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    once: bool,
 }
 
 impl<C> Waiting<C> {
@@ -75,7 +79,35 @@ impl<C> Waiting<C> {
             roots,
             guard,
             stamp: 0,
+            #[cfg(all(debug_assertions, feature = "std"))]
+            once: false,
         }
+    }
+
+    /// Marks a once-listener's registration, if `once`, where a debug build
+    /// with `std` checks for one as its runtime drops.
+    #[inline]
+    pub(crate) fn once_if(self, once: bool) -> Self {
+        #[cfg(all(debug_assertions, feature = "std"))]
+        {
+            Waiting { once, ..self }
+        }
+        #[cfg(not(all(debug_assertions, feature = "std")))]
+        {
+            let _ = once;
+            self
+        }
+    }
+
+    /// Whether this is a once-listener's registration whose handle was
+    /// kept: live, with only the two shares the call and its closure hold.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) fn kept_once(&self) -> bool {
+        self.once
+            && self
+                .guard
+                .as_ref()
+                .is_some_and(|flag| flag.is_live() && flag.shares() == 2)
     }
 
     /// Adds to `roots` the tokens this call keeps alive: none once a
@@ -110,6 +142,10 @@ pub trait IoQueue<M: Mode>: 'static {
     /// Adds to `roots` the tokens the waiting registrations name, but none
     /// of one whose guard has gone.
     fn roots(&self, roots: &mut Vec<Token>);
+    /// How many once-listener registrations wait whose handles were kept,
+    /// for the check a debug build makes as its runtime drops.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    fn kept_once(&self) -> usize;
 }
 
 /// What a `Local` runtime shares with its [`Io`]s.
@@ -203,6 +239,15 @@ impl IoQueue<Local> for Rc<IoState> {
             waiting.roots(roots);
         }
     }
+
+    #[cfg(all(debug_assertions, feature = "std"))]
+    fn kept_once(&self) -> usize {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|waiting| waiting.kept_once())
+            .count()
+    }
 }
 
 /// A `Threaded` runtime has no [`Io`], so nothing waits.
@@ -229,6 +274,10 @@ impl IoQueue<Threaded> for NoIo {
         None
     }
     fn roots(&self, _: &mut Vec<Token>) {}
+    #[cfg(all(debug_assertions, feature = "std"))]
+    fn kept_once(&self) -> usize {
+        0
+    }
 }
 
 /// A handle for I/O code that can't hold the runtime: a GTK signal
@@ -344,6 +393,7 @@ impl Io {
     {
         let flag = self.register(
             Roots::One(source.node_token()),
+            false,
             move |runtime, skip_stale, flag| runtime.listen_queued(skip_stale, flag, source, f),
         )?;
         Ok(Listener::new(Some(flag)))
@@ -360,6 +410,7 @@ impl Io {
     {
         let flag = self.register(
             Roots::One(cell.token()),
+            false,
             move |runtime, skip_stale, flag| runtime.listen_cell_queued(skip_stale, flag, cell, f),
         )?;
         Ok(Listener::new(Some(flag)))
@@ -375,6 +426,7 @@ impl Io {
     {
         let flag = self.register(
             Roots::One(cell.token()),
+            false,
             move |runtime, skip_stale, flag| runtime.listen_steps_queued(skip_stale, flag, cell, f),
         )?;
         Ok(Listener::new(Some(flag)))
@@ -392,6 +444,7 @@ impl Io {
     {
         let flag = self.register(
             Roots::One(source.node_token()),
+            true,
             move |runtime, skip_stale, flag| {
                 runtime.listen_once_queued(skip_stale, flag, source, f)
             },
@@ -411,6 +464,7 @@ impl Io {
     {
         let flag = self.register(
             Roots::One(cell.token()),
+            true,
             move |runtime, skip_stale, flag| {
                 runtime.listen_cell_once_queued(skip_stale, flag, cell, f)
             },
@@ -430,6 +484,7 @@ impl Io {
         let tokens = tracer.visited;
         let flag = self.register(
             Roots::Many(tokens.clone()),
+            false,
             move |runtime, skip_stale, flag| runtime.anchor_queued(skip_stale, flag, tokens),
         )?;
         Ok(Anchored::new(value, Anchor::new(Some(flag))))
@@ -472,10 +527,12 @@ impl Io {
 
     /// Makes the liveness a guard shares with its registration, and queues
     /// the registration, which keeps `roots` alive while it waits and the
-    /// guard lives. The pump skips it if the guard has gone.
+    /// guard lives. The pump skips it if the guard has gone. `once` marks a
+    /// once-listener's.
     fn register(
         &self,
         roots: Roots,
+        once: bool,
         register: impl FnOnce(&mut Runtime<Local>, bool, Liveness) -> Result<(), Stop> + 'static,
     ) -> Result<Liveness, IoError> {
         let state = self.state(roots.as_slice())?;
@@ -483,11 +540,12 @@ impl Io {
         let shared = flag.clone();
         push(
             &state,
-            Waiting::new(
+            Waiting::<Call<Local>>::new(
                 Box::new(move |runtime, skip_stale| register(runtime, skip_stale, shared)),
                 roots,
                 Some(flag.clone()),
-            ),
+            )
+            .once_if(once),
         );
         Ok(flag)
     }

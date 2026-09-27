@@ -201,6 +201,13 @@ impl Liveness {
         Ptr::strong_count(&self.0) > 1
     }
 
+    /// How many shares of the state there are. A waiting registration's
+    /// call and closure hold two, and its handle a third, unless kept.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) fn shares(&self) -> usize {
+        Ptr::strong_count(&self.0)
+    }
+
     /// A state with no owner, which is never live: the one a runtime's
     /// spent entries share.
     pub(crate) fn ownerless(released: &Released) -> Self {

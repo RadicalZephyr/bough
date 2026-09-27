@@ -282,8 +282,11 @@ fn the_drop_check_skips_what_may_rightly_go_unheard() {
     graph.listen(numbers, |_| ()).keep();
     let _held = graph.listen_once(numbers, |_| ());
     drop(graph.listen_once(numbers, |_| ()));
-    graph.io().listen_once(numbers, |_| ()).unwrap().keep();
-    drop(graph); // fired, not once, held, cancelled, and never registered
+    let io = graph.io();
+    let _held_waiting = io.listen_once(numbers, |_| ()).unwrap();
+    drop(io.listen_once(numbers, |_| ()).unwrap());
+    io.listen(numbers, |_| ()).unwrap().keep();
+    drop(graph); // fired, not once, held and cancelled, registered or waiting
 
     let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
@@ -303,6 +306,51 @@ fn the_drop_check_skips_what_may_rightly_go_unheard() {
         panic!("first");
     }));
     assert_eq!(panic_text(result), "first", "and no second panic to abort");
+}
+
+/// A once-listener a handle asked for is waiting from the call on. So one
+/// whose handle was kept, with no pump to register it, is a panic as its
+/// runtime drops in a debug build, whichever handle asked, stream or cell.
+#[test]
+fn a_kept_once_listener_a_handle_asked_for_panics_as_its_runtime_drops_unpumped() {
+    type Ask = fn(&Runtime, bough::Shared<u32>, bough::Cell<u32>);
+    let ways: [(&str, Ask); 4] = [
+        ("Io::listen_once", |graph, numbers, _| {
+            graph.io().listen_once(numbers, |_| ()).unwrap().keep()
+        }),
+        ("Io::listen_cell_once", |graph, _, total| {
+            graph.io().listen_cell_once(total, |_| ()).unwrap().keep()
+        }),
+        ("RemoteIo::listen_once", |graph, numbers, _| {
+            graph
+                .remote_io()
+                .listen_once(numbers, |_| ())
+                .unwrap()
+                .keep()
+        }),
+        ("RemoteIo::listen_cell_once", |graph, _, total| {
+            graph
+                .remote_io()
+                .listen_cell_once(total, |_| ())
+                .unwrap()
+                .keep()
+        }),
+    ];
+    for (way, ask) in ways {
+        let (graph, edge) = Runtime::build(|b| {
+            let (numbers, _numbers_in) = b.input::<u32>();
+            let numbers = numbers.share(b);
+            (numbers, numbers.hold(b, 0u32))
+        });
+        let (numbers, total) = edge.keep();
+        ask(&graph, numbers, total);
+        let result = catch_unwind(AssertUnwindSafe(move || drop(graph)));
+        if cfg!(debug_assertions) {
+            assert!(panic_text(result).contains("never fired"), "{way}");
+        } else {
+            assert!(result.is_ok(), "{way}: a release build doesn't check");
+        }
+    }
 }
 
 #[test]

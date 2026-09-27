@@ -362,6 +362,14 @@ impl Inbox {
         });
     }
 
+    /// How many once-listener registrations wait whose handles were kept,
+    /// for the check a debug build makes as its runtime drops.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) fn kept_once(&self) -> usize {
+        self.state
+            .with(|q| q.calls.iter().filter(|waiting| waiting.kept_once()).count())
+    }
+
     /// Replaces the waker a push wakes. The next call wakes the new one.
     pub(crate) fn set_waker(&self, waker: Waker) {
         let old = self.state.with(|q| {

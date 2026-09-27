@@ -1785,8 +1785,10 @@ impl<T: Clone> Clone for Anchored<T> {
 /// handle was kept is still waiting to fire: that handle asked for the
 /// event, and gave up the means to let it go unheard. A held handle, or a
 /// runtime dropped while a panic unwinds or after one poisoned it, isn't
-/// checked, nor is one a handle asked for that no pump has registered.
-/// Nor is a runtime ended on purpose, with [`shutdown`](Runtime::shutdown).
+/// checked, nor is a runtime ended on purpose, with
+/// [`shutdown`](Runtime::shutdown). A once-listener a handle asked for is
+/// waiting from the call on, so one still in either handle's queue counts
+/// too.
 /// Without `std` there's no way to tell whether a panic is unwinding, so
 /// nothing is checked.
 #[cfg(all(debug_assertions, feature = "std"))]
@@ -1802,7 +1804,10 @@ impl<M: Mode> Drop for Runtime<M> {
             .iter()
             .flatten()
             .filter(|e| e.once && e.flag.is_live() && !e.flag.is_shared())
-            .count();
+            .count()
+            + self.build.io.kept_once();
+        #[cfg(target_has_atomic = "ptr")]
+        let waiting = waiting + self.build.edge.inbox.kept_once();
         assert!(
             waiting == 0,
             "bough: the runtime dropped with {waiting} once-listener(s) kept but never fired. \
@@ -1955,7 +1960,7 @@ impl RemoteIo {
         F: FnMut(S::Event) + Send + 'static,
     {
         let token = source.node_token();
-        let flag = self.register(Roots::One(token), |flag| Listen { flag, source, f })?;
+        let flag = self.register(Roots::One(token), false, |flag| Listen { flag, source, f })?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -1967,7 +1972,7 @@ impl RemoteIo {
         F: FnMut(&C::Value) + Send + 'static,
     {
         let token = cell.token();
-        let flag = self.register(Roots::One(token), |flag| ListenCell {
+        let flag = self.register(Roots::One(token), false, |flag| ListenCell {
             flag,
             cell,
             f,
@@ -1983,7 +1988,7 @@ impl RemoteIo {
         F: FnMut(&C::Value) + Send + 'static,
     {
         let token = cell.token();
-        let flag = self.register(Roots::One(token), |flag| ListenCell {
+        let flag = self.register(Roots::One(token), false, |flag| ListenCell {
             flag,
             cell,
             f,
@@ -2001,7 +2006,11 @@ impl RemoteIo {
         F: FnOnce(S::Event) + Send + 'static,
     {
         let token = source.node_token();
-        let flag = self.register(Roots::One(token), |flag| ListenOnce { flag, source, f })?;
+        let flag = self.register(Roots::One(token), true, |flag| ListenOnce {
+            flag,
+            source,
+            f,
+        })?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -2013,7 +2022,11 @@ impl RemoteIo {
         F: FnOnce(&C::Value) + Send + 'static,
     {
         let token = cell.token();
-        let flag = self.register(Roots::One(token), |flag| ListenCellOnce { flag, cell, f })?;
+        let flag = self.register(Roots::One(token), true, |flag| ListenCellOnce {
+            flag,
+            cell,
+            f,
+        })?;
         Ok(Listener::new(Some(flag)))
     }
 
@@ -2026,7 +2039,7 @@ impl RemoteIo {
         value.trace(&mut tracer);
         let tokens = tracer.visited;
         let roots = Roots::Many(tokens.clone());
-        let flag = self.register(roots, |flag| AnchorTokens { flag, tokens })?;
+        let flag = self.register(roots, false, |flag| AnchorTokens { flag, tokens })?;
         Ok(Anchored::new(value, Anchor::new(Some(flag))))
     }
 
@@ -2060,10 +2073,11 @@ impl RemoteIo {
 
     /// Makes the liveness a guard shares with its registration, and queues
     /// the registration `make` builds with it. The pump skips it if the
-    /// guard has gone.
+    /// guard has gone. `once` marks a once-listener's.
     fn register<R: Registration + 'static>(
         &self,
         roots: Roots,
+        once: bool,
         make: impl FnOnce(Liveness) -> R,
     ) -> Result<Liveness, IoError> {
         self.check(roots.as_slice())?;
@@ -2073,7 +2087,8 @@ impl RemoteIo {
             RemoteCall::Register(registration),
             roots,
             Some(flag.clone()),
-        );
+        )
+        .once_if(once);
         self.inbox.push(waiting).map_err(|_| IoError::Gone)?;
         Ok(flag)
     }
