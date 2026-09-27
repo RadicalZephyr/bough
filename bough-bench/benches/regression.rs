@@ -4,9 +4,8 @@
 //! head commit, so the second run is compared against the first and fails on a
 //! regression beyond the configured limit.
 
-use iai_callgrind::{
-    EventKind, LibraryBenchmarkConfig, RegressionConfig, library_benchmark,
-    library_benchmark_group, main,
+use gungraun::{
+    Callgrind, EventKind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
 use std::hint::black_box;
 
@@ -48,6 +47,6 @@ library_benchmark_group!(name = shapes; benchmarks = shallow, frame, fan_out);
 
 main!(
     config = LibraryBenchmarkConfig::default()
-        .regression(RegressionConfig::default().limits([(EventKind::Ir, 5.0)]).fail_fast(true));
+        .tool(Callgrind::default().soft_limits([(EventKind::Ir, 5.0)]).fail_fast(true));
     library_benchmark_groups = shapes
 );

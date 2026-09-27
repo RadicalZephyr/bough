@@ -14,7 +14,7 @@ bough.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-iai-callgrind.workspace = true
+gungraun.workspace = true
 
 # Wall-clock, run by hand: the factor-three bar against the imperative baselines.
 [[bench]]
