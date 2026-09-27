@@ -98,7 +98,8 @@ use count::{Count, Ptr};
 /// A runtime's count of released guards, which every guard's state shares.
 /// It only grows, and wraps.
 #[derive(Clone)]
-pub(crate) struct Released(Ptr<Count>);
+#[doc(hidden)]
+pub struct Released(Ptr<Count>);
 
 impl Released {
     #[inline]
@@ -118,7 +119,8 @@ impl Released {
 /// grows, and wraps. A remote call takes its stamp under the inbox's lock,
 /// so the inbox is in stamp order too.
 #[derive(Clone)]
-pub(crate) struct Stamps(Ptr<Count>);
+#[doc(hidden)]
+pub struct Stamps(Ptr<Count>);
 
 impl Stamps {
     pub(crate) fn new() -> Self {
