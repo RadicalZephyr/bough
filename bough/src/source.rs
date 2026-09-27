@@ -57,8 +57,10 @@ use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
 use crate::engine::nodes::construct::ConstructNode;
 use crate::engine::nodes::split::{DeferNode, SplitNode};
-use crate::engine::nodes::stream::{ChainNode, MergeNode, SlotNode};
-use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps};
+use crate::engine::nodes::stream::{
+    ChainNode, FirstHalf, MergeNode, SecondHalf, SlotNode, UnzipNode,
+};
+use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps, Ops};
 use crate::mode::{Accepts, Erase, Mode};
 use crate::token::{Cell, Shared, State, Stream, Token};
 use crate::trace::{Trace, Tracer};
@@ -357,6 +359,49 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Self::Event: 'static,
     {
         Stream::from_token(chain_node(self, build))
+    }
+
+    /// Splits a stream of pairs into two linear streams, without cloning
+    /// either half: each pair's halves move apart, the first into one
+    /// stream and the second into the other, in the same instant. It
+    /// denotes two maps, one taking each half.
+    ///
+    /// It's the `Clone`-free way to give a pair's halves different
+    /// consumers. A `construct` can make a screen and its input together,
+    /// and then the screens go into a hold for a `switch_stream`, and the
+    /// inputs go out to I/O code, anchored (RFD 4). Each half is a node, as
+    /// [`node`](Source::node) makes, with one consumer.
+    ///
+    /// Each pair waits in a node's slot for its halves to be taken, so the
+    /// mode must accept both; a `Threaded` graph refuses a pair holding an
+    /// `Rc`:
+    ///
+    /// ```compile_fail,E0277
+    /// use bough::{Runtime, Source};
+    /// use std::rc::Rc;
+    ///
+    /// let (_graph, edge) = Runtime::build_threaded(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _halves = numbers.map(|n| (Rc::new(n), n)).unzip(b); // error: Rc is not Send
+    /// });
+    /// edge.keep();
+    /// ```
+    fn unzip<M, A, B>(self, build: &mut Build<M>) -> (Stream<A>, Stream<B>)
+    where
+        Self: Source<Event = (A, B)>,
+        M: Mode + Accepts<Self> + Accepts<(Option<A>, Option<B>)> + Accepts<A> + Accepts<B>,
+        A: 'static,
+        B: 'static,
+    {
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Slot(<M as Accepts<(Option<A>, Option<B>)>>::erase(Erase::Slot));
+        let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<Self>>::erase(Erase::Value(self))]);
+        let ops = &<UnzipNode<Self, A, B> as NodeOps<M>>::OPS;
+        let pairs = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
+        build.set_reach(pairs, cells);
+        let first = half_node::<M, A>(build, pairs, &<FirstHalf<A, B> as NodeOps<M>>::OPS);
+        let second = half_node::<M, B>(build, pairs, &<SecondHalf<A, B> as NodeOps<M>>::OPS);
+        (Stream::from_token(first), Stream::from_token(second))
     }
 
     /// Merges two streams; `f` combines simultaneous events, with this
@@ -665,6 +710,18 @@ where
     let ops = &<ChainNode<S> as NodeOps<M>>::OPS;
     let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
     build.set_reach(n, cells);
+    build.token(n)
+}
+
+/// One of `unzip`'s halves: a stream node whose slot holds `H`s, with no
+/// parts, which depends on the pairs node and takes its half from there.
+fn half_node<M, H>(build: &mut Build<M>, pairs: u32, ops: &'static Ops<M>) -> Token
+where
+    M: Mode + Accepts<H>,
+    H: 'static,
+{
+    let data = Data::Slot(<M as Accepts<H>>::erase(Erase::Slot));
+    let n = build.materialize(Kind::Stream, data, Box::new([]), ops, &[pairs], 0);
     build.token(n)
 }
 

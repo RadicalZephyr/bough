@@ -57,6 +57,23 @@ impl<M: Mode> Build<M> {
         slot::<M, A>(&self.store.data[i as usize]).clone()
     }
 
+    /// A half of `unzip`'s pair, for the half node `me`: takes it out of the
+    /// slot of the pairs node `me` depends on, and leaves the other half for
+    /// the other node, if the pairs fired in this instant.
+    pub(crate) fn take_half<A: 'static, B: 'static, H>(
+        &mut self,
+        me: u32,
+        half: impl FnOnce(&mut (Option<A>, Option<B>)) -> Option<H>,
+    ) -> Option<H> {
+        let pairs = self.store.relations[me as usize].deps[0] as usize;
+        if self.store.hot[pairs].fired != self.tx {
+            return None;
+        }
+        slot_mut::<M, (Option<A>, Option<B>)>(&mut self.store.data[pairs])
+            .as_mut()
+            .and_then(half)
+    }
+
     /// A stream node fires: its event goes in its slot.
     pub(crate) fn put_event<A: 'static>(&mut self, me: u32, v: A) {
         *slot_mut::<M, A>(&mut self.store.data[me as usize]) = Some(v);
