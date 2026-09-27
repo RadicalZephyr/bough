@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{Listener, PoisonedError, Runtime, SendError, Source, TokenError, Trace, Tracer};
+use bough::{
+    IoError, Listener, PoisonedError, Runtime, SendError, Source, TokenError, Trace, Tracer,
+};
 
 /// A shared log and a closure that appends to it.
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
@@ -301,6 +303,15 @@ fn the_drop_check_skips_what_may_rightly_go_unheard() {
         panic!("first");
     }));
     assert_eq!(panic_text(result), "first", "and no second panic to abort");
+}
+
+#[test]
+fn shutdown_ends_a_runtime_on_purpose_without_the_drop_check() {
+    let (mut graph, numbers_in, numbers) = shared_numbers();
+    let io = graph.io();
+    graph.listen_once(numbers, |_| ()).keep();
+    graph.shutdown();
+    assert_eq!(io.send(numbers_in, 1), Err(IoError::Gone));
 }
 
 #[test]

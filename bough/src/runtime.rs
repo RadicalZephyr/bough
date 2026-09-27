@@ -102,6 +102,9 @@ pub struct Runtime<M: Mode = Local> {
     stress: bool,
     /// Operations on collected nodes dropped in release builds.
     stale_operations: u64,
+    /// Set by `shutdown`, so the check as the runtime drops is skipped.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    shut_down: bool,
 }
 
 /// Transaction zero: nothing is started, so the new-node phase runs every
@@ -128,6 +131,8 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
         policy: CollectionPolicy::Automatic,
         stress: false,
         stale_operations: 0,
+        #[cfg(all(debug_assertions, feature = "std"))]
+        shut_down: false,
     };
     // Transaction zero is a unit like any other: a collection that is due
     // runs after it, and frees what the build made that nothing reaches.
@@ -1398,6 +1403,22 @@ impl<M: Mode> Runtime<M> {
             inbox: self.build.edge.inbox.clone(),
         }
     }
+
+    /// Ends the runtime on purpose: drops it without the check a debug
+    /// build makes as a runtime drops, for once-listeners kept but never
+    /// fired. A host calls this when its app closes, which may leave a
+    /// request unanswered. A runtime that just goes out of scope, as in a
+    /// test, is checked. Calls through its handles say
+    /// [`Gone`](IoError::Gone) from then on.
+    pub fn shutdown(self) {
+        // It drops as this returns; where the check exists, it's marked
+        // first.
+        #[cfg(all(debug_assertions, feature = "std"))]
+        {
+            let mut runtime = self;
+            runtime.shut_down = true;
+        }
+    }
 }
 
 /// When collection runs. It never runs inside a transaction.
@@ -1731,12 +1752,13 @@ impl<T: Clone> Clone for Anchored<T> {
 /// event, and gave up the means to let it go unheard. A held handle, or a
 /// runtime dropped while a panic unwinds or after one poisoned it, isn't
 /// checked, nor is one a handle asked for that no pump has registered.
+/// Nor is a runtime ended on purpose, with [`shutdown`](Runtime::shutdown).
 /// Without `std` there's no way to tell whether a panic is unwinding, so
 /// nothing is checked.
 #[cfg(all(debug_assertions, feature = "std"))]
 impl<M: Mode> Drop for Runtime<M> {
     fn drop(&mut self) {
-        if std::thread::panicking() || self.build.in_tx {
+        if std::thread::panicking() || self.build.in_tx || self.shut_down {
             return;
         }
         let waiting = self
@@ -1750,7 +1772,8 @@ impl<M: Mode> Drop for Runtime<M> {
         assert!(
             waiting == 0,
             "bough: the runtime dropped with {waiting} once-listener(s) kept but never fired. \
-             Hold the handle of one that may go unheard. A release build doesn't check this"
+             Hold the handle of one that may go unheard, or end the runtime with `shutdown`. \
+             A release build doesn't check this"
         );
     }
 }
