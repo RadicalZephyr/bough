@@ -257,7 +257,7 @@ fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
             }
         })
         .keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let (ada, ada_inbox) = mpsc::channel();
     let (bo, bo_inbox) = mpsc::channel();
     graph.send(joins, ("ada".to_string(), ada));

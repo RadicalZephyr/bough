@@ -490,7 +490,7 @@ fn rows_one_pump_opens() {
         (open_in, opened)
     });
     let (open_in, opened) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let remote = graph.remote_io();
     let io = graph.io();
     let list = gtk::Box::new(gtk::Orientation::Vertical, 4);

@@ -4,7 +4,7 @@
 //! Every program runs in both modes, `Local` and `Threaded`: plainly, under
 //! three shuffle seeds, and with the sends of each transaction permuted
 //! under two seeds, a coalescing input's own sends keeping their order; and
-//! once more collecting as every transaction opens, the collector's stress
+//! once more collecting after every unit, the collector's stress
 //! setting, so that the memory model is held to the oracle too: a node the
 //! program still needs that no root reaches would be collected, and its
 //! next use would panic on a stale token.
@@ -116,8 +116,8 @@ const ENGINES: [Engine; 2] = [
 ];
 
 /// The runs of every program: plain, three shuffle seeds, two permutations
-/// of the sends, one of them under a shuffle too, and one that collects as
-/// every transaction opens.
+/// of the sends, one of them under a shuffle too, and one that collects
+/// after every unit.
 fn runs(seed: u64) -> Vec<RunOptions> {
     let mix = |k: u64| seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(k);
     let shuffled = |k: u64| RunOptions {
@@ -138,7 +138,7 @@ fn runs(seed: u64) -> Vec<RunOptions> {
             ..shuffled(5)
         },
         RunOptions {
-            collect_every_transaction: true,
+            collect_every_unit: true,
             ..RunOptions::default()
         },
     ]
@@ -4061,9 +4061,9 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
     let threaded = bough_oracle::run::<Threaded>(&switches, RunOptions::default()).unwrap();
     assert_eq!(threaded.observations, run.observations);
     // A candidate no selection has reached yet lives only by the builder's
-    // depends declarations; collecting at every transaction shows it.
+    // depends declarations; collecting after every unit shows it.
     let collecting = RunOptions {
-        collect_every_transaction: true,
+        collect_every_unit: true,
         ..RunOptions::default()
     };
     for collected in [
@@ -4442,10 +4442,10 @@ fn the_builder_builds_constructs_as_a_user_writes_them() {
         stream(vec![vec![1], vec![3], vec![8], vec![12], vec![14]]),
     ];
     assert_eq!(run.observations, expected);
-    // Every capture is declared, so collecting as every transaction opens
+    // Every capture is declared, so collecting after every unit
     // changes nothing, in either mode.
     let collecting = RunOptions {
-        collect_every_transaction: true,
+        collect_every_unit: true,
         ..RunOptions::default()
     };
     for run in [

@@ -3684,12 +3684,12 @@ pub struct RunOptions {
     /// sends keep their order, so a coalescing input folds the same values
     /// in the same order. `None` sends in the schedule's order.
     pub permute_sends: Option<u64>,
-    /// `Runtime::set_collect_after_every_transaction`, set before the first
-    /// transaction: collection runs as every transaction opens, not when
-    /// the automatic policy chooses, so that a node the program still
-    /// needs that no root reaches is collected at once, and its next use
-    /// panics on a stale token.
-    pub collect_every_transaction: bool,
+    /// `Runtime::set_collect_after_every_unit`, set before the first
+    /// transaction: collection runs after every unit, not when the automatic
+    /// policy chooses, so that a node the program still needs that no root
+    /// reaches is collected at once, and its next use panics on a stale
+    /// token.
+    pub collect_every_unit: bool,
 }
 
 impl fmt::Display for RunOptions {
@@ -3702,8 +3702,8 @@ impl fmt::Display for RunOptions {
             None => formatter.write_str(", sends as scheduled")?,
             Some(seed) => write!(formatter, ", sends permuted with seed {seed}")?,
         }
-        if self.collect_every_transaction {
-            formatter.write_str(", collecting as every transaction opens")?;
+        if self.collect_every_unit {
+            formatter.write_str(", collecting after every unit")?;
         }
         Ok(())
     }
@@ -4112,7 +4112,7 @@ pub fn refusal<M: EngineMode>(
         Err(payload) => return Ok(Refusal::Build(panic_message(payload))),
     };
     graph.set_shuffle_seed(options.shuffle_seed);
-    graph.set_collect_after_every_transaction(options.collect_every_transaction);
+    graph.set_collect_after_every_unit(options.collect_every_unit);
     for (k, sends) in program.schedule.iter().enumerate() {
         let order = engine_sends(
             sends,
@@ -4267,7 +4267,7 @@ fn execute<M: EngineMode>(
     let (mut graph, edge) = M::build(|b| build_program(b, program, &checked, slot));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
-    graph.set_collect_after_every_transaction(options.collect_every_transaction);
+    graph.set_collect_after_every_unit(options.collect_every_unit);
     let log = Log::default();
     let mut listeners = Vec::new();
     let mut recorders: Vec<Recorder> = edge

@@ -262,9 +262,9 @@ macro_rules! smoke_graph {
         if let Ok(kept) = kept {
             kept.keep();
         }
-        graph.set_collect_after_every_transaction(true);
+        graph.set_collect_after_every_unit(true);
         let _ = graph.try_collect_garbage();
-        graph.set_collect_after_every_transaction(false);
+        graph.set_collect_after_every_unit(false);
         graph.set_collection_policy(CollectionPolicy::Automatic);
         let collected =
             graph.stale_operations() as u32 + *graph.sample(chosen_length) - length_before;

@@ -899,7 +899,7 @@ type Row = (Input<u32>, Cell<u32>);
 
 /// Opens a row in a `Threaded` runtime, hands it to `on_row` in a listener,
 /// with a `RemoteIo`, and returns it once its unit has run. The runtime
-/// collects after every transaction, so a row nothing keeps is gone by then.
+/// collects after every unit, so a row nothing keeps is gone by then.
 fn open_a_row(
     mut on_row: impl FnMut(&RemoteIo, Row) + Send + 'static,
 ) -> (Runtime<bough::Threaded>, Row) {
@@ -912,7 +912,7 @@ fn open_a_row(
         (open_in, rows)
     });
     let (open_in, rows) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let remote = graph.remote_io();
     let seen = Arc::new(Mutex::new(None));
     let sink = seen.clone();

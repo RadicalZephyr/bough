@@ -100,7 +100,7 @@ pub struct Runtime<M: Mode = Local> {
     /// Live nodes after the last collection, zero before the first.
     baseline: usize,
     policy: CollectionPolicy,
-    /// `set_collect_after_every_transaction`.
+    /// `set_collect_after_every_unit`.
     stress: bool,
     /// Operations on collected nodes dropped in release builds.
     stale_operations: u64,
@@ -1086,16 +1086,18 @@ impl<M: Mode> Runtime<M> {
         self.policy = policy;
     }
 
-    /// With `true`, collects after every transaction, whatever the policy,
-    /// so that a closure capture that should have been declared with
+    /// With `true`, collects after every unit, whatever the policy, so that
+    /// a closure capture that should have been declared with
     /// [`depends`](crate::Build::depends), or a token that left a transaction
     /// without an anchor, is a stale-token error the first time the code
     /// runs rather than whenever the automatic policy happens to collect. A
-    /// test setting: a transaction then costs a collection.
+    /// test setting: a unit then costs a collection.
     ///
-    /// The collection runs after the whole unit, its children and listeners
-    /// included, and never inside it.
-    pub fn set_collect_after_every_transaction(&mut self, enabled: bool) {
+    /// A unit is a transaction with its children and listeners, however it
+    /// started: a send or a transaction on the runtime, a slot's drain, or a
+    /// queued call. The collection runs after the whole of it, never inside
+    /// it.
+    pub fn set_collect_after_every_unit(&mut self, enabled: bool) {
         self.stress = enabled;
     }
 

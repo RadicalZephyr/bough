@@ -117,7 +117,7 @@ impl<M: Mode> Build<M> {
     ///     (open_in, opened)
     /// });
     /// let (open_in, opened) = edge.keep();
-    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// graph.set_collect_after_every_unit(true); // a test setting
     /// let received = Rc::new(RefCell::new(Vec::new()));
     /// let log = received.clone();
     /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
@@ -407,7 +407,7 @@ impl<M: Mode> Build<M> {
     ///     (pick_in, language.switch_cell(b))
     /// });
     /// let (pick_in, shown) = edge.keep();
-    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// graph.set_collect_after_every_unit(true); // a test setting
     /// graph.send(pick_in, true);
     /// assert_eq!(graph.sample(shown), "bonjour");
     /// ```

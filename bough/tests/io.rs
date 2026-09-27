@@ -408,7 +408,7 @@ fn open_a_row(mut on_row: impl FnMut(&Io, Row) + 'static) -> (Runtime, Row) {
         (open_in, rows)
     });
     let (open_in, rows) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let io = graph.io();
     let seen = Rc::new(RefCell::new(None));
     let sink = seen.clone();

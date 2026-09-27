@@ -526,7 +526,7 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
 /// A deselected inner that something still names is alive, so it keeps
 /// accumulating and is observed again when reselected (RFD 3). Three
 /// counters, named by a constant's value that a snapshot selects from, so
-/// no closure captures them; a collection runs after every transaction,
+/// no closure captures them; a collection runs after every unit,
 /// and each counter counts every click, selected or not.
 #[test]
 fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
@@ -542,7 +542,7 @@ fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
         (clicks_in, pick_in, current.switch_cell(b))
     });
     let (clicks_in, pick_in, shown) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, ());
     graph.send(clicks_in, ());
     assert_eq!(*graph.sample(shown), 2);
@@ -577,7 +577,7 @@ fn a_deselected_inner_that_nothing_names_is_collected() {
     let (clicks_in, open_in, made, shown) = edge.keep();
     let (received, on) = recorder::<Cell<u32>>();
     graph.listen(made, on).keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(open_in, 100);
     graph.send(clicks_in, ());
     let first = received.borrow()[0];
@@ -621,14 +621,14 @@ fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
     };
     let (mut graph, edge) = program(false);
     let (clicks_in, reported) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, 5);
     let total = *graph.sample(reported);
     assert_eq!(graph.try_sample(total).err(), Some(TokenError::Stale));
 
     let (mut graph, edge) = program(true);
     let (clicks_in, reported) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, 5);
     graph.send(clicks_in, 6);
     let total = *graph.sample(reported);
@@ -663,7 +663,7 @@ fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaratio
             (clicks_in, open_in, back_in, shown)
         });
         let (clicks_in, open_in, back_in, shown) = edge.keep();
-        graph.set_collect_after_every_transaction(true);
+        graph.set_collect_after_every_unit(true);
         graph.send(clicks_in, ());
         assert_eq!(*graph.sample(shown), 1);
         graph.send(open_in, 100);
@@ -718,7 +718,7 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
             (clicks_in, timer_in, log_events(b, events))
         });
         let (clicks_in, timer_in, log) = edge.keep();
-        graph.set_collect_after_every_transaction(true);
+        graph.set_collect_after_every_unit(true);
         graph.send(clicks_in, 4);
         graph.send(clicks_in, 0); // to page 2, which is quiet
         if declare {
@@ -749,7 +749,7 @@ fn a_token_a_listener_delivers_is_gone_after_its_unit_unless_anchored() {
         (open_in, opened)
     });
     let (open_in, opened) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let (received, on) = recorder::<(Input<u32>, Cell<u32>)>();
     graph.listen(opened, on).keep();
     graph.send(open_in, 10);
@@ -1130,7 +1130,7 @@ fn a_construct_can_anchor_what_it_sends_out() {
         (open_in, opened)
     });
     let (open_in, opened) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let received = Rc::new(RefCell::new(Vec::new()));
     let log = received.clone();
     graph
@@ -1332,7 +1332,7 @@ fn states_are_traced_declared_and_anchored_like_cells() {
     let names_in = graph.anchor(names_in).keep();
     let _anchor = graph.anchor(current);
     drop(edge);
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(names_in, "ada".to_string());
     graph.send(names_in, "grace".to_string());
     assert_eq!(*graph.sample(current), ["ada", "grace"]);
@@ -1383,7 +1383,7 @@ fn a_token_given_to_map_to_is_kept_by_its_chain() {
         (go_in, chosen.switch_cell(b))
     });
     let (go_in, shown) = edge.keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     graph.send(go_in, ());
     assert_eq!(*graph.sample(shown), "away");
 }
@@ -1438,7 +1438,7 @@ fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
             (pick_in, chosen.switch_cell(b))
         });
         let (pick_in, shown) = edge.keep();
-        graph.set_collect_after_every_transaction(true);
+        graph.set_collect_after_every_unit(true);
         if declare {
             graph.send(pick_in, 2);
             assert_eq!(*graph.sample(shown), "elsewhere");
