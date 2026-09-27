@@ -15,8 +15,8 @@ use std::thread;
 use std::time::Duration;
 
 use bough::{
-    Cell, Input, InputSlot, IoError, PumpError, RemoteIo, Runtime, SendError, Source, Stream,
-    TokenError,
+    Cell, Input, InputSlot, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, SendError,
+    Source, Stream, TokenError,
 };
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
@@ -542,7 +542,7 @@ fn a_dropped_graph_refuses_remote_sends() {
         remote.send(things_in, Counted(drops.clone())).err(),
         Some(IoError::Gone)
     );
-    assert_eq!(remote.transaction(|_| ()), Err(IoError::Gone));
+    assert_eq!(remote.transaction(|_| ()), Err(IoTransactionError::Gone));
     assert_eq!(
         drops.load(Ordering::SeqCst),
         2,

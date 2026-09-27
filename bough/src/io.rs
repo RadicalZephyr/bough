@@ -17,7 +17,7 @@ use core::slice;
 use core::task::Waker;
 
 use crate::cell::CellRef;
-use crate::error::IoError;
+use crate::error::{IoError, IoTransactionError};
 use crate::guard::{Liveness, Released, Stamps};
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
@@ -326,7 +326,9 @@ impl IoQueue<Threaded> for NoIo {
 ///
 /// A call is refused, with an [`IoError`], if the runtime has dropped, is
 /// poisoned or is running graph code, or if a token the call names is
-/// another graph's, checked in that order. An `Io` is `Clone + 'static`,
+/// another graph's, checked in that order. A transaction names no tokens
+/// when it's queued, so it's refused with an [`IoTransactionError`], which
+/// has the first three. An `Io` is `Clone + 'static`,
 /// so graph code can capture one: a `map` function, a `construct`
 /// closure, a split's iterator. A call from there would be I/O inside FRP
 /// logic, so it's refused with [`IoError::FromGraphCode`].
@@ -358,7 +360,9 @@ impl Io {
     /// [`try_pump`](Runtime::try_pump) returns it. A token from another
     /// graph is refused now, with [`IoError::ForeignGraph`].
     pub fn send<A: 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.unit(&[input.token], move |tx| tx.send(input, value))
+        let state = self.state(&[input.token])?;
+        unit(&state, move |tx| tx.send(input, value));
+        Ok(())
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
@@ -370,11 +374,13 @@ impl Io {
     /// its sends run, as a remote's is; that's where a token from another
     /// graph is found, too. A panic in the closure poisons the runtime.
     /// Like a send, it keeps nothing alive while it waits.
-    pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
+    pub fn transaction<F>(&self, f: F) -> Result<(), IoTransactionError>
     where
         F: FnOnce(&mut IoTransaction<'_>) + 'static,
     {
-        self.unit(&[], f)
+        let state = self.queue()?;
+        unit(&state, f);
+        Ok(())
     }
 
     /// Listens to a materialized node, as [`Runtime::listen`] does, from the
@@ -491,38 +497,27 @@ impl Io {
     }
 
     /// The state the handle shares with its runtime, if the runtime takes
-    /// a call that names `tokens`: it hasn't dropped, isn't poisoned, isn't
-    /// running graph code, and owns every token.
-    fn state(&self, tokens: &[Token]) -> Result<Rc<IoState>, IoError> {
-        let state = self.0.upgrade().ok_or(IoError::Gone)?;
+    /// a call: it hasn't dropped, isn't poisoned, and isn't running graph
+    /// code. A transaction's call makes only these checks.
+    fn queue(&self) -> Result<Rc<IoState>, IoTransactionError> {
+        let state = self.0.upgrade().ok_or(IoTransactionError::Gone)?;
         if state.poisoned.get() {
-            return Err(IoError::Poisoned);
+            return Err(IoTransactionError::Poisoned);
         }
         if state.graph_code.get() {
-            return Err(IoError::FromGraphCode);
-        }
-        if tokens.iter().any(|token| token.graph != state.graph) {
-            return Err(IoError::ForeignGraph);
+            return Err(IoTransactionError::FromGraphCode);
         }
         Ok(state)
     }
 
-    /// Queues a unit that names `tokens`. It keeps none of them alive.
-    fn unit(
-        &self,
-        tokens: &[Token],
-        f: impl FnOnce(&mut IoTransaction<'_>) + 'static,
-    ) -> Result<(), IoError> {
-        let state = self.state(tokens)?;
-        push(
-            &state,
-            Waiting::new(
-                Box::new(move |runtime, skip_stale| runtime.run_io_unit(skip_stale, f)),
-                Roots::None,
-                None,
-            ),
-        );
-        Ok(())
+    /// The state, if the runtime takes a call that names `tokens`: the
+    /// queue's checks, and then that it owns every token.
+    fn state(&self, tokens: &[Token]) -> Result<Rc<IoState>, IoError> {
+        let state = self.queue()?;
+        if tokens.iter().any(|token| token.graph != state.graph) {
+            return Err(IoError::ForeignGraph);
+        }
+        Ok(state)
     }
 
     /// Makes the liveness a guard shares with its registration, and queues
@@ -549,6 +544,18 @@ impl Io {
         );
         Ok(flag)
     }
+}
+
+/// Queues a unit, which keeps nothing alive.
+fn unit(state: &IoState, f: impl FnOnce(&mut IoTransaction<'_>) + 'static) {
+    push(
+        state,
+        Waiting::new(
+            Box::new(move |runtime, skip_stale| runtime.run_io_unit(skip_stale, f)),
+            Roots::None,
+            None,
+        ),
+    );
 }
 
 /// Stamps a call, queues it, and wakes the driver.

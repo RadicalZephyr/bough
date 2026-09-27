@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use bough::{
     IoError, Listener, PoisonedError, Runtime, SendError, Source, TokenError, Trace, Tracer,
+    TransactionListenError,
 };
 
 /// A shared log and a closure that appends to it.
@@ -238,11 +239,11 @@ fn a_tied_listener_s_token_is_checked_when_it_is_tied() {
     graph.transaction(|tx| {
         assert_eq!(
             tx.try_listen_once(shared, |_| ()),
-            Err(TokenError::ForeignGraph)
+            Err(TransactionListenError::ForeignGraph)
         );
         assert_eq!(
             tx.try_listen_cell_once(level, |_| ()),
-            Err(TokenError::ForeignGraph)
+            Err(TransactionListenError::ForeignGraph)
         );
     });
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -250,6 +251,45 @@ fn a_tied_listener_s_token_is_checked_when_it_is_tied() {
     }));
     assert!(panic_text(result).contains("a token from another graph"));
     assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
+}
+
+/// What a tied once-listener's call can report, named exhaustively, so a
+/// variant added to or taken from `TransactionListenError` fails to
+/// compile here.
+fn tied_failure(error: TransactionListenError) -> &'static str {
+    match error {
+        TransactionListenError::Stale => "stale",
+        TransactionListenError::ForeignGraph => "foreign",
+    }
+}
+
+/// A transaction only opens on a runtime that isn't poisoned, so tying a
+/// once-listener fails only on its token: collected, or another graph's.
+#[test]
+fn a_tied_once_listener_reports_a_stale_or_foreign_token() {
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.share(b), b.constant(1u32))
+    });
+    let ((numbers_in, shared, level), edge) = edge.into_parts();
+    graph.anchor(numbers_in).keep();
+    drop(edge);
+    graph.collect_garbage();
+    let (_other, edge) = Runtime::build(|b| {
+        let shared = b.input::<u32>().0.share(b);
+        (shared, b.constant(1u32))
+    });
+    let (foreign, foreign_level) = edge.keep();
+    graph.transaction(|tx| {
+        let failures = [
+            tx.try_listen_once(shared, |_| ()),
+            tx.try_listen_cell_once(level, |_| ()),
+            tx.try_listen_once(foreign, |_| ()),
+            tx.try_listen_cell_once(foreign_level, |_| ()),
+        ]
+        .map(|result| tied_failure(result.unwrap_err()));
+        assert_eq!(failures, ["stale", "stale", "foreign", "foreign"]);
+    });
 }
 
 /// A shared stream and its input, for the drop checks below.

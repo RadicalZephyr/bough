@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{Cell, Input, Io, IoError, PumpError, Runtime, SendError, Source, Stream, TokenError};
+use bough::{
+    Cell, Input, Io, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, SendError, Source,
+    Stream, TokenError,
+};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -781,6 +784,60 @@ fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
     assert_eq!(graph.try_send(numbers_in, 1), Err(SendError::Poisoned));
     assert_eq!(io.send(numbers_in, 1), Err(IoError::Poisoned));
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));
+}
+
+/// What a handle's transaction call can report, named exhaustively, so a
+/// variant added to or taken from `IoTransactionError` fails to compile
+/// here.
+fn refusal(error: IoTransactionError) -> &'static str {
+    match error {
+        IoTransactionError::Gone => "gone",
+        IoTransactionError::Poisoned => "poisoned",
+        IoTransactionError::FromGraphCode => "from graph code",
+    }
+}
+
+/// A handle's transaction names no tokens when it's queued, so it's
+/// refused for one of three reasons, checked in this order, through either
+/// handle: the runtime has dropped, is poisoned, or runs graph code. A
+/// panic in graph code leaves that code's flag set, so it's poisoned first;
+/// and a poisoned runtime that dropped is gone.
+#[test]
+fn a_handle_transaction_reports_each_of_its_three_failures() {
+    type Handles = Rc<RefCell<Option<(Io, RemoteIo)>>>;
+    let handles: Handles = Rc::new(RefCell::new(None));
+    let refused = Rc::new(RefCell::new(Vec::new()));
+    let (mut graph, edge) = Runtime::build({
+        let (handles, refused) = (handles.clone(), refused.clone());
+        move |b| {
+            let (numbers, numbers_in) = b.input::<u32>();
+            let checked = numbers.map(move |n: u32| {
+                if let Some((io, remote)) = handles.borrow().as_ref() {
+                    let mut refused = refused.borrow_mut();
+                    refused.push(refusal(io.transaction(|_| ()).unwrap_err()));
+                    refused.push(refusal(remote.transaction(|_| ()).unwrap_err()));
+                }
+                assert_ne!(n, 13, "unlucky");
+                n
+            });
+            (numbers_in, checked.hold(b, 0u32))
+        }
+    });
+    let (numbers_in, _checked) = edge.keep();
+    let (io, remote) = (graph.io(), graph.remote_io());
+    *handles.borrow_mut() = Some((io.clone(), remote.clone()));
+    graph.send(numbers_in, 1);
+    assert_eq!(*refused.borrow(), ["from graph code", "from graph code"]);
+    *handles.borrow_mut() = None;
+    let text = panic_text(catch_unwind(AssertUnwindSafe(|| {
+        graph.send(numbers_in, 13)
+    })));
+    assert!(text.contains("unlucky"), "{text}");
+    assert_eq!(refusal(io.transaction(|_| ()).unwrap_err()), "poisoned");
+    assert_eq!(refusal(remote.transaction(|_| ()).unwrap_err()), "poisoned");
+    drop(graph);
+    assert_eq!(refusal(io.transaction(|_| ()).unwrap_err()), "gone");
+    assert_eq!(refusal(remote.transaction(|_| ()).unwrap_err()), "gone");
 }
 
 /// A call checks in a fixed order: the runtime has dropped, is poisoned,

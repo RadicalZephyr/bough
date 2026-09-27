@@ -32,8 +32,10 @@ use crate::engine::{Cx, DoubleSend, Entry, LISTENERS, ListenerCall, TokenFault, 
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::error::IoError;
-use crate::error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
+use crate::error::{IoError, IoTransactionError};
+use crate::error::{
+    PoisonedError, PumpError, SendError, TokenError, TransactionListenError, TransactionSendError,
+};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -1585,7 +1587,7 @@ impl<M: Mode> Transaction<'_, M> {
 
     /// [`listen_once`](Transaction::listen_once), returning the error
     /// instead of panicking.
-    pub fn try_listen_once<S, F>(&mut self, source: S, f: F) -> Result<(), TokenError>
+    pub fn try_listen_once<S, F>(&mut self, source: S, f: F) -> Result<(), TransactionListenError>
     where
         S: Node,
         S::Event: 'static,
@@ -1615,7 +1617,11 @@ impl<M: Mode> Transaction<'_, M> {
 
     /// [`listen_cell_once`](Transaction::listen_cell_once), returning the
     /// error instead of panicking.
-    pub fn try_listen_cell_once<C, F>(&mut self, cell: C, f: F) -> Result<(), TokenError>
+    pub fn try_listen_cell_once<C, F>(
+        &mut self,
+        cell: C,
+        f: F,
+    ) -> Result<(), TransactionListenError>
     where
         C: CellRef,
         F: FnOnce(&C::Value) + 'static,
@@ -1625,11 +1631,12 @@ impl<M: Mode> Transaction<'_, M> {
         Ok(())
     }
 
-    /// A token's node, for a listener tied to this unit.
-    fn lookup(&self, token: Token) -> Result<u32, TokenError> {
+    /// A token's node, for a listener tied to this unit. The transaction
+    /// is open, so the runtime isn't poisoned.
+    fn lookup(&self, token: Token) -> Result<u32, TransactionListenError> {
         self.graph.build.lookup(token).map_err(|fault| match fault {
-            TokenFault::Foreign => TokenError::ForeignGraph,
-            TokenFault::Stale => TokenError::Stale,
+            TokenFault::Foreign => TransactionListenError::ForeignGraph,
+            TokenFault::Stale => TransactionListenError::Stale,
         })
     }
 }
@@ -1931,10 +1938,10 @@ impl RemoteIo {
     /// the input is collected by the time the driver pumps is graph
     /// knowledge, found at the pump.
     pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
-        self.unit(
-            &[input.token],
-            Box::new(move |tx: &mut RemoteTransaction<'_>| tx.send(input, value)),
-        )
+        self.check(&[input.token])?;
+        Ok(self.unit(Box::new(move |tx: &mut RemoteTransaction<'_>| {
+            tx.send(input, value)
+        }))?)
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
@@ -1942,11 +1949,12 @@ impl RemoteIo {
     /// sends are simultaneous. The closure is I/O code: it has no graph
     /// access, and its order of sends does not matter. Like a send, it
     /// keeps nothing alive while it waits.
-    pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
+    pub fn transaction<F>(&self, f: F) -> Result<(), IoTransactionError>
     where
         F: FnOnce(&mut RemoteTransaction<'_>) + Send + 'static,
     {
-        self.unit(&[], Box::new(f))
+        self.queue()?;
+        self.unit(Box::new(f))
     }
 
     /// Listens to a materialized node, as [`Io::listen`] does: the
@@ -2043,32 +2051,38 @@ impl RemoteIo {
         Ok(Anchored::new(value, Anchor::new(Some(flag))))
     }
 
-    /// The checks a call makes before it queues: the runtime has dropped,
-    /// is poisoned, or runs graph code on this thread, or a token the call
-    /// names is another runtime's.
-    fn check(&self, tokens: &[Token]) -> Result<(), IoError> {
+    /// The checks every call makes before it queues: the runtime has
+    /// dropped, is poisoned, or runs graph code on this thread. A
+    /// transaction's call makes only these.
+    fn queue(&self) -> Result<(), IoTransactionError> {
         if self.inbox.is_closed() {
-            return Err(IoError::Gone);
+            return Err(IoTransactionError::Gone);
         }
         if self.inbox.is_poisoned() {
-            return Err(IoError::Poisoned);
+            return Err(IoTransactionError::Poisoned);
         }
         if self.inbox.inside() {
-            return Err(IoError::FromGraphCode);
+            return Err(IoTransactionError::FromGraphCode);
         }
+        Ok(())
+    }
+
+    /// The checks a call that names `tokens` makes before it queues: the
+    /// queue's, and then that the runtime owns every token.
+    fn check(&self, tokens: &[Token]) -> Result<(), IoError> {
+        self.queue()?;
         if tokens.iter().any(|token| token.graph != self.inbox.graph) {
             return Err(IoError::ForeignGraph);
         }
         Ok(())
     }
 
-    /// Queues a unit that names `tokens`, unless the checks refuse it or
-    /// the runtime has dropped since. It keeps none of them alive.
-    fn unit(&self, tokens: &[Token], unit: Unit) -> Result<(), IoError> {
-        self.check(tokens)?;
+    /// Queues a unit, unless the runtime has dropped since the checks. It
+    /// keeps nothing alive.
+    fn unit(&self, unit: Unit) -> Result<(), IoTransactionError> {
         self.inbox
             .push(Waiting::new(RemoteCall::Unit(unit), Roots::None, None))
-            .map_err(|_| IoError::Gone)
+            .map_err(|_| IoTransactionError::Gone)
     }
 
     /// Makes the liveness a guard shares with its registration, and queues

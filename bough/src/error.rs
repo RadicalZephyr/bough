@@ -40,7 +40,8 @@ pub enum TransactionSendError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonedError;
 
-/// Failure modes of `try_listen`, `try_listen_cell`, `try_listen_steps`,
+/// Failure modes of the `Runtime`'s `try_listen`, `try_listen_cell`,
+/// `try_listen_steps`, `try_listen_once`, `try_listen_cell_once`,
 /// `try_anchor` and `try_sample`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenError {
@@ -61,7 +62,8 @@ pub enum IoError {
     /// The runtime was dropped.
     Gone,
     /// The runtime is poisoned: a previous transaction never finished. The
-    /// handle knows once an entry on the runtime has found the poison.
+    /// handle knows as soon as the panic leaves the runtime, where panics
+    /// unwind, and otherwise once an entry on the runtime has found it.
     Poisoned,
     /// Called from graph code: a `map` function, a `construct` closure, a
     /// split's iterator. That's I/O inside FRP logic. A listener is I/O
@@ -71,6 +73,46 @@ pub enum IoError {
     /// A token the call names belongs to another graph. A transaction's
     /// closure hides its tokens, so a foreign one there is found at the
     /// pump instead.
+    ForeignGraph,
+}
+
+/// Failure modes of queuing a transaction through a handle,
+/// [`Io::transaction`](crate::Io::transaction) or `RemoteIo::transaction`,
+/// checked in this order: those of [`IoError`] but a foreign token. A
+/// transaction's closure hides the tokens it names, so a foreign one is
+/// found at the pump, as [`PumpError::ForeignGraph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoTransactionError {
+    /// The runtime was dropped.
+    Gone,
+    /// The runtime is poisoned, as for [`IoError::Poisoned`].
+    Poisoned,
+    /// Called from graph code, as for [`IoError::FromGraphCode`].
+    FromGraphCode,
+}
+
+/// A handle's call that names tokens can fail for every reason its
+/// transaction can, and one more, so `?` takes the one into the other.
+impl From<IoTransactionError> for IoError {
+    fn from(error: IoTransactionError) -> IoError {
+        match error {
+            IoTransactionError::Gone => IoError::Gone,
+            IoTransactionError::Poisoned => IoError::Poisoned,
+            IoTransactionError::FromGraphCode => IoError::FromGraphCode,
+        }
+    }
+}
+
+/// Failure modes of tying a once-listener to a transaction,
+/// [`Transaction::try_listen_once`](crate::Transaction::try_listen_once)
+/// and
+/// [`Transaction::try_listen_cell_once`](crate::Transaction::try_listen_cell_once).
+/// A transaction only opens on a runtime that isn't poisoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionListenError {
+    /// The node was collected.
+    Stale,
+    /// The token belongs to another graph.
     ForeignGraph,
 }
 
@@ -116,3 +158,8 @@ display_error!(
 );
 display_error!(PumpError, "pump failed");
 display_error!(IoError, "the runtime refused a call through its handle");
+display_error!(
+    IoTransactionError,
+    "the runtime refused a transaction through its handle"
+);
+display_error!(TransactionListenError, "the token is stale or foreign");

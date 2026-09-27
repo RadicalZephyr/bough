@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::thread;
 
-use bough::{Input, IoError, PumpError, RemoteIo, Runtime, Source};
+use bough::{Input, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, Source};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {
@@ -64,7 +64,7 @@ fn a_remote_send_from_a_map_closure_or_accumulate_mut_is_inside_transaction() {
                 let transaction = r.transaction(move |tx| tx.send(numbers_in, 2));
                 (
                     inside(r.send(numbers_in, 1)),
-                    transaction == Err(IoError::FromGraphCode),
+                    transaction == Err(IoTransactionError::FromGraphCode),
                 )
             })
             .hold(b, (false, false));
@@ -303,7 +303,10 @@ fn poisoning_makes_every_later_remote_send_fail() {
     let other = remote.clone();
     let after = thread::spawn(move || other.send(numbers_in, 5));
     assert_eq!(after.join().unwrap(), Err(IoError::Poisoned));
-    assert_eq!(remote.transaction(|_| ()), Err(IoError::Poisoned));
+    assert_eq!(
+        remote.transaction(|_| ()),
+        Err(IoTransactionError::Poisoned)
+    );
     assert_eq!(
         graph.remote_io().send(numbers_in, 6),
         Err(IoError::Poisoned)

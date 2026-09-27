@@ -133,7 +133,10 @@ pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
-pub use error::{IoError, PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
+pub use error::{
+    IoError, IoTransactionError, PoisonedError, PumpError, SendError, TokenError,
+    TransactionListenError, TransactionSendError,
+};
 pub use io::Io;
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
