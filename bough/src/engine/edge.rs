@@ -54,7 +54,8 @@ use crate::mode::Mode;
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::runtime::IoTransaction;
+use crate::runtime::RemoteTransaction;
+#[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::token::Token;
 
 /// The lock under the edge's shared state: the standard mutex.
@@ -213,7 +214,7 @@ impl Drop for Edge {
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-pub(crate) type Unit = Box<dyn FnOnce(&mut IoTransaction<'_>) + Send>;
+pub(crate) type Unit = Box<dyn FnOnce(&mut RemoteTransaction<'_>) + Send>;
 
 /// What a `RemoteIo` queues: a unit, or a registration of a listener or an
 /// anchor.
@@ -409,7 +410,7 @@ impl Inbox {
     }
 }
 
-/// Why a send inside a unit failed, found by the driver at `pump`.
+/// Why a call inside a unit failed, found by the driver at `pump`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
     Stale,
@@ -417,22 +418,12 @@ pub(crate) enum Fault {
     DoubleSend,
 }
 
-/// The build context as a unit's sends see it: with no mode, since an
-/// `IoTransaction` has none, and with the event's type behind `dyn Any`.
-pub(crate) trait Start {
-    /// Starts `input` with the event in `event`, an `&mut Option<A>`, in
-    /// the transaction the driver opened for the unit.
-    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault>;
-}
-
-impl<M: Mode> Start for Build<M> {
-    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault> {
-        let i = self.lookup(input).map_err(|fault| match fault {
+impl From<TokenFault> for Fault {
+    fn from(fault: TokenFault) -> Fault {
+        match fault {
             TokenFault::Foreign => Fault::ForeignGraph,
             TokenFault::Stale => Fault::Stale,
-        })?;
-        let fire = self.store.ops[i as usize].fire;
-        fire(self, i, event).map_err(|DoubleSend| Fault::DoubleSend)
+        }
     }
 }
 

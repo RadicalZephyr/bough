@@ -7,6 +7,11 @@ use alloc::boxed::Box;
 ))]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use core::any::Any;
 use core::ops::Deref;
 use core::task::Waker;
 
@@ -16,13 +21,13 @@ use crate::cell::CellRef;
 use crate::engine::Statistics;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::engine::edge::Connection;
-use crate::engine::edge::{Fault, Start};
+use crate::engine::edge::Fault;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
 use crate::engine::edge::{Inbox, RemoteCall, Unit};
-use crate::engine::{Cx, Entry, LISTENERS, ListenerCall, TokenFault, part};
+use crate::engine::{Cx, DoubleSend, Entry, LISTENERS, ListenerCall, TokenFault, part};
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -149,6 +154,25 @@ impl Runtime<Local> {
     /// queue, made with the runtime, so this takes `&self`.
     pub fn io(&self) -> Io {
         Io::new(&self.build.io)
+    }
+
+    /// Runs an `Io`'s unit as one transaction, which is dropped whole if a
+    /// call in it failed. A collection that is due runs after it.
+    pub(crate) fn run_io_unit(
+        &mut self,
+        skip_stale: bool,
+        unit: impl FnOnce(&mut IoTransaction<'_>),
+    ) -> Result<(), Stop> {
+        self.build.begin();
+        let mut tx = IoTransaction {
+            runtime: self,
+            unit: UnitState::new(skip_stale),
+        };
+        unit(&mut tx);
+        let IoTransaction { unit, .. } = tx;
+        self.end_unit(unit)?;
+        self.collect_if_due();
+        Ok(())
     }
 }
 
@@ -1180,41 +1204,42 @@ impl<M: Mode> Runtime<M> {
     ))]
     fn pump_remote(&mut self, skip_stale: bool) -> Result<(), Stop> {
         match self.build.edge.inbox.pop() {
-            Some(RemoteCall::Unit(unit)) => self.run_unit(skip_stale, unit),
+            Some(RemoteCall::Unit(unit)) => self.run_remote_unit(skip_stale, unit),
             Some(RemoteCall::Register(registration)) => M::register(self, registration, skip_stale),
             None => unreachable!("bough engine: the front call is there to pop"),
         }
     }
 
-    /// Runs one unit, a remote's or an `Io`'s, as one transaction. A unit
-    /// whose send fails is dropped whole: its transaction closes without
-    /// running.
-    pub(crate) fn run_unit(
-        &mut self,
-        skip_stale: bool,
-        unit: impl FnOnce(&mut IoTransaction<'_>),
-    ) -> Result<(), Stop> {
+    /// Runs a remote's unit as one transaction, as
+    /// [`run_io_unit`](Runtime::run_io_unit) runs an `Io`'s.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    pub(crate) fn run_remote_unit(&mut self, skip_stale: bool, unit: Unit) -> Result<(), Stop> {
         self.build.begin();
-        let mut tx = IoTransaction {
-            build: &mut self.build,
-            skip_stale,
-            skipped: 0,
-            fault: None,
+        let mut tx = RemoteTransaction {
+            runtime: self,
+            unit: UnitState::new(skip_stale),
         };
         unit(&mut tx);
-        let IoTransaction { skipped, fault, .. } = tx;
-        self.stale_operations += skipped;
-        if let Some(fault) = fault {
+        let RemoteTransaction { unit, .. } = tx;
+        self.end_unit(unit)?;
+        self.collect_if_due();
+        Ok(())
+    }
+
+    /// Ends a unit a handle queued, once its closure has run. If a call in
+    /// it failed, the unit is dropped whole: its transaction closes without
+    /// running, and the failure comes back. Otherwise the transaction runs,
+    /// children and all.
+    fn end_unit(&mut self, unit: UnitState) -> Result<(), Stop> {
+        self.stale_operations += unit.skipped;
+        if let Some(stop) = unit.fault {
             self.build.cancel();
-            let error = match fault {
-                Fault::Stale => PumpError::Stale,
-                Fault::ForeignGraph => PumpError::ForeignGraph,
-                Fault::DoubleSend => PumpError::DoubleSend,
-            };
-            return Err((error, SEND));
+            return Err(stop);
         }
         self.build.finish();
-        self.collect_if_due();
         Ok(())
     }
 
@@ -1742,18 +1767,18 @@ impl RemoteIo {
     pub fn send<A: Send + 'static>(&self, input: Input<A>, value: A) -> Result<(), IoError> {
         self.unit(
             &[input.token],
-            Box::new(move |tx: &mut IoTransaction<'_>| tx.send(input, value)),
+            Box::new(move |tx: &mut RemoteTransaction<'_>| tx.send(input, value)),
         )
     }
 
     /// Queues several sends as one unit, and so one transaction: `f` runs
-    /// on the driver, at its next pump, with an [`IoTransaction`] whose
+    /// on the driver, at its next pump, with a [`RemoteTransaction`] whose
     /// sends are simultaneous. The closure is I/O code: it has no graph
     /// access, and its order of sends does not matter. Like a send, it
     /// keeps nothing alive while it waits.
     pub fn transaction<F>(&self, f: F) -> Result<(), IoError>
     where
-        F: FnOnce(&mut IoTransaction<'_>) + Send + 'static,
+        F: FnOnce(&mut RemoteTransaction<'_>) + Send + 'static,
     {
         self.unit(&[], Box::new(f))
     }
@@ -1893,36 +1918,131 @@ impl RemoteIo {
     }
 }
 
-/// The sends of one unit a handle queued, an [`Io`]'s or a
-/// [`RemoteIo`]'s, run on the driver inside the transaction it opened for
-/// the unit, so they are simultaneous.
-///
-/// Whether an input is collected or coalesces is graph knowledge, so a
-/// failed send here is found at [`Runtime::pump`], which drops the whole unit
-/// and reports it; the closure's later sends are ignored.
-pub struct IoTransaction<'a> {
-    /// The driver's build context, with the mode out of sight.
-    build: &'a mut dyn Start,
-    /// The panicking pump's release build: a stale send is skipped and
+/// What a queued unit's transaction keeps, whichever handle queued it.
+struct UnitState {
+    /// The panicking pump's release build: a stale token is skipped and
     /// counted rather than a fault.
     skip_stale: bool,
     skipped: u64,
-    /// The first send that failed; the unit is dropped.
-    fault: Option<Fault>,
+    /// The first call that failed, with what it asked for; the unit is
+    /// dropped.
+    fault: Option<Stop>,
+}
+
+impl UnitState {
+    fn new(skip_stale: bool) -> Self {
+        UnitState {
+            skip_stale,
+            skipped: 0,
+            fault: None,
+        }
+    }
+
+    /// Whether a call in the unit failed, so the rest are ignored.
+    fn failed(&self) -> bool {
+        self.fault.is_some()
+    }
+
+    /// A call in the unit failed, for `what`: a stale token is skipped and
+    /// counted where the pump skips those, and anything else drops the
+    /// unit.
+    fn fail(&mut self, fault: Fault, what: &'static str) {
+        let error = match fault {
+            Fault::Stale if self.skip_stale => {
+                self.skipped += 1;
+                return;
+            }
+            Fault::Stale => PumpError::Stale,
+            Fault::ForeignGraph => PumpError::ForeignGraph,
+            Fault::DoubleSend => PumpError::DoubleSend,
+        };
+        self.fault = Some((error, what));
+    }
+}
+
+/// The sends of one unit an [`Io`] queued, run on the driver inside the
+/// transaction it opened for the unit, so they are simultaneous. An `Io`'s
+/// runtime is `Local`, so nothing here need be `Send`.
+///
+/// Whether an input is collected or coalesces is graph knowledge, so a
+/// failed send here is found at [`Runtime::pump`], which drops the whole
+/// unit and reports it; the closure's later sends are ignored.
+pub struct IoTransaction<'a> {
+    runtime: &'a mut Runtime<Local>,
+    unit: UnitState,
 }
 
 impl IoTransaction<'_> {
     /// Sends one value in this unit. The value needn't be `Send`: the
     /// closure that sends it runs on the driver.
     pub fn send<A: 'static>(&mut self, input: Input<A>, value: A) {
-        if self.fault.is_some() {
+        if self.unit.failed() {
+            return;
+        }
+        let build = &mut self.runtime.build;
+        let sent = match build.lookup(input.token) {
+            Ok(i) => build
+                .fire_start(i, value)
+                .map_err(|DoubleSend| Fault::DoubleSend),
+            Err(fault) => Err(fault.into()),
+        };
+        if let Err(fault) = sent {
+            self.unit.fail(fault, SEND);
+        }
+    }
+}
+
+/// The driver's runtime, of either mode, as a remote unit's transaction
+/// sees it.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub(crate) trait Driver {
+    /// Starts `input` with the event in `event`, an `&mut Option<A>`, in
+    /// the transaction the driver opened for the unit.
+    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault>;
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl<M: Mode> Driver for Runtime<M> {
+    fn start(&mut self, input: Token, event: &mut dyn Any) -> Result<(), Fault> {
+        let i = self.build.lookup(input)?;
+        let fire = self.build.store.ops[i as usize].fire;
+        fire(&mut self.build, i, event).map_err(|DoubleSend| Fault::DoubleSend)
+    }
+}
+
+/// The sends of one unit a [`RemoteIo`] queued, as an [`IoTransaction`]'s
+/// are an [`Io`]'s. The unit runs in a runtime whose mode the handle
+/// doesn't know, so the runtime is out of sight here.
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub struct RemoteTransaction<'a> {
+    /// The driver's runtime, with its mode out of sight.
+    runtime: &'a mut dyn Driver,
+    unit: UnitState,
+}
+
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+impl RemoteTransaction<'_> {
+    /// Sends one value in this unit. The value needn't be `Send`: the
+    /// closure that sends it runs on the driver.
+    pub fn send<A: 'static>(&mut self, input: Input<A>, value: A) {
+        if self.unit.failed() {
             return;
         }
         let mut event = Some(value);
-        match self.build.start(input.token, &mut event) {
-            Ok(()) => {}
-            Err(Fault::Stale) if self.skip_stale => self.skipped += 1,
-            Err(fault) => self.fault = Some(fault),
+        if let Err(fault) = self.runtime.start(input.token, &mut event) {
+            self.unit.fail(fault, SEND);
         }
     }
 }

@@ -456,7 +456,7 @@ impl Io {
         push(
             &state,
             Waiting::new(
-                Box::new(move |runtime, skip_stale| runtime.run_unit(skip_stale, f)),
+                Box::new(move |runtime, skip_stale| runtime.run_io_unit(skip_stale, f)),
                 Roots::None,
                 None,
             ),
