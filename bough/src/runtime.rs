@@ -275,6 +275,8 @@ impl<M: Mode> Runtime<M> {
     /// Whether a transaction never finished. Every entry checks this, and
     /// one that finds it set mirrors it into the inbox and the `Io`s'
     /// queue, so that remote sends and `Io` calls fail from then on (RFD 6).
+    /// An entry a panic leaves poisoned mirrors it too, on the panic's way
+    /// out; see [`mark_on_panic`](Runtime::mark_on_panic).
     pub(crate) fn poisoned(&self) -> bool {
         let poisoned = self.build.in_tx;
         if poisoned {
@@ -291,6 +293,30 @@ impl<M: Mode> Runtime<M> {
     /// The check every panicking entry makes first.
     fn enter(&self) {
         assert!(!self.poisoned(), "{POISONED}");
+    }
+
+    /// Runs an entry's work. Under `std`, a panic that leaves the runtime
+    /// poisoned marks the poison in both handles on its way out, so their
+    /// calls say `Poisoned` at once, from any thread, rather than once an
+    /// entry finds it. The panic goes on as it was: its hook has run, and
+    /// `resume_unwind` doesn't run it again. A panic that leaves the runtime
+    /// usable, such as a tied cell listener's, marks nothing. Where a panic
+    /// is a trap, as on wasm, or without `std`, nothing runs after the
+    /// panic, and the next entry marks it (RFD 5).
+    #[inline]
+    fn mark_on_panic<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        #[cfg(feature = "std")]
+        {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+                Ok(r) => r,
+                Err(payload) => {
+                    self.poisoned();
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
+        #[cfg(not(feature = "std"))]
+        f(self)
     }
 
     /// The checks of the `try_` entries that take a token: poison, graph,
@@ -390,16 +416,18 @@ impl<M: Mode> Runtime<M> {
         M: Accepts<A>,
     {
         self.enter();
-        // The token is checked before the transaction opens, so a foreign
-        // token is a panic that leaves the graph usable.
-        if let Some(i) = self.checked(input.token, SEND) {
-            self.build.begin();
-            self.build
-                .fire_start(i, value)
-                .expect("bough engine: the only send of a transaction is not a double send");
-            self.build.finish();
-        }
-        self.collect_if_due();
+        self.mark_on_panic(|rt| {
+            // The token is checked before the transaction opens, so a foreign
+            // token is a panic that leaves the graph usable.
+            if let Some(i) = rt.checked(input.token, SEND) {
+                rt.build.begin();
+                rt.build
+                    .fire_start(i, value)
+                    .expect("bough engine: the only send of a transaction is not a double send");
+                rt.build.finish();
+            }
+            rt.collect_if_due();
+        });
     }
 
     /// [`send`](Runtime::send), returning the error instead of panicking.
@@ -417,12 +445,14 @@ impl<M: Mode> Runtime<M> {
                 TokenFault::Foreign => SendError::ForeignGraph,
                 TokenFault::Stale => SendError::Stale,
             })?;
-        self.build.begin();
-        self.build
-            .fire_start(i, value)
-            .expect("bough engine: the only send of a transaction is not a double send");
-        self.build.finish();
-        self.collect_if_due();
+        self.mark_on_panic(|rt| {
+            rt.build.begin();
+            rt.build
+                .fire_start(i, value)
+                .expect("bough engine: the only send of a transaction is not a double send");
+            rt.build.finish();
+            rt.collect_if_due();
+        });
         Ok(())
     }
 
@@ -438,18 +468,20 @@ impl<M: Mode> Runtime<M> {
     /// it, once its child transactions have run.
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
-        self.build.begin();
-        let mut tx = Transaction {
-            graph: self,
-            tied: Tied::new(),
-        };
-        let r = f(&mut tx);
-        let Transaction { tied, .. } = tx;
-        self.build.finish();
-        let silent = self.end_tied(tied);
-        self.collect_if_due();
-        debug_assert!(!silent, "{SILENT}");
-        r
+        self.mark_on_panic(|rt| {
+            rt.build.begin();
+            let mut tx = Transaction {
+                graph: rt,
+                tied: Tied::new(),
+            };
+            let r = f(&mut tx);
+            let Transaction { tied, .. } = tx;
+            rt.build.finish();
+            let silent = rt.end_tied(tied);
+            rt.collect_if_due();
+            debug_assert!(!silent, "{SILENT}");
+            r
+        })
     }
 
     /// Ends what was tied to a unit, once the unit is done: gives up each
@@ -1033,7 +1065,7 @@ impl<M: Mode> Runtime<M> {
     /// Panics on a poisoned graph.
     pub fn collect_garbage(&mut self) {
         self.enter();
-        self.collect_now();
+        self.mark_on_panic(Self::collect_now);
     }
 
     /// [`collect_garbage`](Runtime::collect_garbage), returning the error
@@ -1042,7 +1074,7 @@ impl<M: Mode> Runtime<M> {
         if self.poisoned() {
             return Err(PoisonedError);
         }
-        self.collect_now();
+        self.mark_on_panic(Self::collect_now);
         Ok(())
     }
 
@@ -1167,16 +1199,18 @@ impl<M: Mode> Runtime<M> {
     /// release build, a stale send is counted and skipped rather than
     /// returned.
     fn pump_all(&mut self, skip_stale: bool) -> Result<(), Stop> {
-        let limit = self.begin_pump();
-        loop {
-            #[cfg(any(feature = "std", feature = "critical-section"))]
-            if self.pump_slot(skip_stale)? {
-                continue;
+        self.mark_on_panic(|rt| {
+            let limit = rt.begin_pump();
+            loop {
+                #[cfg(any(feature = "std", feature = "critical-section"))]
+                if rt.pump_slot(skip_stale)? {
+                    continue;
+                }
+                if !rt.pump_call(limit, skip_stale)? {
+                    return Ok(());
+                }
             }
-            if !self.pump_call(limit, skip_stale)? {
-                return Ok(());
-            }
-        }
+        })
     }
 
     /// A pump begins: it takes the next serial, so each slot drains once in
@@ -1791,8 +1825,9 @@ impl<M: Mode> Drop for Runtime<M> {
 /// [`transaction`](RemoteIo::transaction) makes its sends simultaneous, and
 /// two units are never merged. A `RemoteIo` works with a `Local` runtime;
 /// what it carries must be `Send`. The runtime's poison is mirrored into
-/// the inbox by the first entry that finds it, so calls fail from then on,
-/// and a dropped runtime closes it. Dropping a `RemoteIo` does nothing.
+/// the inbox as the panic that caused it leaves the runtime, where panics
+/// unwind, and otherwise by the next entry, so calls fail from then on;
+/// a dropped runtime closes it. Dropping a `RemoteIo` does nothing.
 ///
 /// It can listen and anchor too, as an `Io` can. The guard comes back at
 /// once, the registration runs on the driver at the pump, and dropping the
@@ -1859,8 +1894,11 @@ impl<M: Mode> Drop for Runtime<M> {
 /// under `std`; on bare metal it is documented and unchecked (RFD 7). It
 /// knows its own runtime only: graph code calling through another
 /// runtime's `RemoteIo` queues there. A panic that escapes graph code
-/// leaves the token behind, so until an entry finds the poison, a call
-/// from that thread reports `FromGraphCode`.
+/// leaves the token behind. Where panics unwind, the poison is marked in
+/// the inbox on the panic's way out, so calls report `Poisoned`, which is
+/// checked first. Where a panic is a trap, as on wasm, nothing runs after
+/// it: until an entry finds the poison, a call from that thread reports
+/// `FromGraphCode`, and one from another thread queues and is lost.
 ///
 /// `RemoteIo` holds an `Arc` and its inbox a lock, so it exists where the
 /// target has pointer atomics and there is a lock: under `std`, or with the

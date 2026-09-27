@@ -272,12 +272,11 @@ fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
 }
 
 /// Poison mirroring. A panic that escapes graph code leaves the graph
-/// poisoned, and the first entry that finds it mirrors the bit into the
-/// inbox; from then on every remote send and remote transaction fails,
-/// from every thread and through every `RemoteIo`, a new one included.
-/// Before that entry, another thread still queues, and the driver thread,
-/// whose graph code never finished, is in graph code as far as the guard
-/// can tell.
+/// poisoned, and marks the poison in the inbox on its way out; from then on
+/// every remote send and remote transaction fails, from every thread and
+/// through every `RemoteIo`, a new one included. So another thread doesn't
+/// queue a call nothing will run, and the driver thread, whose graph code
+/// never finished, isn't told it's in graph code.
 #[test]
 fn poisoning_makes_every_later_remote_send_fail() {
     let (mut graph, edge) = Runtime::build(|b| {
@@ -297,8 +296,8 @@ fn poisoning_makes_every_later_remote_send_fail() {
     assert!(message.contains("thirteen"), "{message}");
     let other = remote.clone();
     let before = thread::spawn(move || other.send(numbers_in, 2));
-    assert_eq!(before.join().unwrap(), Ok(()));
-    assert_eq!(remote.send(numbers_in, 3), Err(IoError::FromGraphCode));
+    assert_eq!(before.join().unwrap(), Err(IoError::Poisoned));
+    assert_eq!(remote.send(numbers_in, 3), Err(IoError::Poisoned));
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));
     assert_eq!(remote.send(numbers_in, 4), Err(IoError::Poisoned));
     let other = remote.clone();

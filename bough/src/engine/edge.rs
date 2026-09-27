@@ -235,8 +235,9 @@ pub(crate) enum RemoteCall {
 pub(crate) struct Inbox {
     /// The graph's id, for a remote call's foreign-token check.
     pub(crate) graph: u32,
-    /// The graph's poison, mirrored by the first entry that finds it, so
-    /// that remote calls fail from then on.
+    /// The graph's poison, mirrored as the panic that caused it leaves the
+    /// graph, or by the first entry that finds it, so that remote calls fail
+    /// from then on.
     poisoned: AtomicBool,
     /// The graph was dropped, so nothing will drain the queue. Set under
     /// the lock, and read there by a push; a call reads it first without

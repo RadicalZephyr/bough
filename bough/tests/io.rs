@@ -758,9 +758,9 @@ fn a_call_after_the_runtime_drops_is_gone() {
     assert_eq!(io.send(numbers_in, value), Err(IoError::Gone));
 }
 
-/// Test 6: a panic that escapes graph code leaves the graph-code flag set,
-/// so a call reports `FromGraphCode` until an entry on the runtime finds
-/// the poison, and `Poisoned` from then on.
+/// Test 6: a panic that escapes graph code marks the poison in the `Io` on
+/// its way out, so a call reports `Poisoned` at once, not `FromGraphCode`,
+/// and still does once an entry on the runtime finds the poison.
 #[test]
 fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
     let (mut graph, edge) = Runtime::build(|b| {
@@ -777,7 +777,7 @@ fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
         graph.send(numbers_in, 13)
     })));
     assert!(text.contains("unlucky"), "{text}");
-    assert_eq!(io.send(numbers_in, 1), Err(IoError::FromGraphCode));
+    assert_eq!(io.send(numbers_in, 1), Err(IoError::Poisoned));
     assert_eq!(graph.try_send(numbers_in, 1), Err(SendError::Poisoned));
     assert_eq!(io.send(numbers_in, 1), Err(IoError::Poisoned));
     assert_eq!(graph.try_pump(), Err(PumpError::Poisoned));

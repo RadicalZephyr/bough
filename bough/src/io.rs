@@ -121,7 +121,8 @@ pub struct IoState {
     calls: RefCell<VecDeque<Waiting<Call<Local>>>>,
     /// Set while graph code runs, from `arm` to `disarm`.
     graph_code: Cell<bool>,
-    /// The runtime's poison, mirrored by the first entry that finds it.
+    /// The runtime's poison, mirrored as the panic that caused it leaves
+    /// the runtime, or by the first entry that finds it.
     poisoned: Cell<bool>,
     /// The driver's waker.
     waker: Cell<Option<Waker>>,
@@ -279,10 +280,15 @@ impl IoQueue<Threaded> for NoIo {
 /// another graph's, checked in that order. An `Io` is `Clone + 'static`,
 /// so graph code can capture one: a `map` function, a `construct`
 /// closure, a split's iterator. A call from there would be I/O inside FRP
-/// logic, so it's refused with [`IoError::FromGraphCode`]. A panic that
-/// escapes graph code leaves that check's flag set, so a call reports
-/// `FromGraphCode` until an entry on the runtime finds the poison, and
-/// `Poisoned` after that.
+/// logic, so it's refused with [`IoError::FromGraphCode`].
+///
+/// A panic that poisons the runtime, in graph code, a listener, a
+/// transaction's closure or a `Drop` a collection runs, marks the poison
+/// in the `Io` on its way out of the runtime, where panics unwind, so
+/// every call reports `Poisoned` from then on. Where a panic is a trap, as on wasm, nothing runs after it:
+/// until an entry on the runtime finds the poison, a call reports
+/// `FromGraphCode` after a panic in graph code, and queues and is lost
+/// after one elsewhere.
 #[derive(Clone)]
 pub struct Io(Weak<IoState>);
 
