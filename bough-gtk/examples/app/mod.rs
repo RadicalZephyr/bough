@@ -43,7 +43,7 @@ pub struct App {
     pub shout: Cell<String>,
     pub flag_in: Input<bool>,
     pub flag: Cell<bool>,
-    /// Ticks another thread sends through a `Remote`.
+    /// Ticks another thread sends through a `RemoteIo`.
     pub ticks_in: Input<u64>,
     pub clock: Cell<String>,
 }
@@ -101,7 +101,7 @@ pub fn build() -> (Runtime, App) {
     (graph, edge.keep())
 }
 
-/// A row that wires itself. It takes the handle, not the graph, so it can
+/// A row that wires itself. It takes an `Io`, not the runtime, so it can
 /// be made anywhere, including in the listener that hears of the row.
 pub struct RowView {
     pub line: gtk::Box,

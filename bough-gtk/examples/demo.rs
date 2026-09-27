@@ -5,7 +5,6 @@ mod app;
 
 use std::time::Duration;
 
-use bough::Owner;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 use gtk::{gio, glib::ExitCode};
@@ -22,9 +21,9 @@ fn main() -> ExitCode {
 
 fn activate(application: &gtk::Application) {
     let (graph, app) = app::build();
-    let remote = graph.remote();
-    let owner = Owner::new(graph);
-    let io = owner.io();
+    let remote = graph.remote_io();
+    let io = graph.io();
+    let driver = bough_gtk::spawn_driver(graph);
 
     // A counter: a label bound to a cell, and a button with a sender.
     let counter = gtk::Label::new(None);
@@ -38,9 +37,10 @@ fn activate(application: &gtk::Application) {
     entry.set_placeholder_text(Some("Type here"));
     bough_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
 
-    // Two-way flag. Registering the listener writes the check button at
-    // once, and its handler would send while the graph is busy; the
-    // handle makes that send wait, and blocking the handler makes it moot.
+    // Two-way flag. The listener's first call, at the pump, writes the
+    // check button, and its handler would send while the runtime pumps;
+    // the send waits for the next pump, and blocking the handler makes it
+    // moot.
     let flag = gtk::CheckButton::with_label("A flag in the graph");
     let toggled = flag.connect_toggled(clone!(
         #[strong]
@@ -114,15 +114,14 @@ fn activate(application: &gtk::Application) {
     scroller.set_child(Some(&view));
     scroller.set_vexpand(true);
 
-    // A clock another thread ticks through a `Remote`, which the driver
+    // A clock another thread ticks through a `RemoteIo`, which the driver
     // pumps.
     let clock = gtk::Label::new(None);
     bough_gtk::bind_label(&io, app.clock, &clock).unwrap();
-    bough_gtk::spawn_driver(&io);
     std::thread::spawn(move || {
         for n in 1.. {
             std::thread::sleep(Duration::from_secs(1));
-            if remote.try_send(app.ticks_in, n).is_err() {
+            if remote.send(app.ticks_in, n).is_err() {
                 break;
             }
         }
@@ -157,7 +156,8 @@ fn activate(application: &gtk::Application) {
         .default_height(640)
         .child(&column)
         .build();
-    // The window keeps the graph: the owner goes when the window does.
-    bough_gtk::tie(&window, owner);
+    // The window keeps the driver, which owns the runtime: both go when the
+    // window does.
+    bough_gtk::tie(&window, driver);
     window.present();
 }
