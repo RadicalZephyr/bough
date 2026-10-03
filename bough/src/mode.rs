@@ -1,53 +1,66 @@
 //! Threading modes (RFD 6).
 //!
-//! A [`Graph`](crate::Graph) is `Local` by default. In `Threaded` mode every
+//! A [`Runtime`](crate::Runtime) is `Local` by default. In `Threaded` mode every
 //! value and closure the graph stores must be `Send`, checked once at each
 //! materialization and at `listen`, and the graph itself is `Send`. Tokens
 //! are plain integers and `Send` in every mode. `Threaded` exists only where
-//! the target has pointer atomics, since its handles share atomic flags; a
-//! Cortex-M0 has `Local` alone. On wasm32 the gate is true, so `Threaded`
+//! the target has pointer atomics, since only there is the state a runtime
+//! shares with its guards atomic; a Cortex-M0 has `Local` alone. On wasm32 the gate is true, so `Threaded`
 //! exists there with no threads to use it, and `Local` is the web mode.
 //!
 //! Every value, closure and chain a node stores is erased into the mode's
 //! carrier: `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
 //! Exactly two functions build a carrier: [`Accepts::erase`], whose
 //! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send`, which
-//! requires `T: Send` itself. So `Graph<Threaded>: Send` is derived by the
+//! requires `T: Send` itself. So `Runtime<Threaded>: Send` is derived by the
 //! compiler from the field types, with no `unsafe impl`, and a materializer
 //! that forgets an `Accepts` bound fails to compile inside the engine.
+//!
+//! A `Local` runtime also keeps the queue its [`Io`](crate::Io)s share,
+//! behind an `Rc`. A `Threaded` one keeps nothing there, since it has no
+//! `Io`, so the `Rc` doesn't stop it being `Send`.
 //!
 //! A `Local` graph is not `Send`, and nothing in the crate says so by hand:
 //!
 //! ```compile_fail,E0277
 //! fn assert_send<T: Send>() {}
-//! assert_send::<bough::Graph<bough::Local>>(); // error: dyn Any cannot be sent between threads
+//! assert_send::<bough::Runtime<bough::Local>>(); // error: dyn Any cannot be sent between threads
 //! ```
 //!
 //! A `Threaded` graph refuses a closure that captures something that is not
 //! `Send`, at the materializer that stores it:
 //!
 //! ```compile_fail,E0277
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //! use std::rc::Rc;
 //!
 //! let offset = Rc::new(5u32);
-//! let (_graph, _) = Graph::build_threaded(move |b| {
+//! let (_graph, edge) = Runtime::build_threaded(move |b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _held = numbers.map(move |n| n + *offset).hold(b, 0u32); // error: Rc is not Send
 //! });
+//! edge.keep();
 //! ```
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-#[cfg(target_has_atomic = "ptr")]
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::cell::Cell as CoreCell;
-#[cfg(target_has_atomic = "ptr")]
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::engine::{CellValue, Memo};
+#[cfg(target_has_atomic = "ptr")]
+use crate::io::NoIo;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::io::Registration;
+use crate::io::{IoQueue, IoState};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::runtime::{Runtime, Stop};
 
 mod sealed {
     pub trait Sealed {}
@@ -60,13 +73,10 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     #[doc(hidden)]
     type Carrier: Carrier;
 
-    /// The flag a [`Listener`](crate::Listener) or an
-    /// [`Anchor`](crate::Anchor) shares with its node, so that dropping the
-    /// handle needs no graph access: a counted cell in `Local`, an atomic in
-    /// `Threaded`, each pointing to the graph's count of released handles.
-    /// This is why a handle carries the mode.
+    /// What the runtime keeps for its same-thread handle: the queue its
+    /// `Io`s share in `Local`, and nothing in `Threaded`.
     #[doc(hidden)]
-    type Flag: FlagOps;
+    type IoQueue: IoQueue<Self>;
 
     /// Erases a value the engine makes that is `Send` whatever the user's
     /// types are, such as a token inside `input_cell`'s chain or `or_else`'s
@@ -74,6 +84,19 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     /// but it can prove `Stream<A>: Send`.
     #[doc(hidden)]
     fn erase_send<T: Send + 'static>(value: T) -> Self::Carrier;
+
+    /// Registers what a `RemoteIo` queued into a runtime of this mode, at
+    /// the pump.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    #[doc(hidden)]
+    fn register(
+        runtime: &mut Runtime<Self>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop>;
 }
 
 /// Access to an erased part: a checked downcast, never an unchecked one.
@@ -101,29 +124,6 @@ impl Carrier for Box<dyn Any + Send> {
     fn get_mut(&mut self) -> &mut dyn Any {
         &mut **self
     }
-}
-
-/// The operations the engine needs on a handle's flag.
-///
-/// Every flag of one graph points to the graph's count of released
-/// handles, so that dropping a handle, which has no graph access, still
-/// tells the automatic collection policy that a root went away (RFD 3).
-#[doc(hidden)]
-pub trait FlagOps: Clone + 'static {
-    /// The graph's count of released handles, which its flags share.
-    type Released: 'static;
-    /// A new count, at zero.
-    fn released() -> Self::Released;
-    /// The handles released so far. It only grows, and wraps.
-    fn count(released: &Self::Released) -> usize;
-    /// A new flag, set: the handle is live. It counts on `released` when
-    /// it is cleared.
-    fn live(released: &Self::Released) -> Self;
-    /// Clears the flag: the handle was dropped. The first clear counts one
-    /// released handle.
-    fn clear(&self);
-    /// Whether the handle is still live.
-    fn is_live(&self) -> bool;
 }
 
 /// The closed set of shapes the engine stores a user type `T` in, fixed in
@@ -217,9 +217,20 @@ pub struct Local;
 impl sealed::Sealed for Local {}
 impl Mode for Local {
     type Carrier = Box<dyn Any>;
-    type Flag = LocalFlag;
+    type IoQueue = Rc<IoState>;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
         Box::new(value)
+    }
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    fn register(
+        runtime: &mut Runtime<Local>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.local(runtime, skip_stale)
     }
 }
 
@@ -242,9 +253,17 @@ impl sealed::Sealed for Threaded {}
 #[cfg(target_has_atomic = "ptr")]
 impl Mode for Threaded {
     type Carrier = Box<dyn Any + Send>;
-    type Flag = ThreadedFlag;
+    type IoQueue = NoIo;
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
         Box::new(value)
+    }
+    #[cfg(any(feature = "std", feature = "critical-section"))]
+    fn register(
+        runtime: &mut Runtime<Threaded>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.threaded(runtime, skip_stale)
     }
 }
 
@@ -255,79 +274,5 @@ impl<T: ?Sized + Send> Accepts<T> for Threaded {
         T: Sized + 'static,
     {
         erase_body!(what, T)
-    }
-}
-
-/// A `Local` handle's flag: a counted cell, and the graph's count of
-/// released handles.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct LocalFlag(Rc<LocalFlagState>);
-
-struct LocalFlagState {
-    live: CoreCell<bool>,
-    released: Rc<CoreCell<usize>>,
-}
-
-impl FlagOps for LocalFlag {
-    type Released = Rc<CoreCell<usize>>;
-    fn released() -> Self::Released {
-        Rc::new(CoreCell::new(0))
-    }
-    fn count(released: &Self::Released) -> usize {
-        released.get()
-    }
-    fn live(released: &Self::Released) -> Self {
-        LocalFlag(Rc::new(LocalFlagState {
-            live: CoreCell::new(true),
-            released: released.clone(),
-        }))
-    }
-    fn clear(&self) {
-        if self.0.live.replace(false) {
-            let released = &self.0.released;
-            released.set(released.get().wrapping_add(1));
-        }
-    }
-    fn is_live(&self) -> bool {
-        self.0.live.get()
-    }
-}
-
-/// A `Threaded` handle's flag: an atomic, and the graph's count of
-/// released handles, since a handle may be dropped on any thread.
-#[cfg(target_has_atomic = "ptr")]
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct ThreadedFlag(Arc<ThreadedFlagState>);
-
-#[cfg(target_has_atomic = "ptr")]
-struct ThreadedFlagState {
-    live: AtomicBool,
-    released: Arc<AtomicUsize>,
-}
-
-#[cfg(target_has_atomic = "ptr")]
-impl FlagOps for ThreadedFlag {
-    type Released = Arc<AtomicUsize>;
-    fn released() -> Self::Released {
-        Arc::new(AtomicUsize::new(0))
-    }
-    fn count(released: &Self::Released) -> usize {
-        released.load(Ordering::Relaxed)
-    }
-    fn live(released: &Self::Released) -> Self {
-        ThreadedFlag(Arc::new(ThreadedFlagState {
-            live: AtomicBool::new(true),
-            released: released.clone(),
-        }))
-    }
-    fn clear(&self) {
-        if self.0.live.swap(false, Ordering::AcqRel) {
-            self.0.released.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    fn is_live(&self) -> bool {
-        self.0.live.load(Ordering::Acquire)
     }
 }

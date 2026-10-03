@@ -1,8 +1,7 @@
 //! Collection (RFD 3): liveness is reachability from explicit roots.
 //!
-//! The roots are the build closure's return value, traced once when the
-//! build finished, every listener whose handle is live, and every live
-//! anchor. What a node keeps alive, its reach, is its dependencies, the
+//! The roots are every listener whose handle is live and every live
+//! anchor, the build closure's return value among them. What a node keeps alive, its reach, is its dependencies, the
 //! tokens a `Trace` walk finds in its committed value (a hold's, an
 //! accumulator's, an in-place accumulator's state, `scan`'s state), and
 //! what `cold.reach` records: what a chain's `Trace` visits when its node
@@ -33,8 +32,8 @@ use core::mem;
 
 use super::{Data, LISTENERS, LIVE, NOOP, WATCHED, cell, in_place, slot_mut};
 use crate::build::Build;
-use crate::mode::{FlagOps, Mode};
-use crate::token::Token;
+use crate::io::IoQueue;
+use crate::mode::Mode;
 use crate::trace::{Trace, Tracer};
 
 /// `ops.clear_slot` of a stream node whose events are `A`s.
@@ -67,10 +66,8 @@ pub(crate) fn trace_in_place<M: Mode, S: Trace + 'static>(
 
 impl<M: Mode> Build<M> {
     /// Collects every node that no root reaches, and returns how many it
-    /// freed. `roots` is the build closure's return value; `anchors` are
-    /// the anchors taken with `Graph::anchor`, from which the dropped ones
-    /// are removed here.
-    pub(crate) fn collect(&mut self, roots: &[Token], anchors: &mut Vec<(u32, M::Flag)>) -> usize {
+    /// freed. The released anchors are taken out of `anchors` here.
+    pub(crate) fn collect(&mut self) -> usize {
         assert!(
             !self.in_tx,
             "bough: the graph is poisoned: a panic escaped an earlier transaction"
@@ -82,14 +79,24 @@ impl<M: Mode> Build<M> {
         self.s.visit_epoch += 1;
         let epoch = self.s.visit_epoch;
         let mut gray = mem::take(&mut self.s.gray);
-        for &token in roots {
+        self.anchors.retain(|(_, flag)| flag.is_live());
+        for k in 0..self.anchors.len() {
+            let i = self.anchors[k].0;
+            self.shade(&mut gray, epoch, i);
+        }
+        // What the registrations waiting in the handles' queues name. A
+        // token that was stale when its call was made names nothing.
+        let mut waiting = Vec::new();
+        self.io.roots(&mut waiting);
+        #[cfg(all(
+            target_has_atomic = "ptr",
+            any(feature = "std", feature = "critical-section")
+        ))]
+        self.edge.inbox.roots(&mut waiting);
+        for token in waiting {
             if let Ok(i) = self.lookup(token) {
                 self.shade(&mut gray, epoch, i);
             }
-        }
-        anchors.retain(|(_, flag)| flag.is_live());
-        for &(i, _) in anchors.iter() {
-            self.shade(&mut gray, epoch, i);
         }
         self.shade_listened(&mut gray, epoch);
         self.mark_reach(&mut gray, epoch);
@@ -217,6 +224,7 @@ mod tests {
 
     use crate::build::Build;
     use crate::engine::TokenFault;
+    use crate::guard::Liveness;
     use crate::mode::Local;
     use crate::token::Token;
 
@@ -229,6 +237,18 @@ mod tests {
         b.pop_scope();
         b.finish();
         tokens
+    }
+
+    /// Collects with `roots` anchored for this collection alone.
+    fn collect_with(b: &mut Build<Local>, roots: &[Token]) -> usize {
+        let flag = Liveness::new(&b.released);
+        for &token in roots {
+            let i = b.lookup(token).expect("a live root");
+            b.anchors.push((i, flag.clone()));
+        }
+        let freed = b.collect();
+        flag.release();
+        freed
     }
 
     fn indices(tokens: &[Token]) -> Vec<u32> {
@@ -246,9 +266,8 @@ mod tests {
         let mut b = Build::<Local>::new();
         let first = constants(&mut b, 3);
         assert_eq!(indices(&first), [1, 2, 3]);
-        let mut anchors = Vec::new();
-        assert_eq!(b.collect(&first[..2], &mut anchors), 1);
-        assert_eq!(b.collect(&first[1..2], &mut anchors), 1);
+        assert_eq!(collect_with(&mut b, &first[..2]), 1);
+        assert_eq!(collect_with(&mut b, &first[1..2]), 1);
         assert_eq!(b.store.free.iter().copied().collect::<Vec<_>>(), [3, 1]);
         let again = constants(&mut b, 3);
         assert_eq!(indices(&again), [3, 1, 4]);
@@ -269,8 +288,7 @@ mod tests {
         let slot = first[0].index;
         b.store.cold[slot as usize].generation = u32::MAX - 1;
         let old = b.token(slot);
-        let mut anchors = Vec::new();
-        assert_eq!(b.collect(&first[1..], &mut anchors), 1);
+        assert_eq!(collect_with(&mut b, &first[1..]), 1);
         assert_eq!(b.store.retired, 1);
         assert!(b.store.free.is_empty(), "a retired slot is not free");
         assert_eq!(b.store.cold[slot as usize].generation, u32::MAX);
@@ -278,7 +296,7 @@ mod tests {
         let again = constants(&mut b, 1);
         assert_eq!(indices(&again), [3], "a new slot, not the retired one");
         // Retired for good: the next free and reuse go elsewhere too.
-        assert_eq!(b.collect(&again, &mut anchors), 1);
+        assert_eq!(collect_with(&mut b, &again), 1);
         assert_eq!(indices(&constants(&mut b, 1)), [2]);
     }
 }

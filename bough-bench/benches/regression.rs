@@ -4,13 +4,12 @@
 //! head commit, so the second run is compared against the first and fails on a
 //! regression beyond the configured limit.
 
-use iai_callgrind::{
-    EventKind, LibraryBenchmarkConfig, RegressionConfig, library_benchmark,
-    library_benchmark_group, main,
+use gungraun::{
+    Callgrind, EventKind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
 use std::hint::black_box;
 
-use bough_bench::{Frame, Shallow};
+use bough_bench::{FanOut, Frame, Shallow};
 
 // A thousand transactions of the shallow shape, build included.
 #[library_benchmark]
@@ -34,10 +33,20 @@ fn frame() -> u64 {
     black_box(shape.checksum())
 }
 
-library_benchmark_group!(name = shapes; benchmarks = shallow, frame);
+// A thousand transactions of the fan-out shape, build included.
+#[library_benchmark]
+fn fan_out() -> u64 {
+    let mut shape = FanOut::new();
+    for k in 0..1000 {
+        shape.send(black_box(k));
+    }
+    black_box(shape.sum())
+}
+
+library_benchmark_group!(name = shapes; benchmarks = shallow, frame, fan_out);
 
 main!(
     config = LibraryBenchmarkConfig::default()
-        .regression(RegressionConfig::default().limits([(EventKind::Ir, 5.0)]).fail_fast(true));
+        .tool(Callgrind::default().soft_limits([(EventKind::Ir, 5.0)]).fail_fast(true));
     library_benchmark_groups = shapes
 );

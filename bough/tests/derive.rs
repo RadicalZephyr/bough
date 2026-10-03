@@ -3,13 +3,13 @@
 //! table is a cell of senders the collector must not look into.
 #![cfg(feature = "derive")]
 
-use std::cell::{Cell as StdCell, RefCell};
+use std::cell::Cell as StdCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc;
 
 use bough::{
-    Cell, CollectionPolicy, Graph, Input, Shared, Source, State, Stream, TokenError, Trace,
+    Cell, CollectionPolicy, Input, Runtime, Shared, Source, State, Stream, TokenError, Trace,
 };
 
 /// A type with no `Trace`, which only a skipped field may have.
@@ -37,7 +37,7 @@ struct Screen {
 /// else names it, and is stale.
 #[test]
 fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
-    let (mut graph, screen) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let events = clicks.share(b);
         let first = events.hold(b, 0u32);
@@ -56,6 +56,7 @@ fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
         };
         b.constant(screen)
     });
+    let screen = edge.keep();
     graph.collect_garbage();
     let screen = graph.sample(screen);
     assert_eq!((screen.title.as_str(), screen.opaque.0), ("home", 42));
@@ -105,13 +106,11 @@ struct Tagged<T, U> {
 
 /// A hold of a derived enum keeps what its current variant names, and
 /// only that: a page no value names is collected, and so is the page the
-/// route has moved on from. The pages reach I/O code through a side
-/// channel, since what the build closure returns is a root.
+/// route has moved on from. The pages leave the build with the edge, and
+/// the test keeps the rest of the edge and lets the pages' share go.
 #[test]
 fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
-    let pages_out = Rc::new(RefCell::new(None));
-    let pages_in = pages_out.clone();
-    let (mut graph, (routes_in, route, tagged, pair)) = Graph::build(move |b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (routes, routes_in) = b.input::<Route>();
         let route = routes.hold(b, Route::Home);
         let pages = [b.constant(1u32), b.constant(2u32), b.constant(3u32)];
@@ -122,11 +121,12 @@ fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
         });
         let (numbers, _numbers_in) = b.input::<u32>();
         let pair = b.constant(Pair(pages[2], Opaque(1), numbers));
-        *pages_in.borrow_mut() = Some(pages);
-        (routes_in, route, tagged, pair)
+        ((routes_in, route, tagged, pair), pages)
     });
     graph.set_collection_policy(CollectionPolicy::Manual);
-    let [one, two, three] = pages_out.borrow().expect("the build ran");
+    let ((kept, [one, two, three]), edge) = edge.into_parts();
+    let (routes_in, route, tagged, pair) = graph.anchor(kept).keep();
+    drop(edge);
     graph.send(routes_in, Route::Page(one));
     graph.collect_garbage();
     assert_eq!(*graph.sample(one), 1);
@@ -189,7 +189,7 @@ struct Shadow {
 
 #[test]
 fn degenerate_shapes_derive_and_trace() {
-    let (mut graph, cells) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let unit = b.constant(Unit);
         let skipped = b.constant(AllSkipped { opaque: Opaque(5) });
         let empty = b.constant(None::<Empty>);
@@ -198,6 +198,7 @@ fn degenerate_shapes_derive_and_trace() {
         let shadow = b.constant(Shadow { tracer: seven });
         (unit, skipped, empty, flags, shadow)
     });
+    let cells = edge.keep();
     graph.collect_garbage();
     let (_, skipped, empty, flags, shadow) = cells;
     assert_eq!(graph.sample(skipped).opaque.0, 5);
@@ -225,10 +226,10 @@ struct Members {
 /// RFD 6's chat room, built as the RFD writes it, in a `Threaded` graph,
 /// with the one outbound listener attached before the sends; the members
 /// are an in-place accumulator of a derived type. Driven directly here,
-/// since `Remote` and `pump` are the I/O edge's stage.
+/// since `RemoteIo` and `pump` are the I/O edge's stage.
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
-    let (mut graph, (joins, messages, outbound)) = Graph::build_threaded(|b| {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(
@@ -248,6 +249,7 @@ fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
             .node(b);
         (joins_in, messages_in, outbound)
     });
+    let (joins, messages, outbound) = edge.keep();
     graph
         .listen(outbound, |(recipients, text)| {
             for sender in recipients {
@@ -255,7 +257,7 @@ fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
             }
         })
         .keep();
-    graph.set_collect_after_every_transaction(true);
+    graph.set_collect_after_every_unit(true);
     let (ada, ada_inbox) = mpsc::channel();
     let (bo, bo_inbox) = mpsc::channel();
     graph.send(joins, ("ada".to_string(), ada));

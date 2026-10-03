@@ -6,3 +6,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/bough-frp/bough"
+
+[output.linkcheck2]

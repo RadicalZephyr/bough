@@ -101,7 +101,7 @@ impl<M: Mode> Build<M> {
             // goes unused. A split's iterator is graph code, so the guard
             // is armed around it; `finish` disarms it after the last level.
             self.begin_instant();
-            self.edge.arm();
+            self.arm();
             let depth = parent + 1;
             self.s.depth = depth;
             if self.s.levels.len() <= depth {

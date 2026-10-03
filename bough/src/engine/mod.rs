@@ -49,6 +49,7 @@ use core::cell::OnceCell;
 use alloc::vec::Vec;
 
 use crate::build::Build;
+use crate::guard::Liveness;
 use crate::mode::{Carrier, Mode};
 use crate::token::Token;
 use crate::trace::Tracer;
@@ -357,11 +358,19 @@ pub(crate) trait NodeOps<M: Mode> {
     const OPS: Ops<M>;
 }
 
-/// One listener: its flag, its erased closure, and the monomorphized call.
+/// A listener's monomorphized call on node `n`.
+pub(crate) type ListenerCall<M> = fn(&mut Entry<M>, &mut Build<M>, u32);
+
+/// One listener: the liveness its guard shares, its erased closure, and
+/// its call.
 pub(crate) struct Entry<M: Mode> {
-    pub(crate) flag: M::Flag,
+    pub(crate) flag: Liveness,
     pub(crate) f: M::Carrier,
-    pub(crate) call: fn(&mut M::Carrier, &mut Build<M>, u32),
+    pub(crate) call: ListenerCall<M>,
+    /// A once-listener's, for the check a debug build makes when its
+    /// runtime drops.
+    #[cfg(all(debug_assertions, feature = "std"))]
+    pub(crate) once: bool,
 }
 
 /// The context of the hidden `Source::pull`: the build context, borrowed

@@ -2,7 +2,7 @@
 //! claim that integrations compose because none of them owns anything.
 //!
 //! - The thread driver RFD 6 says the core ships: a dedicated thread that
-//!   builds the graph, hands back the edge and a `Remote`, and blocks on a
+//!   builds the graph, hands back the edge and a `RemoteIo`, and blocks on a
 //!   condition variable until woken. It is here rather than in the core,
 //!   because RFD 6 does not say how it stops or what it does when a
 //!   transaction panics; this one stops when its handle is dropped.
@@ -25,7 +25,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bough::{Graph, InputSlot, Mode, Remote, RemoteSendError, Source, Threaded};
+use bough::{InputSlot, IoError, Mode, RemoteIo, Runtime, Source, Threaded};
 
 // ---- begin thread driver
 
@@ -79,7 +79,9 @@ impl Drop for Driver {
 /// whenever a remote send or a slot write wakes it, and hands back the
 /// edge and a remote. The graph may be `Local`: it never leaves its thread,
 /// and `make` attaches its listeners there.
-fn spawn_driver<M, R>(make: impl FnOnce() -> (Graph<M>, R) + Send + 'static) -> (R, Remote, Driver)
+fn spawn_driver<M, R>(
+    make: impl FnOnce() -> (Runtime<M>, R) + Send + 'static,
+) -> (R, RemoteIo, Driver)
 where
     M: Mode,
     R: Send + 'static,
@@ -90,7 +92,7 @@ where
     let thread = thread::spawn(move || {
         let (mut graph, edge) = make();
         graph.set_waker(Waker::from(driving.clone()));
-        handoff.send((edge, graph.remote())).unwrap();
+        handoff.send((edge, graph.remote_io())).unwrap();
         while !driving.stop.load(Ordering::SeqCst) {
             graph.pump();
             driving.wait();
@@ -107,7 +109,7 @@ where
 
 /// RFD 6's future driver: each poll stores the task's waker, pumps, and
 /// returns pending, so every remote send and slot write wakes the task.
-fn drive<M: Mode>(mut graph: Graph<M>) -> impl Future<Output = ()> {
+fn drive<M: Mode>(mut graph: Runtime<M>) -> impl Future<Output = ()> {
     poll_fn(move |cx| {
         graph.set_waker(cx.waker().clone());
         graph.pump();
@@ -141,13 +143,14 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
     static TICKS: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let (report, reports) = mpsc::channel();
     let (numbers_in, remote, driver) = spawn_driver(move || {
-        let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
-            b.connect(ticks_in, &TICKS);
+            b.connect(ticks_in, &TICKS, 0);
             let total = numbers.or_else(b, ticks).accumulate(b, 0u32, |n, t| t + n);
             (numbers_in, total)
         });
+        let (numbers_in, total) = edge.keep();
         let steps = Rc::new(RefCell::new(0));
         graph
             .listen_steps(total, move |t| {
@@ -162,7 +165,7 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
             let remote = remote.clone();
             thread::spawn(move || {
                 for n in 1..=10 {
-                    remote.send(numbers_in, n);
+                    remote.send(numbers_in, n).unwrap();
                 }
             })
         })
@@ -181,8 +184,8 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
     );
     drop(driver);
     assert_eq!(
-        remote.try_send(numbers_in, 1),
-        Err(RemoteSendError::GraphDropped),
+        remote.send(numbers_in, 1),
+        Err(IoError::Gone),
         "the driver stopped and dropped the graph"
     );
 }
@@ -191,19 +194,20 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
 /// task, a `Local` graph included, and producers on other threads wake it.
 #[test]
 fn the_future_driver_pumps_at_each_poll() {
-    let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
+    let (numbers_in, total) = edge.keep();
     let seen = Rc::new(RefCell::new(0u32));
     let sink = seen.clone();
     graph
         .listen_cell(total, move |t| *sink.borrow_mut() = *t)
         .keep();
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let producer = thread::spawn(move || {
         for n in 1..=100 {
-            remote.send(numbers_in, n);
+            remote.send(numbers_in, n).unwrap();
             if n % 10 == 0 {
                 thread::sleep(Duration::from_millis(1));
             }
@@ -227,13 +231,14 @@ fn integrations_share_one_graph_through_remotes() {
         a
     });
     const EACH: u32 = 200;
-    let (mut graph, (events_in, events)) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (events, events_in) = b.input::<(char, u32)>();
         let (sensor, sensor_in) = b.input::<Vec<(char, u32)>>();
-        b.connect(sensor_in, &SENSOR);
+        b.connect(sensor_in, &SENSOR, 0);
         let events = events.map(|e| vec![e]).or_else(b, sensor).node(b);
         (events_in, events)
     });
+    let (events_in, events) = edge.keep();
     let widgets: Rc<RefCell<BTreeMap<char, Vec<u32>>>> = Rc::default();
     let sink = widgets.clone();
     graph
@@ -243,7 +248,7 @@ fn integrations_share_one_graph_through_remotes() {
             }
         })
         .keep();
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     // A second executor, on its own thread, whose task sends through a
     // remote each time a timer future of its own completes.
     let networked = {
@@ -251,7 +256,7 @@ fn integrations_share_one_graph_through_remotes() {
         thread::spawn(move || {
             let mut next = 0;
             let task = poll_fn(move |cx| {
-                remote.send(events_in, ('n', next));
+                remote.send(events_in, ('n', next)).unwrap();
                 next += 1;
                 if next == EACH {
                     return Poll::Ready(());
@@ -266,7 +271,9 @@ fn integrations_share_one_graph_through_remotes() {
         let remote = remote.clone();
         thread::spawn(move || {
             for n in 0..EACH {
-                remote.transaction(move |tx| tx.send(events_in, ('p', n)));
+                remote
+                    .transaction(move |tx| tx.send(events_in, ('p', n)))
+                    .unwrap();
             }
         })
     };
@@ -300,16 +307,17 @@ fn integrations_share_one_graph_through_remotes() {
 #[test]
 fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
     fn assert_send<T: Send>() {}
-    assert_send::<Graph<Threaded>>();
-    let (mut graph, (numbers_in, remotes_in, found, total)) = Graph::build_threaded(|b| {
+    assert_send::<Runtime<Threaded>>();
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
-        let (remotes, remotes_in) = b.input::<Remote>();
+        let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
-            .map(move |r| r.try_send(numbers_in, 1) == Err(RemoteSendError::InsideTransaction))
+            .map(move |r| r.send(numbers_in, 1) == Err(IoError::FromGraphCode))
             .hold(b, false);
         let total = numbers.accumulate(b, 0u32, |n, t| t + n);
         (numbers_in, remotes_in, found, total)
     });
+    let (numbers_in, remotes_in, found, total) = edge.keep();
     let (report, reports) = mpsc::channel();
     let totals = report.clone();
     graph
@@ -320,7 +328,7 @@ fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
             report.send(if *inside { None } else { Some(0) }).unwrap()
         })
         .keep();
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let signal = Arc::new(Signal::default());
     let driving = signal.clone();
     let driver = thread::spawn(move || {
@@ -332,9 +340,9 @@ fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
         *graph.sample(total)
     });
     for n in 1..=4 {
-        remote.send(numbers_in, n);
+        remote.send(numbers_in, n).unwrap();
     }
-    remote.send(remotes_in, remote.clone());
+    remote.send(remotes_in, remote.clone()).unwrap();
     let heard: Vec<Option<u32>> = (0..5)
         .map(|_| reports.recv_timeout(Duration::from_secs(10)).unwrap())
         .collect();

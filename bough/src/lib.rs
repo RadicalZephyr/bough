@@ -3,8 +3,8 @@
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
 //! node-creating operation needs a [`Build`] context, which only exists
-//! inside [`Graph::build`] and inside [`Source::construct`] closures; sending,
-//! listening and sampling from outside live on [`Graph`], which only exists
+//! inside [`Runtime::build`] and inside [`Source::construct`] closures; sending,
+//! listening and sampling from outside live on [`Runtime`], which only exists
 //! once the build closure has returned. The design is recorded in the RFDs
 //! at <https://github.com/bough-frp/rfd>.
 //!
@@ -15,7 +15,7 @@
 //! constants and `never`; the adapters `map`, `filter`, `filter_map`,
 //! `map_to`, `snapshot`, `gate` and `once`, which fuse into the one node
 //! that materializes them; the materializers `hold`, `node`, `share`,
-//! `merge` and `or_else`; and on [`Graph`] transactions, listeners and
+//! `merge` and `or_else`; and on [`Runtime`] transactions, listeners and
 //! `sample`. Stage 2 adds the cells: the accumulators `accumulate`,
 //! `accumulate_mut` and `scan`, read-through cells with `map_cell` and
 //! `lift`, and the stream views `steps` and `steps_with_current`, with
@@ -32,41 +32,38 @@
 //! context at each event of a stream, in the middle of its transaction:
 //! what the closure builds exists from that instant on, and each run is a
 //! scope that must close the loops it declares. Stage 7 adds collection
-//! (RFD 3): a node lives while a root reaches it, the build closure's
-//! return value, a live [`Listener`] or a live [`Anchor`]; what it reaches
-//! is its dependencies, the tokens [`Trace`] finds in a stateful cell's
+//! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
+//! [`Anchor`], or a registration waiting in a handle's queue, and
+//! [`Runtime::build`] anchors what its closure returns; what it reaches is
+//! its dependencies, the tokens [`Trace`] finds in a stateful cell's
 //! value, and what [`Build::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
-//! [`pump`](Graph::pump) runs each pending slot as a transaction of its
-//! own, in connection order; a [`Remote`] queues a send, or a remote
-//! transaction's sends, as one unit from any thread, and `pump` then runs
-//! each unit as one transaction, in arrival order; a write or a remote
-//! send wakes the waker the driver registered with
-//! [`set_waker`](Graph::set_waker). No body is `todo!()` any more. The
-//! examples in the documentation run, and the guarantees the RFDs make are
-//! fixed by `compile_fail` doc tests.
-//!
-//! A spike on top of stage 8 adds the same-thread handle: an [`Owner`]
-//! shares a `Local` graph with I/O code through [`Io`] handles, whose calls
-//! run now when the graph is idle and right after the call in progress
-//! when it is busy, for hosts such as GTK that call I/O code while the
-//! graph is busy.
+//! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
+//! own, higher priority first; two handles queue calls, an [`Io`] on the
+//! runtime's thread for I/O code that can't hold the runtime and a
+//! [`RemoteIo`] on any thread, and `pump` then runs both handles' calls in
+//! the order they were made, a send or a transaction as one transaction;
+//! a write or a call through either handle wakes the waker the driver
+//! registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
+//! any more. The examples in the documentation run, and the guarantees the
+//! RFDs make are fixed by `compile_fail` doc tests.
 //!
 //! # Targets
 //!
 //! The core is `no_std` over `alloc`. The `std` feature, on by default, adds
-//! the thread-id guard on [`Remote`], `Trace` for the standard collections and
-//! `Instant`, and the standard mutex under input slots. Where the target has
-//! no pointer atomics, on a Cortex-M0, `Threaded`, `Remote` and the unit queue
-//! do not exist, and the path from an interrupt handler into the graph is an
-//! [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
+//! the thread-id guard on [`RemoteIo`], `Trace` for the standard collections
+//! and `Instant`, and the standard mutex under input slots. Where the target
+//! has no pointer atomics, on a Cortex-M0, `Threaded`, `RemoteIo` and the
+//! unit queue do not exist, and the path from an interrupt handler into the
+//! graph is an [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
 //! a web build keeps `std` (RFD 7). A slot and a remote's inbox need one of
 //! the two locks: with no `unsafe` in the crate there is none to build from
 //! atomics, so a `no_std` build without `critical-section` has neither
-//! slots nor `Remote`, and keeps [`pump`](Graph::pump) and
-//! [`set_waker`](Graph::set_waker).
+//! slots nor `RemoteIo`, and keeps [`pump`](Runtime::pump),
+//! [`set_waker`](Runtime::set_waker) and the [`Io`], whose queue is the
+//! runtime's own and needs no lock.
 //!
 //! RFD 2's example: a click counter and its label, a listener that fires
 //! now and on every step, one send, and a transaction.
@@ -75,16 +72,17 @@
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
 //!
-//! use bough::{Graph, Source};
+//! use bough::{Runtime, Source};
 //!
 //! struct Click;
 //!
-//! let (mut graph, (clicks_in, label)) = Graph::build(|b| {
+//! let (mut graph, edge) = Runtime::build(|b| {
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
-//!     (clicks_in, label) // whatever build returns is the edge, and the root set
+//!     (clicks_in, label) // whatever build returns is the edge, anchored
 //! });
+//! let (clicks_in, label) = edge.keep(); // kept for the graph's life
 //!
 //! let shown = Rc::new(RefCell::new(Vec::new()));
 //! let _listener = graph.listen_cell(label, {
@@ -108,16 +106,17 @@ extern crate alloc;
 extern crate std;
 
 mod build;
+mod capabilities;
 mod cell;
 mod engine;
 mod error;
-mod graph;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-mod handle;
+mod guard;
+mod io;
 mod lift;
 mod mode;
 #[cfg(doctest)]
 mod refusals;
+mod runtime;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 mod slot;
 #[cfg(feature = "smoke")]
@@ -134,26 +133,23 @@ pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-pub use error::{IoError, NowError};
-pub use error::{PoisonedError, PumpError, SendError, TokenError, TransactionSendError};
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-pub use error::{RemoteSendError, RemoteTransactionError};
-pub use graph::{Anchor, CollectionPolicy, Graph, Listener, Transaction};
-#[cfg(all(
-    target_has_atomic = "ptr",
-    any(feature = "std", feature = "critical-section")
-))]
-pub use graph::{Remote, RemoteTransaction};
-#[cfg(all(feature = "std", target_has_atomic = "ptr"))]
-pub use handle::{Io, Owner};
+pub use error::{
+    IoError, IoTransactionError, PoisonedError, PumpError, SendError, TokenError,
+    TransactionListenError, TransactionSendError,
+};
+pub use io::Io;
 pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
+pub use runtime::{
+    Anchor, Anchored, CollectionPolicy, IoTransaction, Listener, Runtime, Transaction,
+};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+pub use runtime::{RemoteIo, RemoteTransaction};
 #[cfg(any(feature = "std", feature = "critical-section"))]
 pub use slot::InputSlot;
 #[cfg(feature = "smoke")]

@@ -86,7 +86,7 @@ externalTime k = [k]
 build :: Reactive a -> a
 build r = run r buildTime
 
--- | Graph::sample from I/O code after external transaction k and all of its
+-- | Runtime::sample from I/O code after external transaction k and all of its
 -- child transactions: every step before @[k+1]@ has happened.
 ioSample :: Cell a -> Int -> a
 ioSample c k = D.at (D.steps c) [k + 1]

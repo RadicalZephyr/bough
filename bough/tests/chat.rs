@@ -1,5 +1,5 @@
 //! RFD 6's chat room, run against the engine with standard threads and
-//! channels in place of tokio: a `Remote` per user, the routing table a
+//! channels in place of tokio: a `RemoteIo` per user, the routing table a
 //! cell in the graph, and the one outbound listener attached before the
 //! graph moves into the thread that drives it. The build closure is RFD 6's,
 //! with `#[derive(Trace)]` and a standard `Sender`, whose `send` is
@@ -13,7 +13,7 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{Graph, Source, Trace};
+use bough::{Runtime, Source, Trace};
 
 type User = String;
 
@@ -56,7 +56,7 @@ const LINES: usize = 50;
 
 #[test]
 fn rfd_6_s_chat_room_runs_over_remotes() {
-    let (mut graph, (joins, messages, outbound)) = Graph::build_threaded(|b| {
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(
@@ -76,6 +76,7 @@ fn rfd_6_s_chat_room_runs_over_remotes() {
             .node(b);
         (joins_in, messages_in, outbound)
     });
+    let (joins, messages, outbound) = edge.keep();
 
     graph
         .listen(outbound, |(recipients, text)| {
@@ -87,7 +88,7 @@ fn rfd_6_s_chat_room_runs_over_remotes() {
 
     // The driver: the graph moves into a thread that pumps whenever a
     // remote send wakes it, as RFD 6's future does in a tokio task.
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let signal = Arc::new(Signal::default());
     let driving = signal.clone();
     let driver = thread::spawn(move || {
@@ -109,13 +110,17 @@ fn rfd_6_s_chat_room_runs_over_remotes() {
             thread::spawn(move || {
                 let user = format!("user{k}");
                 let (sender, inbox) = mpsc::channel::<String>();
-                remote.send(joins, (user.clone(), sender));
-                remote.send(messages, (user.clone(), "hello".to_string()));
+                remote.send(joins, (user.clone(), sender)).unwrap();
+                remote
+                    .send(messages, (user.clone(), "hello".to_string()))
+                    .unwrap();
                 let greeting = format!("{user}: hello");
                 while inbox.recv_timeout(Duration::from_secs(10)).unwrap() != greeting {}
                 everyone.wait();
                 for line in 0..LINES {
-                    remote.send(messages, (user.clone(), format!("line {line}")));
+                    remote
+                        .send(messages, (user.clone(), format!("line {line}")))
+                        .unwrap();
                 }
                 let mut heard: HashMap<String, Vec<usize>> = HashMap::new();
                 let mut count = 0;

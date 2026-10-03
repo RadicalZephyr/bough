@@ -2,6 +2,7 @@
 
 use core::any::Any;
 use core::mem;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Waker;
 
 use crate::engine::edge::{Drain, Lock};
@@ -12,8 +13,8 @@ use crate::engine::edge::{Drain, Lock};
 /// A slot holds one pending event. A write when one is pending folds the two
 /// with the slot's fold, pending on the left, so the slot never grows and a
 /// write never allocates; a burst of writes between two pumps becomes one
-/// event. The driver's [`pump`](crate::Graph::pump) runs each pending slot
-/// as one transaction of its own, in connection order, so two slots are
+/// event. The driver's [`pump`](crate::Runtime::pump) runs each pending slot
+/// as one transaction of its own, higher priority first, so two slots are
 /// never simultaneous: simultaneity means one external cause, which a
 /// tuple input or a remote transaction declares, never the timing of a
 /// drain.
@@ -34,15 +35,16 @@ use crate::engine::edge::{Drain, Lock};
 /// [`connect`](crate::Build::connect).
 ///
 /// ```
-/// use bough::{Graph, InputSlot, Source};
+/// use bough::{Runtime, InputSlot, Source};
 ///
 /// static PRESSES: InputSlot<u32> = InputSlot::new(|a, b| a + b);
 ///
-/// let (mut graph, total) = Graph::build(|b| {
+/// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (presses, presses_in) = b.input::<u32>();
-///     b.connect(presses_in, &PRESSES);
+///     b.connect(presses_in, &PRESSES, 0);
 ///     presses.accumulate(b, 0u32, |n, total| total + n)
 /// });
+/// let total = edge.keep();
 ///
 /// // from an interrupt handler, or any other context: a burst
 /// PRESSES.send(1);
@@ -65,6 +67,10 @@ use crate::engine::edge::{Drain, Lock};
 /// pending event.
 pub struct InputSlot<A> {
     fold: fn(A, A) -> A,
+    /// Whether an event is pending, for the pump to read between units
+    /// without the lock. Stored under the lock; a load and a store are all
+    /// a Cortex-M0 has.
+    pending: AtomicBool,
     state: Lock<Pending<A>>,
 }
 
@@ -84,6 +90,7 @@ impl<A: Send> InputSlot<A> {
     pub const fn new(fold: fn(A, A) -> A) -> Self {
         InputSlot {
             fold,
+            pending: AtomicBool::new(false),
             state: Lock::new(Pending {
                 event: None,
                 waker: None,
@@ -107,6 +114,7 @@ impl<A: Send> InputSlot<A> {
                 Some(pending) => (self.fold)(pending, value),
                 None => value,
             });
+            self.pending.store(true, Ordering::Relaxed);
             s.waker.clone()
         });
         if let Some(waker) = waker {
@@ -116,7 +124,7 @@ impl<A: Send> InputSlot<A> {
 
     /// Registers the waker a write wakes, until the graph the slot is
     /// connected to registers its own with
-    /// [`Graph::set_waker`](crate::Graph::set_waker), which reaches every
+    /// [`Runtime::set_waker`](crate::Runtime::set_waker), which reaches every
     /// connected slot. A bare-metal main loop that sleeps on the interrupt
     /// itself needs none.
     pub fn set_waker(&self, waker: Waker) {
@@ -141,10 +149,17 @@ impl<A: Send + 'static> Drain for InputSlot<A> {
         old.is_ok()
     }
 
+    fn pending(&self) -> bool {
+        self.pending.load(Ordering::Relaxed)
+    }
+
     fn drain(&self, fire: &mut dyn FnMut(&mut dyn Any)) {
-        if let Some(event) = self.state.with(|s| s.event.take()) {
-            let mut event = Some(event);
-            fire(&mut event);
+        let event = self.state.with(|s| {
+            self.pending.store(false, Ordering::Relaxed);
+            s.event.take()
+        });
+        if let Some(event) = event {
+            fire(&mut Some(event));
         }
     }
 
@@ -156,6 +171,7 @@ impl<A: Send + 'static> Drain for InputSlot<A> {
     fn disconnect(&self) {
         let (event, waker) = self.state.with(|s| {
             s.graph = 0;
+            self.pending.store(false, Ordering::Relaxed);
             (s.event.take(), s.waker.take())
         });
         drop((event, waker));

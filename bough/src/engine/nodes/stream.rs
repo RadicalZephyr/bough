@@ -105,6 +105,80 @@ where
     };
 }
 
+/// `unzip`'s pairs: the fused chain, whose pair goes in the slot as its two
+/// halves, for the two half nodes to take apart.
+pub(crate) struct UnzipNode<S, A, B>(Marker<(S, A, B)>);
+
+fn eval_unzip<M, S, A, B>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+where
+    M: Mode,
+    S: Source<Event = (A, B)>,
+    A: 'static,
+    B: 'static,
+{
+    let chain = part::<M, S>(&mut parts[0]);
+    if let Some((first, second)) = chain.pull(&mut Cx { b: &mut *b }) {
+        b.put_event(me, (Some(first), Some(second)));
+    }
+}
+
+impl<M, S, A, B> NodeOps<M> for UnzipNode<S, A, B>
+where
+    M: Mode,
+    S: Source<Event = (A, B)>,
+    A: 'static,
+    B: 'static,
+{
+    const OPS: Ops<M> = Ops {
+        eval: eval_unzip::<M, S, A, B>,
+        clear_slot: clear_slot::<M, (Option<A>, Option<B>)>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
+/// `unzip`'s first half: a node with no parts, which takes the first half
+/// of its pairs node's pair.
+pub(crate) struct FirstHalf<A, B>(Marker<(A, B)>);
+
+fn eval_first_half<M: Mode, A: 'static, B: 'static>(
+    _: &mut [M::Carrier],
+    b: &mut Build<M>,
+    me: u32,
+) {
+    if let Some(first) = b.take_half::<A, B, A>(me, |pair| pair.0.take()) {
+        b.put_event(me, first);
+    }
+}
+
+impl<M: Mode, A: 'static, B: 'static> NodeOps<M> for FirstHalf<A, B> {
+    const OPS: Ops<M> = Ops {
+        eval: eval_first_half::<M, A, B>,
+        clear_slot: clear_slot::<M, A>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
+/// `unzip`'s second half, as [`FirstHalf`] is its first.
+pub(crate) struct SecondHalf<A, B>(Marker<(A, B)>);
+
+fn eval_second_half<M: Mode, A: 'static, B: 'static>(
+    _: &mut [M::Carrier],
+    b: &mut Build<M>,
+    me: u32,
+) {
+    if let Some(second) = b.take_half::<A, B, B>(me, |pair| pair.1.take()) {
+        b.put_event(me, second);
+    }
+}
+
+impl<M: Mode, A: 'static, B: 'static> NodeOps<M> for SecondHalf<A, B> {
+    const OPS: Ops<M> = Ops {
+        eval: eval_second_half::<M, A, B>,
+        clear_slot: clear_slot::<M, B>,
+        ..Ops::<M>::DEFAULT
+    };
+}
+
 /// `merge` and `or_else`: two chains and the combining function in one
 /// node, `f(left, right)` when both fire. `or_else`'s function is an engine
 /// function pointer keeping the left event.

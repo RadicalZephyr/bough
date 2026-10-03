@@ -53,6 +53,9 @@ jobs:
           - { target: thumbv7em-none-eabihf, features: "--no-default-features" }
           # The Cortex-M0 has no pointer atomics: no Threaded, no Remote.
           - { target: thumbv6m-none-eabi, features: "--no-default-features" }
+          # With a critical section it keeps input slots, its path from an
+          # interrupt handler into the graph (RFD 7).
+          - { target: thumbv6m-none-eabi, features: "--no-default-features --features critical-section" }
           # The web keeps std; the no_std build must still type-check there.
           - { target: wasm32-unknown-unknown, features: "" }
           - { target: wasm32-unknown-unknown, features: "--no-default-features" }
@@ -83,11 +86,11 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install valgrind and the iai-callgrind runner
+      - name: Install valgrind and the gungraun runner
         run: |
           sudo apt-get update
           sudo apt-get install -y valgrind
-          cargo install iai-callgrind-runner --version 0.14.2 --locked
+          cargo install gungraun-runner --version 0.19.4 --locked
       - name: Measure the base commit
         run: |
           git checkout --quiet ${{ github.event.pull_request.base.sha }}

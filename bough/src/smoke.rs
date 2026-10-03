@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{CollectionPolicy, Graph, Lift, Source};
+use crate::{CollectionPolicy, Lift, Runtime, Source};
 
 /// Builds and drives the smoke graph with one of the two graph
 /// constructors. A macro rather than a function generic over the mode: the
@@ -13,10 +13,7 @@ use crate::{CollectionPolicy, Graph, Lift, Source};
 /// mode cannot name the `Accepts` bound their types need.
 macro_rules! smoke_graph {
     ($build:path) => {{
-        let (
-            mut graph,
-            ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later),
-        ) = $build(|b| {
+        let (mut graph, edge) = $build(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
             let (level, level_in) = b.input_cell(1u32);
@@ -183,6 +180,8 @@ macro_rules! smoke_graph {
                 (stage2, stage3, stage4, stage5, stage6),
             )
         });
+        let ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later) =
+            edge.keep();
         let (
             stage2,
             (ticks, tick_steps, running, entry_count),
@@ -254,18 +253,18 @@ macro_rules! smoke_graph {
         // policies, the stress setting, and collections that free what the
         // switches left behind. Nothing here changes a value.
         let length_before = *graph.sample(chosen_length);
-        let anchored = graph.anchor(&stage6);
-        let kept = graph.try_anchor(&(out, chosen_log));
+        let anchored = graph.anchor(stage6);
+        let kept = graph.try_anchor((out, chosen_log));
         graph.listen_steps(chosen_length, |_| ()).unlisten();
         graph.set_collection_policy(CollectionPolicy::Manual);
         graph.collect_garbage();
-        anchored.unanchor();
+        anchored.into_parts().1.unanchor();
         if let Ok(kept) = kept {
             kept.keep();
         }
-        graph.set_collect_after_every_transaction(true);
+        graph.set_collect_after_every_unit(true);
         let _ = graph.try_collect_garbage();
-        graph.set_collect_after_every_transaction(false);
+        graph.set_collect_after_every_unit(false);
         graph.set_collection_policy(CollectionPolicy::Automatic);
         let collected =
             graph.stale_operations() as u32 + *graph.sample(chosen_length) - length_before;
@@ -275,36 +274,40 @@ macro_rules! smoke_graph {
 
 /// Stage 8, the I/O edge, in one mode: a slot connected to an input and a
 /// burst folded into one event, a pump and a waker; and where the target
-/// has a `Remote`, a remote send and a remote transaction, pumped after the
-/// slot. Each expansion has a slot of its own.
+/// has a `RemoteIo`, remote sends and remote transactions, pumped after
+/// the slot. Each expansion has a slot of its own.
 macro_rules! smoke_edge {
     ($build:path) => {{
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
-            let (mut graph, (presses_in, total)) = $build(|b| {
+            let (mut graph, edge) = $build(|b| {
                 let (presses, presses_in) = b.input::<u32>();
-                b.connect(presses_in, &PRESSES);
+                b.connect(presses_in, &PRESSES, 0);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
             });
+            let (presses_in, total) = edge.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             PRESSES.send(1);
             PRESSES.send(2);
             graph.pump();
             #[cfg(target_has_atomic = "ptr")]
             {
-                let remote = graph.remote();
-                remote.send(presses_in, 10);
-                remote.transaction(move |tx| tx.send(presses_in, 20));
-                let _ = remote.try_send(presses_in, 30);
-                let _ = remote.try_transaction(move |tx| tx.send(presses_in, 40));
+                let remote = graph.remote_io();
+                remote.send(presses_in, 10).unwrap();
+                remote
+                    .transaction(move |tx| tx.send(presses_in, 20))
+                    .unwrap();
+                let _ = remote.send(presses_in, 30);
+                let _ = remote.transaction(move |tx| tx.send(presses_in, 40));
             }
             let _ = graph.try_pump();
             *graph.sample(total)
         }
         #[cfg(not(any(feature = "std", feature = "critical-section")))]
         {
-            let (mut graph, _) = $build(|b| b.input::<u32>().1);
+            let (mut graph, edge) = $build(|b| b.input::<u32>().1);
+            edge.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             graph.pump();
             let _ = graph.try_pump();
@@ -317,9 +320,9 @@ macro_rules! smoke_edge {
 /// each mode the target has, and returns a sum of the final values.
 #[doc(hidden)]
 pub fn smoke() -> u32 {
-    let local = smoke_graph!(Graph::build) + smoke_edge!(Graph::build);
+    let local = smoke_graph!(Runtime::build) + smoke_edge!(Runtime::build);
     #[cfg(target_has_atomic = "ptr")]
-    let threaded = smoke_graph!(Graph::build_threaded) + smoke_edge!(Graph::build_threaded);
+    let threaded = smoke_graph!(Runtime::build_threaded) + smoke_edge!(Runtime::build_threaded);
     #[cfg(not(target_has_atomic = "ptr"))]
     let threaded = local;
     local + threaded

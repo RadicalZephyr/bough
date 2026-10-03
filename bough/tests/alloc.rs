@@ -50,7 +50,7 @@ use std::thread;
 
 #[cfg(feature = "std")]
 use bough::InputSlot;
-use bough::{Cell, CollectionPolicy, Graph, Lift, Source};
+use bough::{Cell, CollectionPolicy, Lift, Runtime, Source};
 
 struct Counting;
 
@@ -60,11 +60,18 @@ thread_local! {
     static DRIVER: StdCell<bool> = const { StdCell::new(false) };
     /// The allocations of this thread since it became a driver.
     static ALLOCATIONS: StdCell<usize> = const { StdCell::new(0) };
+    /// The frees of this thread since it became a driver.
+    static FREES: StdCell<usize> = const { StdCell::new(0) };
 }
 
 /// The allocations the calling thread has made as a driver.
 fn allocations() -> usize {
     ALLOCATIONS.with(StdCell::get)
+}
+
+/// The frees the calling thread has made as a driver.
+fn frees() -> usize {
+    FREES.with(StdCell::get)
 }
 
 // Test scaffolding: `GlobalAlloc` is an unsafe trait. The crate under test
@@ -78,6 +85,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if DRIVER.try_with(StdCell::get).unwrap_or(false) {
+            let _ = FREES.try_with(|count| count.set(count.get() + 1));
+        }
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -94,174 +104,174 @@ fn tally() -> (Rc<StdCell<u64>>, Rc<StdCell<u64>>) {
 /// Switches moved since the graph was built, with the `statistics`
 /// feature.
 #[cfg(feature = "statistics")]
-fn relinks(graph: &Graph) -> Option<u64> {
+fn relinks(graph: &Runtime) -> Option<u64> {
     Some(graph.statistics().relinks)
 }
 
 #[cfg(not(feature = "statistics"))]
-fn relinks(_: &Graph) -> Option<u64> {
+fn relinks(_: &Runtime) -> Option<u64> {
     None
 }
 
 #[test]
 fn steady_state_transactions_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, ((numbers_in, bumps_in, open_in), (total, both, merged), later)) =
-        Graph::build(|b| {
-            let (numbers, numbers_in) = b.input::<u64>();
-            let numbers = numbers.share(b);
-            let total = numbers
-                .map(|x| x * 2)
-                .filter(|x| x % 3 != 0)
-                .map(|x| x + 1)
-                .hold(b, 0u64);
-            let (bumps, bumps_in) = b.input_coalescing(|a: u64, b| a + b);
-            let merged = numbers
-                .map(|x| x + 1)
-                .merge(b, bumps, |l, r| l + r)
-                .share(b);
-            let (open, open_in) = b.input_cell(true);
-            let nothing = b.never::<u64>();
-            let both = merged
-                .snapshot(total, |m, t| m + t)
-                .gate(open)
-                .or_else(b, nothing)
-                .hold(b, 0u64);
+    let (mut graph, edge) = Runtime::build(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        let numbers = numbers.share(b);
+        let total = numbers
+            .map(|x| x * 2)
+            .filter(|x| x % 3 != 0)
+            .map(|x| x + 1)
+            .hold(b, 0u64);
+        let (bumps, bumps_in) = b.input_coalescing(|a: u64, b| a + b);
+        let merged = numbers
+            .map(|x| x + 1)
+            .merge(b, bumps, |l, r| l + r)
+            .share(b);
+        let (open, open_in) = b.input_cell(true);
+        let nothing = b.never::<u64>();
+        let both = merged
+            .snapshot(total, |m, t| m + t)
+            .gate(open)
+            .or_else(b, nothing)
+            .hold(b, 0u64);
 
-            // Stage 2. A fixed-size state: a growing Vec would be the user's
-            // own allocation.
-            let tripled = total.map_cell(b, |t| t * 3);
-            let product = (tripled, both).lift(b, |t, b| t.wrapping_mul(*b));
-            let products = product.steps(b);
-            let current = tripled.steps_with_current(b);
-            let count = numbers.accumulate(b, 0u64, |_, n| n + 1);
-            let recent = numbers.accumulate_mut(b, [0u64; 4], |x, r: &mut [u64; 4]| {
-                r.rotate_left(1);
-                r[3] = x;
-            });
-            let odd = numbers.accumulate_mut(b, false, |x, odd: &mut bool| *odd = x % 2 == 1);
-            let recent_sum = (recent.map_cell(b, |r| r.iter().sum::<u64>()), count)
-                .lift(b, |s, c| s.wrapping_add(*c));
-            let seen = numbers
-                .gate(odd)
-                .snapshot(recent, |x, r| x + r[0])
-                .hold(b, 0u64);
-            let running = numbers
-                .scan(b, 0u64, |x, s| (x.wrapping_add(*s), s.wrapping_add(x)))
-                .hold(b, 0u64);
-            let stage2 = (
-                (products, current),
-                (recent, recent_sum),
-                (seen, running, product),
-            );
-
-            // Stage 3: loops.
-            let (counted, counted_loop) = b.cell_loop::<u64>();
-            let counted_view = counted.steps(b);
-            let next = numbers.snapshot(counted, |_, n| n + 1).hold(b, 0u64);
-            counted_loop.close(b, next);
-            let (acc_fwd, acc_loop) = b.cell_loop::<u64>();
-            let halved = acc_fwd.map_cell(b, |s| s / 2);
-            let acc = numbers
-                .snapshot(halved, |x, h| x + h)
-                .accumulate(b, 1u64, |x, s| (s + x) % 1_000_003);
-            acc_loop.close(b, acc);
-            let (x_fwd, x_loop) = b.cell_loop::<u64>();
-            let (y_fwd, y_loop) = b.cell_loop::<u64>();
-            let x = numbers.snapshot(y_fwd, |t, y| (t + y) % 1000).hold(b, 1u64);
-            let y = merged
-                .snapshot(x_fwd, |m, x| (m + x * 2) % 1000)
-                .hold(b, 2u64);
-            x_loop.close(b, x);
-            y_loop.close(b, y);
-            let joined = (x_fwd, y_fwd, total).lift(b, |x, y, t| x * 1000 + y + t);
-            let joined_view = joined.steps(b);
-            let (sums, sums_loop) = b.stream_loop::<u64>();
-            let last = sums.hold(b, 0u64);
-            sums_loop.close(b, numbers.snapshot(last, |x, l| x.wrapping_add(*l)));
-            let (window, window_loop) = b.state_loop::<[u64; 4]>();
-            let windowed = numbers.snapshot(window, |x, w| x + w[3]).accumulate_mut(
-                b,
-                [0u64; 4],
-                |x, w: &mut [u64; 4]| {
-                    w.rotate_left(1);
-                    w[3] = x % 1000;
-                },
-            );
-            window_loop.close(b, windowed);
-            let stage3 = (
-                (counted, counted_view, acc_fwd),
-                (joined, joined_view),
-                (last, window),
-            );
-
-            // Stage 4: an array's iterator allocates nothing, so what the
-            // split keeps between children is the capture's own stack.
-            let items = numbers.map(|x| [x, x + 1, x + 2]).split(b);
-            let later = numbers.defer(b);
-            let children = items
-                .merge(b, later, |i, l| i.wrapping_mul(31).wrapping_add(l))
-                .share(b);
-            let last_child = children.hold(b, 0u64);
-            let (down, down_loop) = b.stream_loop::<u64>();
-            let again = down.filter(|n| *n > 1).map(|n| n - 1).defer(b);
-            let countdown = numbers.map(|x| x % 4).or_else(b, again).share(b);
-            down_loop.close(b, countdown);
-            let counted_down = countdown.accumulate(b, 0u64, |n, t| t.wrapping_add(n));
-            let stage4 = (children, last_child, countdown, counted_down);
-
-            // Stage 5: each drive below sends i and then i + 1, so every
-            // switch's outer steps twice per drive and moves once, between
-            // two inners it has followed before.
-            let picked = numbers
-                .map(move |x| if x % 2 == 0 { total } else { tripled })
-                .hold(b, total);
-            b.depends(&picked, &[&total, &tripled]);
-            let switched = picked.switch_cell(b);
-            let switched_view = switched.steps(b);
-            let evens = numbers.filter(|x| x % 2 == 0).share(b);
-            let odds = numbers.filter(|x| x % 2 == 1).share(b);
-            let followed = numbers
-                .map(move |x| if x % 2 == 0 { odds } else { evens })
-                .hold(b, evens);
-            b.depends(&followed, &[&odds, &evens]);
-            let followed = followed.switch_stream(b).share(b);
-            let plus = numbers.map(|x| x + 1).node(b);
-            let plus = b.constant(plus);
-            let times = numbers.map(|x| x.wrapping_mul(3)).node(b);
-            let times = b.constant(times);
-            let lines = numbers
-                .map(move |x| if x % 2 == 0 { plus } else { times })
-                .hold(b, plus);
-            b.depends(&lines, &[&plus, &times]);
-            let lines = lines.switch_cell(b);
-            let taken = lines.switch_stream(b).share(b);
-            let stage5 = (switched, switched_view, followed, taken);
-
-            // Stage 6: a construct marked at every transaction whose chain
-            // passes nothing, and one over an input only the negative
-            // control sends to, whose closure builds a hold and a map_cell
-            // that a switch_cell follows.
-            let rejected = numbers
-                .filter(|x| *x == u64::MAX)
-                .construct(b, |b, x| b.constant(x));
-            let (opens, opens_in) = b.input::<u64>();
-            let zero = b.constant(0u64);
-            let opening = opens.construct(b, move |b, k| {
-                let latest = numbers.map(move |x| x + k).hold(b, k);
-                latest.map_cell(b, |l| l * 2)
-            });
-            b.depends(&opening, &[&numbers]);
-            let opened = opening.hold(b, zero).switch_cell(b);
-            // Returned, so that the construct that never fires stays and is
-            // marked at every transaction.
-            let stage6 = (opens_in, opened, rejected);
-            (
-                (numbers_in, bumps_in, open_in),
-                (total, both, merged),
-                (stage2, stage3, stage4, stage5, stage6),
-            )
+        // Stage 2. A fixed-size state: a growing Vec would be the user's
+        // own allocation.
+        let tripled = total.map_cell(b, |t| t * 3);
+        let product = (tripled, both).lift(b, |t, b| t.wrapping_mul(*b));
+        let products = product.steps(b);
+        let current = tripled.steps_with_current(b);
+        let count = numbers.accumulate(b, 0u64, |_, n| n + 1);
+        let recent = numbers.accumulate_mut(b, [0u64; 4], |x, r: &mut [u64; 4]| {
+            r.rotate_left(1);
+            r[3] = x;
         });
+        let odd = numbers.accumulate_mut(b, false, |x, odd: &mut bool| *odd = x % 2 == 1);
+        let recent_sum = (recent.map_cell(b, |r| r.iter().sum::<u64>()), count)
+            .lift(b, |s, c| s.wrapping_add(*c));
+        let seen = numbers
+            .gate(odd)
+            .snapshot(recent, |x, r| x + r[0])
+            .hold(b, 0u64);
+        let running = numbers
+            .scan(b, 0u64, |x, s| (x.wrapping_add(*s), s.wrapping_add(x)))
+            .hold(b, 0u64);
+        let stage2 = (
+            (products, current),
+            (recent, recent_sum),
+            (seen, running, product),
+        );
+
+        // Stage 3: loops.
+        let (counted, counted_loop) = b.cell_loop::<u64>();
+        let counted_view = counted.steps(b);
+        let next = numbers.snapshot(counted, |_, n| n + 1).hold(b, 0u64);
+        counted_loop.close(b, next);
+        let (acc_fwd, acc_loop) = b.cell_loop::<u64>();
+        let halved = acc_fwd.map_cell(b, |s| s / 2);
+        let acc = numbers
+            .snapshot(halved, |x, h| x + h)
+            .accumulate(b, 1u64, |x, s| (s + x) % 1_000_003);
+        acc_loop.close(b, acc);
+        let (x_fwd, x_loop) = b.cell_loop::<u64>();
+        let (y_fwd, y_loop) = b.cell_loop::<u64>();
+        let x = numbers.snapshot(y_fwd, |t, y| (t + y) % 1000).hold(b, 1u64);
+        let y = merged
+            .snapshot(x_fwd, |m, x| (m + x * 2) % 1000)
+            .hold(b, 2u64);
+        x_loop.close(b, x);
+        y_loop.close(b, y);
+        let joined = (x_fwd, y_fwd, total).lift(b, |x, y, t| x * 1000 + y + t);
+        let joined_view = joined.steps(b);
+        let (sums, sums_loop) = b.stream_loop::<u64>();
+        let last = sums.hold(b, 0u64);
+        sums_loop.close(b, numbers.snapshot(last, |x, l| x.wrapping_add(*l)));
+        let (window, window_loop) = b.state_loop::<[u64; 4]>();
+        let windowed = numbers.snapshot(window, |x, w| x + w[3]).accumulate_mut(
+            b,
+            [0u64; 4],
+            |x, w: &mut [u64; 4]| {
+                w.rotate_left(1);
+                w[3] = x % 1000;
+            },
+        );
+        window_loop.close(b, windowed);
+        let stage3 = (
+            (counted, counted_view, acc_fwd),
+            (joined, joined_view),
+            (last, window),
+        );
+
+        // Stage 4: an array's iterator allocates nothing, so what the
+        // split keeps between children is the capture's own stack.
+        let items = numbers.map(|x| [x, x + 1, x + 2]).split(b);
+        let later = numbers.defer(b);
+        let children = items
+            .merge(b, later, |i, l| i.wrapping_mul(31).wrapping_add(l))
+            .share(b);
+        let last_child = children.hold(b, 0u64);
+        let (down, down_loop) = b.stream_loop::<u64>();
+        let again = down.filter(|n| *n > 1).map(|n| n - 1).defer(b);
+        let countdown = numbers.map(|x| x % 4).or_else(b, again).share(b);
+        down_loop.close(b, countdown);
+        let counted_down = countdown.accumulate(b, 0u64, |n, t| t.wrapping_add(n));
+        let stage4 = (children, last_child, countdown, counted_down);
+
+        // Stage 5: each drive below sends i and then i + 1, so every
+        // switch's outer steps twice per drive and moves once, between
+        // two inners it has followed before.
+        let picked = numbers
+            .map(move |x| if x % 2 == 0 { total } else { tripled })
+            .hold(b, total);
+        b.depends(&picked, &[&total, &tripled]);
+        let switched = picked.switch_cell(b);
+        let switched_view = switched.steps(b);
+        let evens = numbers.filter(|x| x % 2 == 0).share(b);
+        let odds = numbers.filter(|x| x % 2 == 1).share(b);
+        let followed = numbers
+            .map(move |x| if x % 2 == 0 { odds } else { evens })
+            .hold(b, evens);
+        b.depends(&followed, &[&odds, &evens]);
+        let followed = followed.switch_stream(b).share(b);
+        let plus = numbers.map(|x| x + 1).node(b);
+        let plus = b.constant(plus);
+        let times = numbers.map(|x| x.wrapping_mul(3)).node(b);
+        let times = b.constant(times);
+        let lines = numbers
+            .map(move |x| if x % 2 == 0 { plus } else { times })
+            .hold(b, plus);
+        b.depends(&lines, &[&plus, &times]);
+        let lines = lines.switch_cell(b);
+        let taken = lines.switch_stream(b).share(b);
+        let stage5 = (switched, switched_view, followed, taken);
+
+        // Stage 6: a construct marked at every transaction whose chain
+        // passes nothing, and one over an input only the negative
+        // control sends to, whose closure builds a hold and a map_cell
+        // that a switch_cell follows.
+        let rejected = numbers
+            .filter(|x| *x == u64::MAX)
+            .construct(b, |b, x| b.constant(x));
+        let (opens, opens_in) = b.input::<u64>();
+        let zero = b.constant(0u64);
+        let opening = opens.construct(b, move |b, k| {
+            let latest = numbers.map(move |x| x + k).hold(b, k);
+            latest.map_cell(b, |l| l * 2)
+        });
+        b.depends(&opening, &[&numbers]);
+        let opened = opening.hold(b, zero).switch_cell(b);
+        // Returned, so that the construct that never fires stays and is
+        // marked at every transaction.
+        let stage6 = (opens_in, opened, rejected);
+        (
+            (numbers_in, bumps_in, open_in),
+            (total, both, merged),
+            (stage2, stage3, stage4, stage5, stage6),
+        )
+    });
+    let ((numbers_in, bumps_in, open_in), (total, both, merged), later) = edge.keep();
     let (stage2, stage3, stage4, stage5, stage6) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
     let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
@@ -343,7 +353,7 @@ fn steady_state_transactions_do_not_allocate() {
     let (openings, on_opened) = tally();
     graph.listen_cell(opened, move |v| on_opened.set(*v)).keep();
 
-    let drive = |graph: &mut Graph, i: u64| {
+    let drive = |graph: &mut Runtime, i: u64| {
         graph.send(numbers_in, i);
         graph.transaction(|tx| {
             tx.send(bumps_in, i);
@@ -449,7 +459,7 @@ fn steady_state_transactions_do_not_allocate() {
 #[test]
 fn steady_state_collections_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, (go_in, clicks_in, made, shown)) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<u64>();
         let clicks = clicks.share(b);
         let (go, go_in) = b.input::<u64>();
@@ -464,11 +474,12 @@ fn steady_state_collections_do_not_allocate() {
         let shown = made.hold(b, zero).switch_cell(b);
         (go_in, clicks_in, made, shown)
     });
+    let (go_in, clicks_in, made, shown) = edge.keep();
     graph.set_collection_policy(CollectionPolicy::Manual);
     let newest: Rc<StdCell<Option<Cell<u64>>>> = Rc::new(StdCell::new(None));
     let writer = newest.clone();
     graph.listen(made, move |c| writer.set(Some(c))).keep();
-    let round = |graph: &mut Graph, k: u64| -> usize {
+    let round = |graph: &mut Runtime, k: u64| -> usize {
         graph.send(go_in, k);
         graph.send(clicks_in, 1);
         let before = allocations();
@@ -524,22 +535,23 @@ fn slot_writes_and_pumps_do_not_allocate() {
     static SENSOR: InputSlot<u64> = InputSlot::new(|a, b| a + b);
     static LEVEL: InputSlot<u64> = InputSlot::keep_latest();
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, total) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (sensor, sensor_in) = b.input::<u64>();
-        b.connect(sensor_in, &SENSOR);
+        b.connect(sensor_in, &SENSOR, 0);
         let (level, level_in) = b.input::<u64>();
-        b.connect(level_in, &LEVEL);
+        b.connect(level_in, &LEVEL, 0);
         sensor
             .merge(b, level, |s, l| s + l)
             .accumulate(b, 0u64, |n, t| t + n)
     });
+    let total = edge.keep();
     let (heard, sink) = tally();
     graph
         .listen_steps(total, move |_| sink.set(sink.get() + 1))
         .keep();
     let wakes = Arc::new(Wakes::default());
     graph.set_waker(Waker::from(wakes.clone()));
-    let round = |graph: &mut Graph, k: u64| {
+    let round = |graph: &mut Runtime, k: u64| {
         SENSOR.send(k);
         SENSOR.send(1);
         LEVEL.send(k);
@@ -569,16 +581,17 @@ fn slot_writes_and_pumps_do_not_allocate() {
 fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
     const UNITS: u64 = 1_000;
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    let (mut graph, edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         (numbers_in, numbers.accumulate(b, 0u64, |n, t| t + n))
     });
+    let (numbers_in, total) = edge.keep();
     let (heard, sink) = tally();
     graph
         .listen_steps(total, move |_| sink.set(sink.get() + 1))
         .keep();
     graph.set_waker(Waker::from(Arc::new(Wakes::default())));
-    let remote = graph.remote();
+    let remote = graph.remote_io();
     let (go, rounds) = mpsc::sync_channel::<()>(0);
     let (sent, filled) = mpsc::sync_channel::<usize>(0);
     let sender = thread::spawn(move || {
@@ -586,8 +599,10 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
         while rounds.recv().is_ok() {
             let before = allocations();
             for n in 0..UNITS / 2 {
-                remote.send(numbers_in, n);
-                remote.transaction(move |tx| tx.send(numbers_in, n));
+                remote.send(numbers_in, n).unwrap();
+                remote
+                    .transaction(move |tx| tx.send(numbers_in, n))
+                    .unwrap();
             }
             sent.send(allocations() - before).unwrap();
         }
@@ -611,4 +626,32 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
         on_sender[1..].iter().all(|&n| n == UNITS as usize),
         "one allocation a unit once the queue has grown: {on_sender:?}"
     );
+}
+
+/// A kept guard leaks nothing (RFD 3). `keep` gives up the guard's share
+/// and leaves its count of owners raised, and the runtime frees the state
+/// it shares with the guard when it drops. So over a round that builds a
+/// runtime, keeps a listener and an anchor, and drops the runtime, this
+/// thread frees everything it allocated. The first round warms up what a
+/// thread allocates once.
+#[test]
+fn keeping_a_guard_leaks_nothing_once_the_runtime_drops() {
+    DRIVER.with(|driver| driver.set(true));
+    let round = || {
+        let (mut graph, edge) = Runtime::build(|b| {
+            let (numbers, numbers_in) = b.input::<u64>();
+            (numbers_in, numbers.hold(b, 0u64))
+        });
+        let (numbers_in, held) = edge.keep();
+        graph.listen_cell(held, |_| ()).keep();
+        graph.anchor(held).keep();
+        graph.send(numbers_in, 1);
+        drop(graph);
+    };
+    round();
+    let (allocated, freed) = (allocations(), frees());
+    round();
+    let (allocated, freed) = (allocations() - allocated, frees() - freed);
+    assert!(allocated > 0, "the round allocates");
+    assert_eq!(freed, allocated, "the round leaked");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "bough-gtk"
-description = "Spike, not API: GTK 4 on bough's same-thread handle."
+description = "Spike, not API: GTK 4 on bough's Io."
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"

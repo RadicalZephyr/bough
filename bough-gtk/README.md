@@ -1,24 +1,24 @@
 # bough-gtk: a spike
 
 Not API, and not meant to merge. This crate shows what GTK 4 code looks
-like on bough's same-thread handle, so that the handle can be judged
-from real widgets. The handle is on this branch, in `bough/src/handle.rs`.
+like on bough's `Io`, so that the I/O edge can be judged from real
+widgets. The `Io` is on this branch, in `bough/src/io.rs`.
 
-## Why a handle
+## Why the `Io`
 
-GTK runs a signal handler at once, even while the graph is busy:
+GTK runs a signal handler at once, even while the runtime pumps:
 
 - a listener writes to an entry, and the entry runs its `changed`
   handler;
 - a listener changes a list view's model, and GTK binds the new row
   there and then;
-- `listen_cell` calls its listener as it registers, and a widget write
-  in that call runs a handler.
+- a cell listener's first call writes a widget, and the write runs a
+  handler.
 
-With the graph behind `Rc<RefCell<Graph>>`, each of these is a double
-borrow. A panic cannot unwind through a gtk-rs handler, so the process
-aborts. With the handle, a call made while the graph is busy waits and
-runs right after the transaction.
+With the runtime behind `Rc<RefCell<Runtime>>`, each of these is a
+double borrow. A panic cannot unwind through a gtk-rs handler, so the
+process aborts. Through the `Io`, every call waits for the next pump,
+so none of them borrows the runtime.
 
 ## What is here
 
@@ -26,15 +26,16 @@ runs right after the transaction.
   - `send` and `sender`, for signal handlers;
   - `bind_label`;
   - `bind_entry`, which blocks its own handler while it writes;
-  - `tie`, which drops a listener when its widget goes;
+  - `tie`, which drops a listener, or the driver, when its widget goes;
   - `list_factory` and `sync_store`, for list views;
-  - `spawn_driver`, a future on the main loop that pumps.
+  - `spawn_driver`, which hands the runtime to the `Driver`, a future on
+    the main loop that pumps it. Dropping the `Driver` stops it.
 - `examples/app/mod.rs`: a graph that knows nothing of GTK, and a row
-  component that wires itself through the handle.
+  component that wires itself through the `Io`.
 - `examples/demo.rs`: one window with all of it.
-- `tests/scenarios.rs`: nine headless scenarios. Each drives real widgets
-  by emitting their signals, and runs in its own process, so that an
-  abort shows as one.
+- `tests/scenarios.rs`: eleven headless scenarios. Each drives real
+  widgets by emitting their signals, and runs in its own process, so
+  that an abort shows as one.
 
 ## Running it
 
@@ -53,18 +54,24 @@ the scenarios whose names contain it: `cargo test -- entry`.
 
 ## What the scenarios show
 
-- Rows wire themselves in the listener that hears of them. Removing one
-  drops its widget, which drops its listener, and a collection frees its
-  nodes.
-- A list view binds new rows inside the listener that changed its model,
-  and the labels are right before the main loop runs.
+- Rows wire themselves in the listener that hears of them, and their
+  labels' listeners register at the next pump. Removing one drops its
+  widget, which drops its listener, and a collection frees its nodes.
+- A list view binds new rows inside the listener that changed its model.
+  Their labels are right from the next pump, which for the driver is a
+  turn of the main loop later: the paint probe's one late frame.
 - A listener's first call can set off a handler that sends, without an
   abort.
-- The driver runs remote sends from another thread. It also runs the
-  queue between the units of one pump, so rows one pump opens survive the
-  collection before the next unit.
-- Dropping the owner ends the driver, and later handlers find the graph
-  gone.
+- The driver runs remote sends from another thread. Rows that one pump
+  opens survive the collection after their unit, because a registration
+  keeps what it names alive while it waits for the next pump.
+- Dropping the `Driver` stops the pumping, the runtime drops at the main
+  loop's next turn, and later calls find it gone.
+- A unit the pump drops is logged, and the driver pumps again for what
+  waited behind it.
+- The driver ends its runtime on purpose, with `shutdown`, so a kept
+  once-listener still waiting doesn't set off a debug build's check. Its
+  panic would abort, since glib drops the runtime from C.
 - Waiting does not cure an echo. A two-way binding that does not block
   its own handler flips between "HELLO" and "" at every turn of the main
   loop, without an abort and without settling. `bind_entry` blocks the
@@ -72,9 +79,10 @@ the scenarios whose names contain it: `cargo test -- entry`.
 
 ## What is missing
 
-- A panic still aborts. A stale token in a call that waited panics in a
-  debug build when the call runs, and `Io::pump` panics as `Graph::pump`
-  does. The handle has no `try_` forms yet.
+- A panic in a GTK handler still aborts. A panic in a listener the
+  driver runs doesn't: glib catches it where it polls the driver, which
+  ends the driver, and the poisoned runtime drops with it. No scenario
+  tests that.
 - `sync_store` only appends and removes; it does not move rows.
 - Nothing tests a real scroll. When the investigation scrolled from code,
   GTK bound rows outside the frame clock's paint.

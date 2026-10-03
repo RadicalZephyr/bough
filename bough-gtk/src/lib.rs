@@ -1,16 +1,16 @@
-//! Spike, not API: GTK 4 on bough's same-thread handle.
+//! Spike, not API: GTK 4 on bough's `Io`.
 //!
-//! What a `bough-gtk` crate would give an app. The app shares its graph
-//! through a [`bough::Owner`], and every widget reaches it through a
-//! [`bough::Io`]. GTK runs handlers while the graph is busy: a listener
-//! writes to a widget, and the widget runs its handler at once, or a list
-//! view binds a row inside a model change a listener made. The handle
-//! lets that code send and register anyway: its calls wait for the
-//! transaction to end.
+//! What a `bough-gtk` crate would give an app. The [`Driver`], a future on
+//! the main loop, owns the runtime and pumps it, and every widget reaches
+//! the runtime through a [`bough::Io`], whose calls wait for the next
+//! pump. GTK runs handlers at its own times: a listener writes to a
+//! widget, and the widget runs its handler at once, or a list view binds a
+//! row inside a model change a listener made. That code can call the `Io`
+//! anyway, since a call only queues.
 //!
 //! A panic in a GTK handler aborts the process, since gtk-rs calls it
 //! from C and cannot unwind. So these helpers report refusals instead of
-//! panicking: [`send`] ignores a graph that is gone and logs the rest.
+//! panicking: [`send`] ignores a runtime that is gone and logs the rest.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,12 +18,12 @@ use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
 
-use bough::{CellRef, Input, Io, IoError, Listener, NowError};
+use bough::{CellRef, Input, Io, IoError, Listener, PumpError, Runtime};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 use gtk::{gio, glib::object::IsA};
 
-/// Sends from a signal handler. A graph that is gone is ignored, since a
+/// Sends from a signal handler. A runtime that is gone is ignored, since a
 /// window's widgets can run handlers while it closes; other refusals are
 /// logged, since a panic here would abort.
 pub fn send<A: 'static>(io: &Io, input: Input<A>, value: A) {
@@ -40,8 +40,9 @@ pub fn sender<A: 'static>(io: &Io, input: Input<A>) -> impl Fn(A) + Clone + 'sta
     move |value| send(&io, input, value)
 }
 
-/// Keeps `handle`, a [`Listener`] or an [`Anchor`](bough::Anchor), for as
-/// long as `widget` lives, and drops it when the widget is finalized.
+/// Keeps `handle`, such as a [`Listener`], an [`Anchor`](bough::Anchor) or
+/// the [`Driver`], for as long as `widget` lives, and drops it when the
+/// widget is finalized.
 pub fn tie<T: 'static>(widget: &impl IsA<glib::Object>, handle: T) {
     widget.add_weak_ref_notify_local(move || drop(handle));
 }
@@ -101,33 +102,66 @@ where
     Ok(())
 }
 
-/// Spawns the driver on the thread's main context: a future that pumps
-/// whenever a remote send, a slot write or a call the handle's queue left
-/// over wakes it. It ends when the graph is gone or poisoned.
-pub fn spawn_driver(io: &Io) -> glib::JoinHandle<()> {
-    let io = io.clone();
-    glib::spawn_future_local(poll_fn(move |cx| {
-        let polled = io
-            .with_graph(|graph| graph.set_waker(cx.waker().clone()))
-            .and_then(|()| io.pump());
-        match polled {
+/// The driver: a future on the thread's main context that owns the
+/// runtime and pumps it whenever a call through an [`Io`] or a
+/// [`RemoteIo`](bough::RemoteIo), or a slot write, wakes it. A pump that
+/// drops a unit is logged, and the driver pumps again for the rest. A
+/// poisoned runtime ends it.
+///
+/// Dropping the `Driver` stops the pumping at once. The runtime ends with
+/// the future at the main loop's next turn, on purpose, with
+/// [`Runtime::shutdown`], and from then on a call through an `Io` reports
+/// [`IoError::Gone`]. `tie(&window, driver)` ends it with the window.
+#[must_use = "dropping the driver stops it"]
+pub struct Driver(glib::JoinHandle<()>);
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Spawns the [`Driver`] on the thread's main context, with the runtime.
+pub fn spawn_driver(runtime: Runtime) -> Driver {
+    let mut owned = Owned(Some(runtime));
+    Driver(glib::spawn_future_local(poll_fn(move |cx| {
+        let Some(runtime) = owned.0.as_mut() else {
+            return Poll::Ready(());
+        };
+        runtime.set_waker(cx.waker().clone());
+        match runtime.try_pump() {
             Ok(()) => Poll::Pending,
-            // A nested main loop inside a handler: try again at its next turn.
-            Err(NowError::Busy) => {
+            Err(PumpError::Poisoned) => Poll::Ready(()),
+            Err(error) => {
+                glib::g_critical!("bough-gtk", "the pump dropped a unit: {error:?}");
+                // What the failure left pending waits for the next pump.
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            Err(_) => Poll::Ready(()),
         }
-    }))
+    })))
+}
+
+/// The runtime inside the driver's future. An app may close with a request
+/// still out, and a debug build's check for one panics as a runtime drops.
+/// glib drops the future from C, where that panic would abort, so this
+/// ends the runtime on purpose, with [`Runtime::shutdown`].
+struct Owned(Option<Runtime>);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown();
+        }
+    }
 }
 
 /// A factory for a list view whose model holds `T`s as
 /// `glib::BoxedAnyObject`s. `setup` makes a row's widget. `bind` wires it
-/// to its item through the handle, and returns the listeners, which are
+/// to its item through the `Io`, and returns the listeners, which are
 /// dropped when GTK unbinds the row. GTK binds at its own time, often
 /// inside a model change a listener made, which is why registration goes
-/// through the handle.
+/// through the `Io`.
 pub fn list_factory<T, W>(
     io: &Io,
     setup: impl Fn() -> W + 'static,

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use bough::{Cell, Graph, Input, Io, IoError, Shared, Source, Trace};
+use bough::{Cell, Input, Io, IoError, Runtime, Shared, Source, Trace};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 
@@ -43,13 +43,13 @@ pub struct App {
     pub shout: Cell<String>,
     pub flag_in: Input<bool>,
     pub flag: Cell<bool>,
-    /// Ticks another thread sends through a `Remote`.
+    /// Ticks another thread sends through a `RemoteIo`.
     pub ticks_in: Input<u64>,
     pub clock: Cell<String>,
 }
 
-pub fn build() -> (Graph, App) {
-    Graph::build(|b| {
+pub fn build() -> (Runtime, App) {
+    let (graph, edge) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
         let counter_label = count.map_cell(b, |n| format!("Clicked {n} times"));
@@ -97,10 +97,11 @@ pub fn build() -> (Graph, App) {
             ticks_in,
             clock,
         }
-    })
+    });
+    (graph, edge.keep())
 }
 
-/// A row that wires itself. It takes the handle, not the graph, so it can
+/// A row that wires itself. It takes an `Io`, not the runtime, so it can
 /// be made anywhere, including in the listener that hears of the row.
 pub struct RowView {
     pub line: gtk::Box,

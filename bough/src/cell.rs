@@ -13,7 +13,7 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 /// Anything that names a cell: a [`Cell`], or a [`State`].
 ///
 /// Every operation that reads a cell's value takes either: `snapshot`,
-/// `gate`, `lift`, and on [`Graph`](crate::Graph) `sample`, `listen_cell`
+/// `gate`, `lift`, and on [`Runtime`](crate::Runtime) `sample`, `listen_cell`
 /// and `listen_steps` and their `try_` forms; `sample` and `map_cell` exist
 /// on both, and `map_cell` over a `State` is a `State`. Each reads the
 /// value from before the instant, or the committed value after it, and
@@ -26,9 +26,9 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 /// types are the only [`TokenRef`]s.
 ///
 /// ```
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (mut graph, (joins_in, members)) = Graph::build(|b| {
+/// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (joins, joins_in) = b.input::<String>();
 ///     let (lines, _lines_in) = b.input::<String>();
 ///     let joins = joins.share(b);
@@ -41,6 +41,7 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 ///     assert!(members.sample(b).is_empty());
 ///     (joins_in, members)
 /// });
+/// let (joins_in, members) = edge.keep();
 /// let _sizes = graph.listen_cell(members, |m| println!("{} members", m.len()));
 /// graph.send(joins_in, "ada".to_string());
 /// assert_eq!(graph.sample(members).len(), 1);
@@ -141,14 +142,15 @@ impl<A: 'static> State<A> {
     /// does not exist until commit either, so it has no stream view.
     ///
     /// ```compile_fail,E0599
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (_graph, _) = Graph::build(|b| {
+    /// let (_graph, edge) = Runtime::build(|b| {
     ///     let (names, _names_in) = b.input::<String>();
     ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
     ///     let count = members.map_cell(b, |m| m.len());
     ///     let _counts = count.steps(b); // error: no method named `steps` found for struct `State`
     /// });
+    /// edge.keep();
     /// ```
     pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> State<B>
     where
@@ -169,9 +171,9 @@ impl<A: 'static> Cell<A> {
     /// expression, and a caller that wants to keep a value clones it:
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (graph, _) = Graph::build(|b| {
+    /// let (graph, edge) = Runtime::build(|b| {
     ///     let (a, _a_in) = b.input_cell(1u32);
     ///     let (c, _c_in) = b.input_cell(2u32);
     ///     let text = format!("{} {}", a.sample(b), c.sample(b));
@@ -180,6 +182,7 @@ impl<A: 'static> Cell<A> {
     ///     let sum = *x + *y;
     ///     (text, sum)
     /// });
+    /// edge.keep();
     /// ```
     pub fn sample<M: Mode>(self, build: &Build<M>) -> &A {
         let i = build.check(self.token);
@@ -217,7 +220,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// value aren't observable." This stream observes them, and so depends on
     /// how the cell was built rather than only on what it holds. Use it where
     /// an operational situation needs it, such as sending a cell over a wire;
-    /// from I/O code, [`Graph::listen_steps`](crate::Graph::listen_steps) is
+    /// from I/O code, [`Runtime::listen_steps`](crate::Runtime::listen_steps) is
     /// the same view. It does not exist on a [`State`], whose new value does
     /// not exist until commit.
     ///
@@ -236,7 +239,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// Sodium's `value`: fires once at its creation instant with the
     /// post-instant value, then on every step like [`steps`](Cell::steps),
     /// with the same warning. From I/O code,
-    /// [`Graph::listen_cell`](crate::Graph::listen_cell) is the same view.
+    /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) is the same view.
     ///
     /// Built in the build closure, it fires in transaction zero, so a hold
     /// built there over it starts the graph at the cell's value. A creation
@@ -283,9 +286,9 @@ impl<A: 'static> Cell<Cell<A>> {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (english_in, choose_in, shown)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (english, english_in) = b.input_cell("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (choose, choose_in) = b.input::<bool>();
@@ -296,6 +299,7 @@ impl<A: 'static> Cell<Cell<A>> {
     ///     b.depends(&language, &[&french, &english]);
     ///     (english_in, choose_in, language.switch_cell(b))
     /// });
+    /// let (english_in, choose_in, shown) = edge.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen_steps(shown, move |s| log.borrow_mut().push(s.clone())).keep();
@@ -330,13 +334,13 @@ impl<A: 'static> Cell<State<A>> {
     /// [`switch_cell`](Cell::switch_cell) over states: the state the outer
     /// cell currently selects. The result is a [`State`] too, with no
     /// stream view, since the selected state's new value does not exist
-    /// until commit; its listeners on [`Graph`](crate::Graph) run on every
+    /// until commit; its listeners on [`Runtime`](crate::Runtime) run on every
     /// step, and every cell reader accepts it.
     ///
     /// ```
-    /// use bough::{Graph, Source, State};
+    /// use bough::{Runtime, Source, State};
     ///
-    /// let (mut graph, (names_in, pick_in, current)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (names, names_in) = b.input::<String>();
     ///     let names = names.share(b);
     ///     let all = names.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
@@ -349,6 +353,7 @@ impl<A: 'static> Cell<State<A>> {
     ///     let current: State<Vec<String>> = chosen.switch_cell(b);
     ///     (names_in, pick_in, current)
     /// });
+    /// let (names_in, pick_in, current) = edge.keep();
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "grace".to_string());
     /// graph.send(pick_in, true);
@@ -377,9 +382,9 @@ where
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (keys_in, mouse_in, focus_in, events)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (keys, keys_in) = b.input::<char>();
     ///     let (mouse, mouse_in) = b.input::<char>();
     ///     let keys = keys.share(b);
@@ -391,6 +396,7 @@ where
     ///     b.depends(&source, &[&mouse, &keys]); // what the closure selects from
     ///     (keys_in, mouse_in, focus_in, source.switch_stream(b))
     /// });
+    /// let (keys_in, mouse_in, focus_in, events) = edge.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen(events, move |e| log.borrow_mut().push(e)).keep();
@@ -429,14 +435,15 @@ where
     /// stream from several places, [`share`](crate::Source::share) it.
     ///
     /// ```should_panic
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (_graph, _) = Graph::build(|b| {
+    /// let (_graph, edge) = Runtime::build(|b| {
     ///     let (clicks, _clicks_in) = b.input::<u32>();
     ///     let current = b.constant(clicks);
     ///     let _first = current.switch_stream(b);
     ///     let _second = current.switch_stream(b); // panics: a second switch
     /// });
+    /// edge.keep();
     /// ```
     ///
     /// The switch's slot keeps an event nobody consumed between
@@ -444,14 +451,15 @@ where
     /// graph refuses a switch between streams of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::Graph;
+    /// use bough::Runtime;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, edge) = Runtime::build_threaded(|b| {
     ///     let quiet = b.never::<Rc<u32>>();
     ///     let selected = b.constant(quiet);
     ///     let _events = selected.switch_stream(b); // error: Rc is not Send
     /// });
+    /// edge.keep();
     /// ```
     pub fn switch_stream<M>(self, build: &mut Build<M>) -> Stream<S::Event>
     where

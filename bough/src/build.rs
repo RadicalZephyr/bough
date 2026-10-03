@@ -12,7 +12,10 @@ use crate::engine::edge::{Connection, Drain};
 use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
+use crate::guard::{Liveness, Released, Stamps};
+use crate::io::IoQueue;
 use crate::mode::{Accepts, Erase, Local, Mode};
+use crate::runtime::{Anchor, Anchored};
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::slot::InputSlot;
 use crate::source::Source;
@@ -40,11 +43,11 @@ fn next_graph_id() -> u32 {
 
 /// The context every node-creating operation requires.
 ///
-/// It exists inside [`Graph::build`](crate::Graph::build) and inside
+/// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
-/// `listen`; I/O lives on [`Graph`](crate::Graph).
+/// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///
-/// It is the engine's core itself: a `Graph` owns one, and the build closure
+/// It is the engine's core itself: a `Runtime` owns one, and the build closure
 /// borrows it. So it has no lifetime parameter and no public constructor.
 pub struct Build<M: Mode = Local> {
     pub(crate) graph_id: u32,
@@ -56,19 +59,83 @@ pub struct Build<M: Mode = Local> {
     pub(crate) s: Sched,
     /// The I/O edge: connected slots, the inbox and the driver's waker.
     pub(crate) edge: Edge,
+    /// The queue the runtime's `Io`s share, in `Local`.
+    pub(crate) io: M::IoQueue,
+    /// The anchored nodes, each with the liveness its anchor shares. A
+    /// released anchor is taken out at the next collection.
+    pub(crate) anchors: Vec<(u32, Liveness)>,
+    /// The count of released guards, which every guard's state shares, so
+    /// that a release needs no graph access.
+    pub(crate) released: Released,
+    /// What every call a handle queues takes its stamp from.
+    pub(crate) stamps: Stamps,
+    /// The state every spent listener's entry shares, which has no owner.
+    pub(crate) ownerless: Liveness,
 }
 
 impl<M: Mode> Build<M> {
     pub(crate) fn new() -> Self {
         let graph_id = next_graph_id();
+        let released = Released::new();
+        let stamps = Stamps::new();
         Build {
             graph_id,
             store: Store::new(),
             tx: 0,
             in_tx: false,
             s: Sched::default(),
-            edge: Edge::new(graph_id),
+            edge: Edge::new(graph_id, &released, &stamps),
+            io: M::IoQueue::new(graph_id, &released, &stamps),
+            anchors: Vec::new(),
+            ownerless: Liveness::ownerless(&released),
+            released,
+            stamps,
         }
+    }
+
+    /// Anchors what a build closure or a
+    /// [`construct`](crate::Source::construct) closure sends out to I/O
+    /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
+    /// [`Anchored`] it returns carries the value, and roots every token its
+    /// [`Trace`] finds until the last of its clones drops. A construct that
+    /// returns one sends its row to the edge already rooted, so the I/O code
+    /// that receives it needn't anchor it.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::{Runtime, Source};
+    ///
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         b.anchor((bumps_in, count))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// let (open_in, opened) = edge.keep();
+    /// graph.set_collect_after_every_unit(true); // a test setting
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
+    /// graph.send(bumps_in, 5);
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    pub fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        // Every token is checked before any is rooted.
+        let nodes: Vec<u32> = tracer.visited.into_iter().map(|t| self.check(t)).collect();
+        let flag = Liveness::new(&self.released);
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+        Anchored::new(value, Anchor::new(Some(flag)))
     }
 
     /// The hold of an input cell. Its chain is the input's own stream token,
@@ -175,15 +242,16 @@ impl<M: Mode> Build<M> {
     /// when the definition steps.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (ticks_in, count)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
     ///     let (ticks, ticks_in) = b.input::<()>();
     ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
     ///     count_loop.close(b, next);                             // close
     ///     (ticks_in, count)
     /// });
+    /// let (ticks_in, count) = edge.keep();
     /// graph.send(ticks_in, ());
     /// graph.send(ticks_in, ());
     /// assert_eq!(*graph.sample(count), 2);
@@ -231,9 +299,9 @@ impl<M: Mode> Build<M> {
     /// may also close with a [`Cell`], giving a forward that only reads.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (names_in, members)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
     ///     let (names, names_in) = b.input::<String>();
     ///     // A name joins once: the snapshot reads the members before the instant.
@@ -244,6 +312,7 @@ impl<M: Mode> Build<M> {
     ///     members_loop.close(b, joined);
     ///     (names_in, members)
     /// });
+    /// let (names_in, members) = edge.keep();
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "grace".to_string());
@@ -269,16 +338,17 @@ impl<M: Mode> Build<M> {
     /// forward's own node, so a stream loop adds no node to its definition.
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
-    /// let (mut graph, (numbers_in, total)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (sums, sums_loop) = b.stream_loop::<u32>();
     ///     let total = sums.hold(b, 0u32);
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     sums_loop.close(b, numbers.snapshot(total, |n, t| n + t));
     ///     (numbers_in, total)
     /// });
+    /// let (numbers_in, total) = edge.keep();
     /// graph.send(numbers_in, 2);
     /// graph.send(numbers_in, 3);
     /// assert_eq!(*graph.sample(total), 5);
@@ -322,9 +392,9 @@ impl<M: Mode> Build<M> {
     /// stale-token error. Here the map emits a cell nothing else names:
     ///
     /// ```
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     ///
-    /// let (mut graph, (pick_in, shown)) = Graph::build(|b| {
+    /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let english = b.constant("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (pick, pick_in) = b.input::<bool>();
@@ -336,7 +406,8 @@ impl<M: Mode> Build<M> {
     ///     b.depends(&language, &[&french, &english]);
     ///     (pick_in, language.switch_cell(b))
     /// });
-    /// graph.set_collect_after_every_transaction(true); // a test setting
+    /// let (pick_in, shown) = edge.keep();
+    /// graph.set_collect_after_every_unit(true); // a test setting
     /// graph.send(pick_in, true);
     /// assert_eq!(graph.sample(shown), "bonjour");
     /// ```
@@ -360,16 +431,20 @@ impl<M: Mode> Build<M> {
         self.store.cold[n as usize].reach.extend(reach);
     }
 
-    /// Connects an [`InputSlot`] to an input, so that
-    /// [`pump`](crate::Graph::pump) drains it (RFD 7).
+    /// Connects an [`InputSlot`] to an input at `priority`, so that
+    /// [`pump`](crate::Runtime::pump) drains it (RFD 7).
     ///
-    /// Callable more than once for one input, one slot per producer; the
-    /// driver drains slots in connection order, each pending one as a
-    /// transaction of its own, so two slots are never simultaneous, even
-    /// on one input. The slot's fold and the input's coalescing function
-    /// are independent: the fold combines a burst between two pumps, the
-    /// coalescing function combines two sends inside one transaction, which
-    /// slots never cause.
+    /// The pump drains higher priorities first, the order RTIC gives its
+    /// tasks and the opposite of the NVIC's numbers, and equal priorities
+    /// in connection order. It drains each pending slot as a transaction
+    /// of its own, and each at most once per pump, so two slots are never
+    /// simultaneous, even on one input. A slot written while the pump runs
+    /// drains next, after the unit running then, unless it has drained in
+    /// that pump already. Callable more than once for one
+    /// input, one slot per producer. The slot's fold and the input's
+    /// coalescing function are independent: the fold combines a burst
+    /// between two pumps, the coalescing function combines two sends inside
+    /// one transaction, which slots never cause.
     ///
     /// A slot feeds one input of one graph, and panics if it is connected
     /// already; the graph disconnects it when it is dropped. A connection
@@ -380,17 +455,32 @@ impl<M: Mode> Build<M> {
     /// The slot exists where a lock for it does: under `std`, and with the
     /// `critical-section` feature.
     #[cfg(any(feature = "std", feature = "critical-section"))]
-    pub fn connect<A: Send + 'static>(&mut self, input: Input<A>, slot: &'static InputSlot<A>) {
+    pub fn connect<A: Send + 'static>(
+        &mut self,
+        input: Input<A>,
+        slot: &'static InputSlot<A>,
+        priority: u8,
+    ) {
         self.check(input.token);
         assert!(
             Drain::connect(slot, self.graph_id, self.edge.waker.as_ref()),
             "bough: an input slot connected twice: a slot feeds one input of one graph; \
              give a second producer or a second input a slot of its own"
         );
-        self.edge.slots.push(Connection {
-            input: input.token,
-            slot,
-        });
+        let slots = &mut self.edge.slots;
+        let at = slots
+            .iter()
+            .position(|connection| connection.priority < priority)
+            .unwrap_or(slots.len());
+        slots.insert(
+            at,
+            Connection {
+                input: input.token,
+                slot,
+                priority,
+                drained: 0,
+            },
+        );
     }
 }
 
@@ -402,23 +492,24 @@ impl<M: Mode> Build<M> {
 /// Consumed by `close`, so a loop cannot close twice:
 ///
 /// ```compile_fail,E0382
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
 ///     let (ticks, _ticks_in) = b.input::<()>();
 ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
 ///     count_loop.close(b, next);
 ///     count_loop.close(b, next); // error: use of moved value: `count_loop`
 /// });
+/// edge.keep();
 /// ```
 ///
 /// It cannot be used from inside a `construct` closure either:
 ///
 /// ```compile_fail,E0507
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (graph, _) = Graph::build(|b| {
+/// let (graph, edge) = Runtime::build(|b| {
 ///     let (events, _in) = b.input::<u32>();
 ///     let (forward, closer) = b.cell_loop::<u32>();
 ///     let _out = events.construct(b, move |b, n| {
@@ -426,6 +517,7 @@ impl<M: Mode> Build<M> {
 ///         closer.close(b, s.hold(b, n)); // error: cannot move out of a captured variable in an FnMut closure
 ///     });
 /// });
+/// edge.keep();
 /// ```
 pub struct CellLoop<A> {
     token: Token,
@@ -455,26 +547,28 @@ impl<A: 'static> CellLoop<A> {
 /// Its forward is a [`State`], which has no stream view:
 ///
 /// ```compile_fail,E0599
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
 ///     let _joins = members.steps(b); // error: no method named `steps` found for struct `State`
 /// });
+/// edge.keep();
 /// ```
 ///
 /// A cell loop's forward is a [`Cell`], which has, so a cell loop closes
 /// only with a `Cell`:
 ///
 /// ```compile_fail,E0308
-/// use bough::{Graph, Source};
+/// use bough::{Runtime, Source};
 ///
-/// let (_graph, _) = Graph::build(|b| {
+/// let (_graph, edge) = Runtime::build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
 ///     let (names, _names_in) = b.input::<String>();
 ///     let joined = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     members_loop.close(b, joined); // error: expected `Cell<Vec<String>>`, found `State<Vec<String>>`
 /// });
+/// edge.keep();
 /// ```
 pub struct StateLoop<A> {
     token: Token,
@@ -518,14 +612,15 @@ impl<A: 'static> StreamLoop<A> {
     /// `Threaded` graph refuses a loop of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Graph, Source};
+    /// use bough::{Runtime, Source};
     /// use std::rc::Rc;
     ///
-    /// let (_graph, _) = Graph::build_threaded(|b| {
+    /// let (_graph, edge) = Runtime::build_threaded(|b| {
     ///     let (_counts, counts_loop) = b.stream_loop::<Rc<u32>>();
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     counts_loop.close(b, numbers.map(Rc::new)); // error: Rc is not Send
     /// });
+    /// edge.keep();
     /// ```
     ///
     /// Panics if the loop was declared in another scope, and if the chain's

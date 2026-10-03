@@ -10,9 +10,9 @@
 
 use core::mem;
 
-use super::{COMMITS, Kind, LISTENERS, ON_STACK, START, Tx, WATCHED, slot, slot_mut};
+use super::{COMMITS, Entry, Kind, LISTENERS, ON_STACK, START, Tx, WATCHED, slot, slot_mut};
 use crate::build::Build;
-use crate::mode::{FlagOps, Mode};
+use crate::mode::Mode;
 
 /// A second send to a non-coalescing input in one transaction.
 #[derive(Debug)]
@@ -55,6 +55,23 @@ impl<M: Mode> Build<M> {
             return None;
         }
         slot::<M, A>(&self.store.data[i as usize]).clone()
+    }
+
+    /// A half of `unzip`'s pair, for the half node `me`: takes it out of the
+    /// slot of the pairs node `me` depends on, and leaves the other half for
+    /// the other node, if the pairs fired in this instant.
+    pub(crate) fn take_half<A: 'static, B: 'static, H>(
+        &mut self,
+        me: u32,
+        half: impl FnOnce(&mut (Option<A>, Option<B>)) -> Option<H>,
+    ) -> Option<H> {
+        let pairs = self.store.relations[me as usize].deps[0] as usize;
+        if self.store.hot[pairs].fired != self.tx {
+            return None;
+        }
+        slot_mut::<M, (Option<A>, Option<B>)>(&mut self.store.data[pairs])
+            .as_mut()
+            .and_then(half)
     }
 
     /// A stream node fires: its event goes in its slot.
@@ -161,7 +178,7 @@ impl<M: Mode> Build<M> {
         if self.s.levels.first().is_some_and(|l| !l.is_empty()) {
             self.children();
         }
-        self.edge.disarm();
+        self.disarm();
         self.in_tx = false;
     }
 
@@ -171,12 +188,12 @@ impl<M: Mode> Build<M> {
     /// (RFD 6); the sends before the instant are I/O code.
     pub(super) fn instant(&mut self) {
         count!(self.s, transactions);
-        self.edge.arm();
+        self.arm();
         self.mark();
         self.evaluate();
         self.new_nodes();
         self.commit();
-        self.edge.disarm();
+        self.disarm();
         self.dispatch();
     }
 
@@ -375,10 +392,23 @@ impl<M: Mode> Build<M> {
         }
     }
 
+    /// Spends a once-listener's entry as it fires. Its root ends, counted
+    /// as released now, and the entry shares the ownerless state from then
+    /// on, so it's pruned as one whose guard went is. The node's dispatch
+    /// prunes it when its listeners have run.
+    pub(crate) fn spend(&mut self, e: &mut Entry<M>) {
+        mem::replace(&mut e.flag, self.ownerless.clone()).spend();
+        self.s.spent = true;
+    }
+
     /// Listeners in evaluation order, after commit, with no graph access.
-    /// A handle dropped inside a listener only clears a flag, checked before
-    /// each call. Ties within a node follow registration order, rotated by
-    /// the shuffle when it is on.
+    /// A guard dropped inside a listener only lowers its owner count, checked
+    /// before each call. Ties within a node follow registration order, rotated by
+    /// the shuffle when it is on. A node's entries are pruned after its
+    /// listeners have run, and only if one was dead at its turn or spent in
+    /// it. One whose guard goes after its turn waits for the node's next
+    /// dispatch or a collection, as one whose guard goes outside a dispatch
+    /// does.
     fn dispatch(&mut self) {
         let salt = self.s.shuffle.map(|seed| seed ^ LISTENER_SALT);
         let mut k = 0;
@@ -390,6 +420,7 @@ impl<M: Mode> Build<M> {
                 Some(seed) if len > 1 => rotation(seed, self.tx, n, len),
                 _ => 0,
             };
+            let mut dead = false;
             for j in 0..len {
                 let at = if first + j < len {
                     first + j
@@ -399,12 +430,17 @@ impl<M: Mode> Build<M> {
                 let e = &mut list[at];
                 if e.flag.is_live() {
                     count!(self.s, listener_calls);
-                    (e.call)(&mut e.f, self, n);
+                    (e.call)(e, self, n);
+                } else {
+                    dead = true;
                 }
             }
-            list.retain(|e| e.flag.is_live());
-            if list.is_empty() {
-                self.store.hot[n as usize].flags &= !LISTENERS;
+            if dead || self.s.spent {
+                self.s.spent = false;
+                list.retain(|e| e.flag.is_live());
+                if list.is_empty() {
+                    self.store.hot[n as usize].flags &= !LISTENERS;
+                }
             }
             self.store.listeners[n as usize] = list;
             k += 1;
