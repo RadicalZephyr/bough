@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["bough", "bough-derive", "bough-oracle", "bough-bench"]
+members = ["bough", "bough-derive", "bough-oracle", "bough-bench", "bough-repl"]
 # The GTK spike needs GTK's system libraries, so it is a workspace of its own.
 exclude = ["bough-gtk"]
 

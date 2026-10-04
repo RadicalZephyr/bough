@@ -1,0 +1,13 @@
+[package]
+name = "bough-repl"
+description = "A typed binding REPL over one running bough graph: a probe of live rewiring through construct."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bough = { workspace = true, features = ["derive"] }
