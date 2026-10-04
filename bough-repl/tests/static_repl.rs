@@ -100,9 +100,9 @@ fn set_is_checked_against_the_input_s_type() {
     transcript(
         &mut repl,
         &[
-            ("input a 1", &[]),
+            ("input a 5", &[]),
             ("def b neg a", &[]),
-            ("watch b", &["b = -1"]),
+            ("watch b", &["b = -5"]),
             ("set a true", &["error: a is Int, and true is Bool"]),
             ("set b 4", &["error: b is not an input"]),
             ("set q 4", &["error: no binding named q"]),

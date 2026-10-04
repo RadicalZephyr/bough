@@ -17,7 +17,9 @@
 //! | `set x 5` | Send a value to an input. |
 //! | `watch y` | Print `y = value` now and at every step. |
 //! | `graph` | Print every binding with its type and definition. |
+//! | `tick t 1000` | An `Int` input a timer thread sets to 1, 2, 3, ..., one every 1000 ms. |
 
+pub mod clock;
 pub mod graph;
 pub mod registry;
 mod repl;

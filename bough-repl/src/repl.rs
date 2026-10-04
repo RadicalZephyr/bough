@@ -6,12 +6,15 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::task::Waker;
+use std::time::Duration;
 
 use bough::Listener;
 
+use crate::clock::{Clock, WallClock};
 use crate::graph::{Arg, Command, Def, Graph, Made};
 use crate::registry;
-use crate::ty::{Literal, Node, Type};
+use crate::ty::{InputToken, Literal, Node, Type};
 
 /// A name with a fixed [`Type`] and a [`Node`].
 struct Binding {
@@ -22,6 +25,8 @@ struct Binding {
     shown: String,
     /// The bindings the definition names, for the cycle check.
     uses: Vec<String>,
+    /// Whether a timer drives it.
+    ticks: bool,
 }
 
 impl Binding {
@@ -41,20 +46,46 @@ pub struct Repl {
     by_name: HashMap<String, usize>,
     watching: Vec<(String, Listener)>,
     out: Rc<RefCell<Vec<String>>>,
+    clock: Box<dyn Clock>,
 }
 
 type Checked<T> = Result<T, String>;
 
 impl Repl {
-    /// A REPL with an empty graph.
+    /// A REPL with an empty graph, whose ticks run on the wall clock.
     pub fn new() -> Repl {
+        Repl::with_clock(WallClock)
+    }
+
+    /// A REPL whose ticks run on `clock`.
+    pub fn with_clock(clock: impl Clock + 'static) -> Repl {
         Repl {
             graph: Graph::new(),
             bindings: Vec::new(),
             by_name: HashMap::new(),
             watching: Vec::new(),
             out: Rc::default(),
+            clock: Box::new(clock),
         }
+    }
+
+    /// Registers the waker a tick's send wakes, so the driver knows to
+    /// [`pump`](Repl::pump).
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.graph.runtime().set_waker(waker);
+    }
+
+    /// Runs the ticks sent since the last pump, each a transaction of its
+    /// own, and returns what they printed.
+    pub fn pump(&mut self) -> Vec<String> {
+        self.graph.runtime().pump();
+        self.out.take()
+    }
+
+    /// RFD 1's order shuffle, for a test that shows nothing printed depends
+    /// on the order nodes evaluate in.
+    pub fn set_shuffle_seed(&mut self, seed: Option<u64>) {
+        self.graph.runtime().set_shuffle_seed(seed);
     }
 
     /// Runs one line, and returns what it printed, watch lines included.
@@ -67,6 +98,7 @@ impl Repl {
             ["def", name, definition @ ..] if !definition.is_empty() => self.def(name, definition),
             ["set", name, literal] => self.set(name, literal),
             ["watch", name] => self.watch(name),
+            ["tick", name, period] => self.tick(name, period),
             ["graph"] => {
                 self.graph();
                 Ok(())
@@ -99,6 +131,29 @@ impl Repl {
         let ty = literal.ty();
         let made = self.graph.make(Command::Input(literal));
         self.bind(name, ty, made, shown, Vec::new());
+        Ok(())
+    }
+
+    /// `tick t 1000`: an `Int` input that a timer sets to 1, 2, 3, ..., one
+    /// every 1000 ms, starting at 0.
+    fn tick(&mut self, name: &str, period: &str) -> Checked<()> {
+        self.fresh(name)?;
+        let period = match period.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            _ => return Err(format!("{period} is not a period in milliseconds")),
+        };
+        let made = self.graph.make(Command::Input(Literal::Int(0)));
+        let Made::Input(input) = &made else {
+            unreachable!("bough-repl: an input command makes an input")
+        };
+        let InputToken::Int(input) = input.1 else {
+            unreachable!("bough-repl: an Int literal makes an Int input")
+        };
+        let remote = self.graph.runtime().remote_io();
+        self.clock.start(period, remote, input);
+        let shown = format!("tick {}", period.as_millis());
+        self.bind(name, Type::Int, made, shown, Vec::new());
+        self.bindings.last_mut().expect("just bound").ticks = true;
         Ok(())
     }
 
@@ -142,6 +197,9 @@ impl Repl {
         let Made::Input(made) = &binding.made else {
             return Err(format!("{name} is not an input"));
         };
+        if binding.ticks {
+            return Err(format!("{name} is a tick, which its timer sets"));
+        }
         let input = made.1;
         let ty = binding.ty;
         let literal = parse_literal(literal)?;
@@ -163,7 +221,15 @@ impl Repl {
         let runtime = self.graph.runtime();
         let listener = match node {
             Node::IntCell(cell) => runtime.listen_cell(cell, move |n: &i64| {
-                out.borrow_mut().push(format!("{label} = {n}"))
+                // FizzBuzz's sentinels, while `Int` is the only type a
+                // label could have. Step 5 removes this.
+                let shown = match n {
+                    -1 => "Fizz".to_string(),
+                    -2 => "Buzz".to_string(),
+                    -3 => "FizzBuzz".to_string(),
+                    n => n.to_string(),
+                };
+                out.borrow_mut().push(format!("{label} = {shown}"))
             }),
             Node::BoolCell(cell) => runtime.listen_cell(cell, move |p: &bool| {
                 out.borrow_mut().push(format!("{label} = {p}"))
@@ -300,6 +366,7 @@ impl Repl {
             made,
             shown,
             uses,
+            ticks: false,
         });
     }
 }

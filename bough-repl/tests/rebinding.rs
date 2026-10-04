@@ -37,13 +37,13 @@ fn a_redefinition_reaches_watched_dependents_without_a_new_watch() {
 
 #[test]
 fn a_watched_binding_redefined_prints_its_new_value() {
-    let mut repl = repl(&["input a 2", "def b add a 1", "def d b"]);
+    let mut repl = repl(&["input a 4", "def b add a 1", "def d b"]);
     transcript(
         &mut repl,
         &[
-            ("watch b", &["b = 3"]),
-            ("watch d", &["d = 3"]),
-            ("def b neg a", &["b = -2", "d = -2"]),
+            ("watch b", &["b = 5"]),
+            ("watch d", &["d = 5"]),
+            ("def b neg a", &["b = -4", "d = -4"]),
             ("set a 5", &["b = -5", "d = -5"]),
         ],
     );
