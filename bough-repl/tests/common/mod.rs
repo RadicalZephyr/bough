@@ -11,6 +11,9 @@ use std::time::Duration;
 use bough::{Input, RemoteIo};
 use bough_repl::Repl;
 use bough_repl::clock::Clock;
+use bough_repl::graph::{Arg, Command, Def, Graph, Made};
+use bough_repl::registry;
+use bough_repl::ty::{InputToken, Literal, Node};
 
 /// A script step that fires every timer once and pumps, in place of a
 /// command.
@@ -95,5 +98,30 @@ impl Ticks {
     /// How many timers have been started.
     pub fn timers(&self) -> usize {
         self.0.borrow().len()
+    }
+}
+
+/// A registry function over arguments, for driving the graph API past the
+/// REPL.
+pub fn apply(function: &str, args: Vec<Arg>) -> Def {
+    Def::Apply(registry::named(function).next().unwrap().wire, args)
+}
+
+/// A new defined binding, kept for the graph's life.
+pub fn define(graph: &mut Graph, def: Def) -> (Node, Input<Def>) {
+    match graph.make(Command::Define(def)) {
+        Made::Defined(made) => made.keep(),
+        Made::Input(_) => unreachable!(),
+    }
+}
+
+/// A new `Int` input, kept for the graph's life.
+pub fn int_input(graph: &mut Graph, n: i64) -> (Node, Input<i64>) {
+    match graph.make(Command::Input(Literal::Int(n))) {
+        Made::Input(made) => match made.keep() {
+            (node, InputToken::Int(input)) => (node, input),
+            _ => unreachable!(),
+        },
+        Made::Defined(_) => unreachable!(),
     }
 }
