@@ -77,7 +77,10 @@ fn each_check_rejects_before_the_graph_is_touched() {
             ("def x add x 1", &["error: no binding named x"]),
             // Names: an argument names a binding, a new name is fresh.
             ("def x add a q", &["error: no binding named q"]),
-            ("def a add a 1", &["error: a is already bound"]),
+            (
+                "def a add a 1",
+                &["error: a is an input, and an input is not redefined"],
+            ),
             ("def 3 add a 1", &["error: 3 cannot be a name"]),
             ("def true p", &["error: true cannot be a name"]),
             ("input a 2", &["error: a is already bound"]),

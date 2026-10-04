@@ -13,6 +13,7 @@
 //! | `input x 0` / `input b true` | Declare a typed input; the literal's syntax gives its type. |
 //! | `def y add x 3` | Bind `y` to a registry function applied to bindings or literals. |
 //! | `def y x` | Bind `y` to an existing binding, or to a literal. |
+//! | `def y mul x x` | Redefine `y`, of the same type and with no cycle; everything downstream follows. |
 //! | `set x 5` | Send a value to an input. |
 //! | `watch y` | Print `y = value` now and at every step. |
 //! | `graph` | Print every binding with its type and definition. |

@@ -4,7 +4,7 @@
 //! into the graph.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use bough::Listener;
@@ -20,13 +20,15 @@ struct Binding {
     made: Made,
     /// The definition as typed, for `graph`.
     shown: String,
+    /// The bindings the definition names, for the cycle check.
+    uses: Vec<String>,
 }
 
 impl Binding {
     fn node(&self) -> Node {
         match &self.made {
             Made::Input(made) => made.0,
-            Made::Defined(node) => **node,
+            Made::Defined(made) => made.0,
         }
     }
 }
@@ -96,16 +98,41 @@ impl Repl {
         let shown = format!("input {literal}");
         let ty = literal.ty();
         let made = self.graph.make(Command::Input(literal));
-        self.bind(name, ty, made, shown);
+        self.bind(name, ty, made, shown, Vec::new());
         Ok(())
     }
 
-    /// `def y f a b` or `def y x`.
+    /// `def y f a b` or `def y x`, of a new name or an existing one.
     fn def(&mut self, name: &str, definition: &[&str]) -> Checked<()> {
-        self.fresh(name)?;
-        let (ty, def) = self.check(definition)?;
-        let made = self.graph.make(Command::Define(def));
-        self.bind(name, ty, made, definition.join(" "));
+        let shown = definition.join(" ");
+        let Some(&i) = self.by_name.get(name) else {
+            self.fresh(name)?;
+            let (ty, def, uses) = self.check(definition)?;
+            let made = self.graph.make(Command::Define(def));
+            self.bind(name, ty, made, shown, uses);
+            return Ok(());
+        };
+        let binding = &self.bindings[i];
+        let Made::Defined(made) = &binding.made else {
+            return Err(format!("{name} is an input, and an input is not redefined"));
+        };
+        let (redefine, ty) = (made.1, binding.ty);
+        let (new_ty, def, uses) = self.check(definition)?;
+        // 3: no cycle, through the definitions the bindings have now.
+        if let Some(cycle) = self.cycle(name, &uses) {
+            return Err(format!(
+                "def {name} {shown} would make a cycle: {}",
+                cycle.join(" -> ")
+            ));
+        }
+        // 4: the type stays, since dependents were checked against it.
+        if new_ty != ty {
+            return Err(format!("{name} is {ty}, and {shown} is {new_ty}"));
+        }
+        self.graph.redefine(redefine, def);
+        let binding = &mut self.bindings[i];
+        binding.shown = shown;
+        binding.uses = uses;
         Ok(())
     }
 
@@ -159,12 +186,19 @@ impl Repl {
     /// Checks a definition against the namespace and the registry, before
     /// anything touches the graph: (1) the function exists and the count of
     /// arguments is its arity, and (2) each argument's type is the one its
-    /// signature names.
-    fn check(&self, definition: &[&str]) -> Checked<(Type, Def)> {
+    /// signature names. Returns the result's type, the definition, and the
+    /// bindings it names.
+    fn check(&self, definition: &[&str]) -> Checked<(Type, Def, Vec<String>)> {
+        let uses = definition
+            .iter()
+            .skip(usize::from(definition.len() > 1))
+            .filter(|word| Literal::parse(word).is_none())
+            .map(|word| word.to_string())
+            .collect();
         match definition {
             [word] => {
                 let (ty, arg) = self.arg(word)?;
-                Ok((ty, Def::Alias(arg)))
+                Ok((ty, Def::Alias(arg), uses))
             }
             [function, words @ ..] => {
                 let Some(f) = registry::lookup(function) else {
@@ -188,7 +222,7 @@ impl Repl {
                     }
                     args.push(arg);
                 }
-                Ok((f.result, Def::Apply(f.wire, args)))
+                Ok((f.result, Def::Apply(f.wire, args), uses))
             }
             [] => unreachable!("run passes a definition of at least one word"),
         }
@@ -201,6 +235,38 @@ impl Repl {
         }
         let binding = self.lookup(word)?;
         Ok((binding.ty, Arg::Binding(binding.node())))
+    }
+
+    /// The path from `name` back to itself, if a definition naming `uses`
+    /// would close one.
+    fn cycle(&self, name: &str, uses: &[String]) -> Option<Vec<String>> {
+        let mut path = vec![name.to_string()];
+        let mut seen = HashSet::new();
+        self.reaches(uses, name, &mut path, &mut seen)
+            .then_some(path)
+    }
+
+    fn reaches(
+        &self,
+        from: &[String],
+        target: &str,
+        path: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) -> bool {
+        for next in from {
+            path.push(next.clone());
+            if next == target {
+                return true;
+            }
+            if seen.insert(next.clone()) {
+                let uses = &self.bindings[self.by_name[next]].uses;
+                if self.reaches(uses, target, path, seen) {
+                    return true;
+                }
+            }
+            path.pop();
+        }
+        false
     }
 
     fn lookup(&self, name: &str) -> Checked<&Binding> {
@@ -226,13 +292,14 @@ impl Repl {
         Ok(())
     }
 
-    fn bind(&mut self, name: &str, ty: Type, made: Made, shown: String) {
+    fn bind(&mut self, name: &str, ty: Type, made: Made, shown: String, uses: Vec<String>) {
         self.by_name.insert(name.to_string(), self.bindings.len());
         self.bindings.push(Binding {
             name: name.to_string(),
             ty,
             made,
             shown,
+            uses,
         });
     }
 }
