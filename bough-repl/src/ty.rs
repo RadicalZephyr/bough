@@ -18,6 +18,8 @@ pub enum Type {
     Int,
     /// A `bool`.
     Bool,
+    /// A `String`.
+    Str,
 }
 
 impl fmt::Display for Type {
@@ -25,6 +27,7 @@ impl fmt::Display for Type {
         f.write_str(match self {
             Type::Int => "Int",
             Type::Bool => "Bool",
+            Type::Str => "Str",
         })
     }
 }
@@ -36,6 +39,8 @@ pub enum Node {
     IntCell(Cell<i64>),
     /// A `Bool` cell.
     BoolCell(Cell<bool>),
+    /// A `Str` cell.
+    StrCell(Cell<String>),
 }
 
 impl Node {
@@ -56,6 +61,14 @@ impl Node {
             other => mismatch(Type::Bool, other),
         }
     }
+
+    /// The `Str` cell, as [`int`](Node::int).
+    pub fn str(self) -> Cell<String> {
+        match self {
+            Node::StrCell(cell) => cell,
+            other => mismatch(Type::Str, other),
+        }
+    }
 }
 
 fn mismatch(wanted: Type, got: Node) -> ! {
@@ -69,13 +82,19 @@ pub enum Literal {
     Int(i64),
     /// `true` or `false`.
     Bool(bool),
+    /// A string in double quotes, such as `"Fizz"`.
+    Str(String),
 }
 
 impl Literal {
-    /// Parses a word as a literal, or `None` if it is not one.
+    /// Parses a word as a literal, or `None` if it is not one. A string
+    /// is one word, so it has no spaces, and no escapes.
     pub fn parse(word: &str) -> Option<Literal> {
         if let Ok(n) = word.parse::<i64>() {
             return Some(Literal::Int(n));
+        }
+        if let Some(text) = word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+            return Some(Literal::Str(text.to_string()));
         }
         match word {
             "true" => Some(Literal::Bool(true)),
@@ -89,6 +108,7 @@ impl Literal {
         match self {
             Literal::Int(_) => Type::Int,
             Literal::Bool(_) => Type::Bool,
+            Literal::Str(_) => Type::Str,
         }
     }
 
@@ -97,6 +117,7 @@ impl Literal {
         match self {
             Literal::Int(n) => Node::IntCell(b.constant(n)),
             Literal::Bool(p) => Node::BoolCell(b.constant(p)),
+            Literal::Str(text) => Node::StrCell(b.constant(text)),
         }
     }
 
@@ -111,6 +132,10 @@ impl Literal {
                 let (cell, input) = b.input_cell(p);
                 (Node::BoolCell(cell), InputToken::Bool(input))
             }
+            Literal::Str(text) => {
+                let (cell, input) = b.input_cell(text);
+                (Node::StrCell(cell), InputToken::Str(input))
+            }
         }
     }
 }
@@ -120,6 +145,7 @@ impl fmt::Display for Literal {
         match self {
             Literal::Int(n) => write!(f, "{n}"),
             Literal::Bool(p) => write!(f, "{p}"),
+            Literal::Str(text) => write!(f, "\"{text}\""),
         }
     }
 }
@@ -131,6 +157,8 @@ pub enum InputToken {
     Int(Input<i64>),
     /// A `Bool` input.
     Bool(Input<bool>),
+    /// A `Str` input.
+    Str(Input<String>),
 }
 
 impl InputToken {
@@ -140,6 +168,7 @@ impl InputToken {
         match (self, value) {
             (InputToken::Int(input), Literal::Int(n)) => runtime.send(input, n),
             (InputToken::Bool(input), Literal::Bool(p)) => runtime.send(input, p),
+            (InputToken::Str(input), Literal::Str(text)) => runtime.send(input, text),
             (input, value) => {
                 unreachable!("bough-repl: the checks passed {value} to {input:?}")
             }

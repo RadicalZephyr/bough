@@ -66,7 +66,9 @@ fn each_check_rejects_before_the_graph_is_touched() {
             // 2: each argument's type is the signature's.
             (
                 "def x if a a a",
-                &["error: if takes Bool as argument 1, and a is Int"],
+                &[
+                    "error: if takes (Bool, Int, Int) or (Bool, Str, Str), and a a a is (Int, Int, Int)",
+                ],
             ),
             (
                 "def x and p 3",

@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::rc::Rc;
 use std::task::Waker;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use bough::Listener;
 
 use crate::clock::{Clock, WallClock};
 use crate::graph::{Arg, Command, Def, Graph, Made};
-use crate::registry;
+use crate::registry::{self, Function};
 use crate::ty::{InputToken, Literal, Node, Type};
 
 /// A name with a fixed [`Type`] and a [`Node`].
@@ -216,24 +217,15 @@ impl Repl {
             return Err(format!("already watching {name}"));
         }
         let node = self.lookup(name)?.node();
-        let out = self.out.clone();
-        let label = name.to_string();
+        let print = Printer {
+            out: self.out.clone(),
+            label: name.to_string(),
+        };
         let runtime = self.graph.runtime();
         let listener = match node {
-            Node::IntCell(cell) => runtime.listen_cell(cell, move |n: &i64| {
-                // FizzBuzz's sentinels, while `Int` is the only type a
-                // label could have. Step 5 removes this.
-                let shown = match n {
-                    -1 => "Fizz".to_string(),
-                    -2 => "Buzz".to_string(),
-                    -3 => "FizzBuzz".to_string(),
-                    n => n.to_string(),
-                };
-                out.borrow_mut().push(format!("{label} = {shown}"))
-            }),
-            Node::BoolCell(cell) => runtime.listen_cell(cell, move |p: &bool| {
-                out.borrow_mut().push(format!("{label} = {p}"))
-            }),
+            Node::IntCell(cell) => runtime.listen_cell(cell, move |n| print.line(n)),
+            Node::BoolCell(cell) => runtime.listen_cell(cell, move |p| print.line(p)),
+            Node::StrCell(cell) => runtime.listen_cell(cell, move |text| print.line(text)),
         };
         self.watching.push((name.to_string(), listener));
         Ok(())
@@ -252,8 +244,8 @@ impl Repl {
     /// Checks a definition against the namespace and the registry, before
     /// anything touches the graph: (1) the function exists and the count of
     /// arguments is its arity, and (2) each argument's type is the one its
-    /// signature names. Returns the result's type, the definition, and the
-    /// bindings it names.
+    /// signature names, for one of the signatures its name has. Returns the
+    /// result's type, the definition, and the bindings it names.
     fn check(&self, definition: &[&str]) -> Checked<(Type, Def, Vec<String>)> {
         let uses = definition
             .iter()
@@ -267,28 +259,52 @@ impl Repl {
                 Ok((ty, Def::Alias(arg), uses))
             }
             [function, words @ ..] => {
-                let Some(f) = registry::lookup(function) else {
+                let candidates: Vec<&Function> = registry::named(function).collect();
+                let Some(first) = candidates.first() else {
                     return Err(format!("no function named {function}"));
                 };
-                if words.len() != f.params.len() {
+                // The signatures of one name share an arity.
+                if words.len() != first.params.len() {
                     return Err(format!(
                         "{function} takes {} arguments, not {}",
-                        f.params.len(),
+                        first.params.len(),
                         words.len()
                     ));
                 }
+                let mut types = Vec::with_capacity(words.len());
                 let mut args = Vec::with_capacity(words.len());
-                for (i, (word, param)) in words.iter().zip(f.params).enumerate() {
+                for word in words {
                     let (ty, arg) = self.arg(word)?;
-                    if ty != *param {
-                        return Err(format!(
-                            "{function} takes {param} as argument {}, and {word} is {ty}",
-                            i + 1
-                        ));
-                    }
+                    types.push(ty);
                     args.push(arg);
                 }
-                Ok((f.result, Def::Apply(f.wire, args), uses))
+                if let Some(f) = candidates.iter().find(|f| f.params == types) {
+                    return Ok((f.result, Def::Apply(f.wire, args), uses));
+                }
+                Err(match candidates.as_slice() {
+                    [f] => {
+                        let i = (0..types.len())
+                            .find(|&i| f.params[i] != types[i])
+                            .expect("an argument of another type");
+                        format!(
+                            "{function} takes {} as argument {}, and {} is {}",
+                            f.params[i],
+                            i + 1,
+                            words[i],
+                            types[i]
+                        )
+                    }
+                    _ => {
+                        let takes: Vec<String> =
+                            candidates.iter().map(|f| signature(f.params)).collect();
+                        format!(
+                            "{function} takes {}, and {} is {}",
+                            takes.join(" or "),
+                            words.join(" "),
+                            signature(&types)
+                        )
+                    }
+                })
             }
             [] => unreachable!("run passes a definition of at least one word"),
         }
@@ -375,6 +391,25 @@ impl Default for Repl {
     fn default() -> Repl {
         Repl::new()
     }
+}
+
+/// What a watch's listener prints with.
+struct Printer {
+    out: Rc<RefCell<Vec<String>>>,
+    label: String,
+}
+
+impl Printer {
+    fn line(&self, value: &impl fmt::Display) {
+        let line = format!("{} = {value}", self.label);
+        self.out.borrow_mut().push(line);
+    }
+}
+
+/// A signature's parameter types, as `(Bool, Int, Int)`.
+fn signature(types: &[Type]) -> String {
+    let types: Vec<String> = types.iter().map(Type::to_string).collect();
+    format!("({})", types.join(", "))
 }
 
 fn parse_literal(word: &str) -> Checked<Literal> {

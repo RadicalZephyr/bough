@@ -164,6 +164,10 @@ fn bind_node(b: &mut Build, first: Node) -> (Node, Input<Def>) {
             let (cell, redefine) = bind(b, cell, Node::bool);
             (Node::BoolCell(cell), redefine)
         }
+        Node::StrCell(cell) => {
+            let (cell, redefine) = bind(b, cell, Node::str);
+            (Node::StrCell(cell), redefine)
+        }
     }
 }
 

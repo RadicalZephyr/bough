@@ -3,7 +3,8 @@
 //! closure and matches on [`Node`] arms to reach the concrete cells.
 //!
 //! No polymorphism: a signature names concrete types, and an operation over
-//! two types is two entries. Every function is total, since a panic in a
+//! two types is two entries under one name, which `def` chooses between by
+//! the types of its arguments. Every function is total, since a panic in a
 //! cell's function poisons the runtime: arithmetic wraps, and `mod 0` is 0.
 
 use bough::{Build, Lift};
@@ -25,12 +26,12 @@ pub struct Function {
     pub wire: Wire,
 }
 
-/// The function called `name`.
-pub fn lookup(name: &str) -> Option<&'static Function> {
-    FUNCTIONS.iter().find(|f| f.name == name)
+/// The functions called `name`, one per signature.
+pub fn named(name: &str) -> impl Iterator<Item = &'static Function> {
+    FUNCTIONS.iter().filter(move |f| f.name == name)
 }
 
-use Type::{Bool, Int};
+use Type::{Bool, Int, Str};
 
 const FUNCTIONS: &[Function] = &[
     Function {
@@ -101,6 +102,22 @@ const FUNCTIONS: &[Function] = &[
             let (c, x, y) = (a[0].bool(), a[1].int(), a[2].int());
             Node::IntCell((c, x, y).lift(b, |c, x, y| if *c { *x } else { *y }))
         },
+    },
+    Function {
+        name: "if",
+        params: &[Bool, Str, Str],
+        result: Str,
+        wire: |b, a| {
+            let (c, x, y) = (a[0].bool(), a[1].str(), a[2].str());
+            // A cell's value is read by reference, so the choice is a clone.
+            Node::StrCell((c, x, y).lift(b, |c, x, y| if *c { x.clone() } else { y.clone() }))
+        },
+    },
+    Function {
+        name: "str",
+        params: &[Int],
+        result: Str,
+        wire: |b, a| Node::StrCell(a[0].int().map_cell(b, |n| n.to_string())),
     },
 ];
 

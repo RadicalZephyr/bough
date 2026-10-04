@@ -11,7 +11,7 @@ use bough_repl::registry;
 use bough_repl::ty::{InputToken, Literal, Node};
 
 fn apply(function: &str, args: Vec<Arg>) -> Def {
-    Def::Apply(registry::lookup(function).unwrap().wire, args)
+    Def::Apply(registry::named(function).next().unwrap().wire, args)
 }
 
 fn define(graph: &mut Graph, def: Def) -> (Node, Input<Def>) {
