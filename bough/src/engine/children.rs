@@ -143,13 +143,30 @@ impl<M: Mode> Build<M> {
         let mut parts = self.store.parts[n]
             .take()
             .expect("bough engine: a node's program is in place");
+        // The rollback probe's `undo`, as in evaluation: a panic in the
+        // iterator would drop the program, so it's put back first.
+        #[cfg(feature = "undo")]
+        if self.s.probe.on {
+            let running = self.s.probe.running.replace(capture);
+            let ran = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                (ops.emit_child)(&mut parts, self, capture)
+            }));
+            self.store.parts[n] = Some(parts);
+            return match ran {
+                Ok(emitted) => {
+                    self.s.probe.running.set(running);
+                    emitted
+                }
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+        }
         let emitted = (ops.emit_child)(&mut parts, self, capture);
         self.store.parts[n] = Some(parts);
         emitted
     }
 
     /// Every capture of a finished level pops the entry it pushed there.
-    fn end_level(&mut self, level: usize) {
+    pub(super) fn end_level(&mut self, level: usize) {
         let Build { store, s, .. } = self;
         for &capture in &s.levels[level] {
             let n = capture as usize;

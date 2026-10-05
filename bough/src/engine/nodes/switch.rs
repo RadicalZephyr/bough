@@ -328,6 +328,7 @@ impl<M: Mode> Build<M> {
             return false;
         }
         count!(self.s, relinks);
+        self.record_move(n, at, old, new);
         let linear = &mut self.store.cold[old as usize].linear_consumer;
         if *linear == n {
             *linear = 0;

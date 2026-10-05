@@ -48,6 +48,34 @@ pub(crate) fn commit_cell<M: Mode, A: 'static>(_: &mut [M::Carrier], d: &mut Dat
     }
 }
 
+/// The rollback probe's `undo`: commits as [`commit_cell`] does, but the
+/// replaced value waits in the pending slot, empty after a commit, until
+/// the instant is known to stand, instead of dropping now.
+#[cfg(feature = "undo")]
+pub(crate) fn park_cell<M: Mode, A: 'static>(_: &mut [M::Carrier], d: &mut Data<M>) {
+    let c = cell_mut::<M, A>(d);
+    if let Some(v) = c.pending.take() {
+        let old = core::mem::replace(&mut c.value, v);
+        c.pending = Some(old);
+    }
+}
+
+/// `undo`: the parked value comes back, and the committed one drops.
+#[cfg(feature = "undo")]
+pub(crate) fn unpark_cell<M: Mode, A: 'static>(d: &mut Data<M>) {
+    let c = cell_mut::<M, A>(d);
+    if let Some(old) = c.pending.take() {
+        c.value = old;
+    }
+}
+
+/// The rollback probe: drops a pending value, before commit, or a parked
+/// one, after it.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub(crate) fn clear_pending_cell<M: Mode, A: 'static>(d: &mut Data<M>) {
+    cell_mut::<M, A>(d).pending = None;
+}
+
 impl<M: Mode, S: Source> NodeOps<M> for HoldNode<S>
 where
     S::Event: Trace + 'static,
@@ -56,6 +84,12 @@ where
         eval: eval_hold::<M, S>,
         commit: commit_cell::<M, S::Event>,
         trace: trace_cell::<M, S::Event>,
+        #[cfg(feature = "undo")]
+        park: park_cell::<M, S::Event>,
+        #[cfg(feature = "undo")]
+        unpark: unpark_cell::<M, S::Event>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        clear_pending: clear_pending_cell::<M, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -95,6 +129,12 @@ where
         eval: eval_accumulate::<M, S, St, F>,
         commit: commit_cell::<M, St>,
         trace: trace_cell::<M, St>,
+        #[cfg(feature = "undo")]
+        park: park_cell::<M, St>,
+        #[cfg(feature = "undo")]
+        unpark: unpark_cell::<M, St>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        clear_pending: clear_pending_cell::<M, St>,
         ..Ops::<M>::DEFAULT
     };
 }
@@ -118,6 +158,18 @@ where
     };
     *in_place_mut::<M, St, S::Event>(&mut b.store.data[me as usize]).1 = Some(event);
     b.set_fired(me);
+}
+
+/// The rollback probe: drops an in-place accumulator's pending event,
+/// before commit runs its function on it.
+#[cfg(any(feature = "undo", feature = "stage"))]
+fn clear_pending_in_place<M, St, E>(d: &mut Data<M>)
+where
+    M: Mode,
+    St: 'static,
+    E: 'static,
+{
+    *in_place_mut::<M, St, E>(d).1 = None;
 }
 
 fn commit_in_place<M, S, St, F>(parts: &mut [M::Carrier], d: &mut Data<M>)
@@ -146,6 +198,12 @@ where
         eval: eval_in_place::<M, S, St>,
         commit: commit_in_place::<M, S, St, F>,
         trace: trace_in_place::<M, St>,
+        // Its function mutates the state in place, so there's nothing to
+        // park: it commits as it always does.
+        #[cfg(feature = "undo")]
+        park: commit_in_place::<M, S, St, F>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        clear_pending: clear_pending_in_place::<M, St, S::Event>,
         ..Ops::<M>::DEFAULT
     };
 }

@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use bough::{Build, Cell, Input, Runtime, Trace};
+use bough::{Build, Cell, Input, Runtime, SendError, Trace};
 
 /// The static description of a binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +169,18 @@ impl InputToken {
             (InputToken::Int(input), Literal::Int(n)) => runtime.send(input, n),
             (InputToken::Bool(input), Literal::Bool(p)) => runtime.send(input, p),
             (InputToken::Str(input), Literal::Str(text)) => runtime.send(input, text),
+            (input, value) => {
+                unreachable!("bough-repl: the checks passed {value} to {input:?}")
+            }
+        }
+    }
+
+    /// [`send`](InputToken::send), returning the send's error.
+    pub fn try_send(self, runtime: &mut Runtime, value: Literal) -> Result<(), SendError> {
+        match (self, value) {
+            (InputToken::Int(input), Literal::Int(n)) => runtime.try_send(input, n),
+            (InputToken::Bool(input), Literal::Bool(p)) => runtime.try_send(input, p),
+            (InputToken::Str(input), Literal::Str(text)) => runtime.try_send(input, text),
             (input, value) => {
                 unreachable!("bough-repl: the checks passed {value} to {input:?}")
             }

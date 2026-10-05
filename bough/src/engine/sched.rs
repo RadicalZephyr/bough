@@ -56,6 +56,9 @@ pub(crate) struct Sched {
     pub(crate) scopes: Vec<usize>,
     /// RFD 1's shuffle affordance: the seed, or `None` for the plain order.
     pub(crate) shuffle: Option<u64>,
+    /// The rollback probe's policy and log.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    pub(crate) probe: super::Probe,
     #[cfg(feature = "statistics")]
     pub(crate) statistics: Statistics,
 }

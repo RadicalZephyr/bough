@@ -138,6 +138,7 @@ impl<M: Mode> Build<M> {
         s.dispatch.clear();
         s.cursor = 0;
         s.order_done = false;
+        self.probe_instant();
     }
 
     /// An input, or a split output, starts the instant with an event.
@@ -377,6 +378,22 @@ impl<M: Mode> Build<M> {
                 let mut parts = self.store.parts[n as usize]
                     .take()
                     .expect("bough engine: a node's program is in place");
+                // The rollback probe's `undo`: a panic would drop the
+                // program in the unwind, so it's caught here, the program
+                // put back, and the panic sent on.
+                #[cfg(feature = "undo")]
+                if self.s.probe.on {
+                    let running = self.s.probe.running.replace(n);
+                    let ran = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                        (ops.eval)(&mut parts, self, n)
+                    }));
+                    self.store.parts[n as usize] = Some(parts);
+                    match ran {
+                        Ok(()) => self.s.probe.running.set(running),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    }
+                    return;
+                }
                 (ops.eval)(&mut parts, self, n);
                 self.store.parts[n as usize] = Some(parts);
             }
@@ -393,6 +410,19 @@ impl<M: Mode> Build<M> {
                 let parts = store.parts[n as usize]
                     .as_deref_mut()
                     .expect("bough engine: a node's program is in place");
+                // The rollback probe's `undo` parks each replaced value, so
+                // a failure later in commit can put it back. An in-place
+                // accumulator's function mutates its state where it is, so
+                // after it runs nothing can be undone.
+                #[cfg(feature = "undo")]
+                if s.probe.on {
+                    if store.hot[n as usize].kind == Kind::InPlace {
+                        s.probe.undoable = false;
+                    }
+                    (store.ops[n as usize].park)(parts, &mut store.data[n as usize]);
+                    s.probe.committed += 1;
+                    continue;
+                }
                 (store.ops[n as usize].commit)(parts, &mut store.data[n as usize]);
             }
             for &n in &s.memos {
@@ -400,6 +430,23 @@ impl<M: Mode> Build<M> {
             }
         }
         self.relink();
+        #[cfg(feature = "undo")]
+        self.drop_parked();
+    }
+
+    /// `undo`: the instant stands, so the values commit parked drop now.
+    /// Their `Drop` is user code no log can undo, so from here a failure
+    /// poisons.
+    #[cfg(feature = "undo")]
+    fn drop_parked(&mut self) {
+        if !self.s.probe.on {
+            return;
+        }
+        self.s.probe.undoable = false;
+        let Build { store, s, .. } = self;
+        for &n in &s.commits {
+            (store.ops[n as usize].clear_pending)(&mut store.data[n as usize]);
+        }
     }
 
     /// Moves every queued switch to the inner its outer holds after commit,

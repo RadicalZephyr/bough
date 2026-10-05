@@ -28,6 +28,8 @@ use crate::engine::edge::Fault;
 ))]
 use crate::engine::edge::{Inbox, RemoteCall, Unit};
 use crate::engine::{Cx, DoubleSend, Entry, LISTENERS, ListenerCall, TokenFault, part};
+#[cfg(any(feature = "undo", feature = "stage"))]
+use crate::error::Refusal;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
@@ -177,16 +179,24 @@ impl Runtime<Local> {
         skip_stale: bool,
         unit: impl FnOnce(&mut IoTransaction<'_>),
     ) -> Result<(), Stop> {
-        self.build.begin();
-        let mut tx = IoTransaction {
-            runtime: self,
-            unit: UnitState::new(skip_stale),
-            tied: Tied::new(),
+        let ran = self.unit(|rt| {
+            rt.build.begin();
+            let mut tx = IoTransaction {
+                runtime: rt,
+                unit: UnitState::new(skip_stale),
+                tied: Tied::new(),
+            };
+            unit(&mut tx);
+            let IoTransaction { unit, tied, .. } = tx;
+            let silent = rt.end_unit(unit, tied.streams)?;
+            Ok((silent, tied.cells))
+        });
+        let (silent, cells) = match ran {
+            Ok(ran) => ran?,
+            #[cfg(any(feature = "undo", feature = "stage"))]
+            Err(refusal) => return Err((PumpError::Refused(refusal), SEND)),
         };
-        unit(&mut tx);
-        let IoTransaction { unit, tied, .. } = tx;
-        let silent = self.end_unit(unit, tied.streams)?;
-        for call in tied.cells {
+        for call in cells {
             call(&self.build);
         }
         self.collect_if_due();
@@ -216,6 +226,13 @@ const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier
 /// refused operation was, for the panic [`Runtime::pump`] makes of a stale
 /// token.
 pub(crate) type Stop = (PumpError, &'static str);
+
+/// What a unit that the rollback probe refused comes back with: the
+/// refusal, or nothing at all without the probe.
+#[cfg(any(feature = "undo", feature = "stage"))]
+type Refused = Refusal;
+#[cfg(not(any(feature = "undo", feature = "stage")))]
+type Refused = core::convert::Infallible;
 
 /// What the operations on collected nodes that the semantics cannot
 /// observe were asked to do, for the debug-build panic.
@@ -321,6 +338,57 @@ impl<M: Mode> Runtime<M> {
         f(self)
     }
 
+    /// Runs `f`, a unit from `begin` to `finish`. Under the rollback probe,
+    /// with rollback on, a failure the engine can undo is rolled back and
+    /// comes back as the refusal, with the graph as it was before the unit;
+    /// any other failure poisons the runtime, as it does without the probe.
+    fn unit<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> Result<R, Refused> {
+        #[cfg(feature = "undo")]
+        if self.build.s.probe.on {
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+            return match ran {
+                Ok(r) => self.build.take_refusal().map_or(Ok(r), Err),
+                Err(payload) if self.build.undoable() => {
+                    self.build.roll_back_panic(&*payload);
+                    Err(self
+                        .build
+                        .take_refusal()
+                        .expect("bough engine: a roll back leaves its refusal"))
+                }
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+        }
+        let r = f(self);
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if let Some(refusal) = self.build.take_refusal() {
+            return Err(refusal);
+        }
+        Ok(r)
+    }
+
+    /// The rollback probe: whether a failed transaction is refused and
+    /// rolled back, leaving the graph as it was before it, rather than
+    /// poisoning the runtime. Off by default. `undo` rolls back a panic in
+    /// graph code, until commit runs code no log can undo: an in-place
+    /// accumulator's function, or the `Drop` of a replaced value. `stage`
+    /// refuses a cycle at a switch's move, and a construct closure's error,
+    /// before anything commits. A refused `send`, `transaction` or `pump`
+    /// panics with the refusal and leaves the runtime usable; `try_send`
+    /// and `try_pump` return it.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    pub fn set_rollback(&mut self, on: bool) {
+        self.build.s.probe.on = on;
+    }
+
+    /// The rollback probe's tests compare this before a refused
+    /// transaction and after it: every live node's structure, the anchors
+    /// and the live count. Not API.
+    #[doc(hidden)]
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    pub fn topology(&self) -> crate::engine::Topology {
+        self.build.topology()
+    }
+
     /// The checks of the `try_` entries that take a token: poison, graph,
     /// liveness.
     fn lookup(&self, token: Token) -> Result<u32, TokenError> {
@@ -422,11 +490,20 @@ impl<M: Mode> Runtime<M> {
             // The token is checked before the transaction opens, so a foreign
             // token is a panic that leaves the graph usable.
             if let Some(i) = rt.checked(input.token, SEND) {
-                rt.build.begin();
-                rt.build
-                    .fire_start(i, value)
-                    .expect("bough engine: the only send of a transaction is not a double send");
-                rt.build.finish();
+                let sent = rt.unit(|rt| {
+                    rt.build.begin();
+                    rt.build.fire_start(i, value).expect(
+                        "bough engine: the only send of a transaction is not a double send",
+                    );
+                    rt.build.finish();
+                });
+                #[cfg(any(feature = "undo", feature = "stage"))]
+                if let Err(refusal) = sent {
+                    rt.collect_if_due();
+                    panic!("bough: {refusal}");
+                }
+                #[cfg(not(any(feature = "undo", feature = "stage")))]
+                let Ok(()) = sent;
             }
             rt.collect_if_due();
         });
@@ -447,15 +524,24 @@ impl<M: Mode> Runtime<M> {
                 TokenFault::Foreign => SendError::ForeignGraph,
                 TokenFault::Stale => SendError::Stale,
             })?;
-        self.mark_on_panic(|rt| {
-            rt.build.begin();
-            rt.build
-                .fire_start(i, value)
-                .expect("bough engine: the only send of a transaction is not a double send");
-            rt.build.finish();
+        let sent = self.mark_on_panic(|rt| {
+            let sent = rt.unit(|rt| {
+                rt.build.begin();
+                rt.build
+                    .fire_start(i, value)
+                    .expect("bough engine: the only send of a transaction is not a double send");
+                rt.build.finish();
+            });
             rt.collect_if_due();
+            sent
         });
-        Ok(())
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        return sent.map_err(SendError::Refused);
+        #[cfg(not(any(feature = "undo", feature = "stage")))]
+        {
+            let Ok(()) = sent;
+            Ok(())
+        }
     }
 
     /// Several sends in one instant.
@@ -471,18 +557,30 @@ impl<M: Mode> Runtime<M> {
     pub fn transaction<R>(&mut self, f: impl FnOnce(&mut Transaction<'_, M>) -> R) -> R {
         self.enter();
         self.mark_on_panic(|rt| {
-            rt.build.begin();
-            let mut tx = Transaction {
-                graph: rt,
-                tied: Tied::new(),
-            };
-            let r = f(&mut tx);
-            let Transaction { tied, .. } = tx;
-            rt.build.finish();
-            let silent = rt.end_tied(tied);
-            rt.collect_if_due();
-            debug_assert!(!silent, "{SILENT}");
-            r
+            let ran = rt.unit(|rt| {
+                rt.build.begin();
+                let mut tx = Transaction {
+                    graph: rt,
+                    tied: Tied::new(),
+                };
+                let r = f(&mut tx);
+                let Transaction { tied, .. } = tx;
+                rt.build.finish();
+                (r, tied)
+            });
+            match ran {
+                Ok((r, tied)) => {
+                    let silent = rt.end_tied(tied);
+                    rt.collect_if_due();
+                    debug_assert!(!silent, "{SILENT}");
+                    r
+                }
+                #[cfg(any(feature = "undo", feature = "stage"))]
+                Err(refusal) => {
+                    rt.collect_if_due();
+                    panic!("bough: {refusal}")
+                }
+            }
         })
     }
 
@@ -749,6 +847,7 @@ impl<M: Mode> Runtime<M> {
         flag: Liveness,
         once: bool,
     ) {
+        self.build.record_listener(i);
         let store = &mut self.build.store;
         store.listeners[i as usize].push(Entry {
             flag,
@@ -1186,6 +1285,8 @@ impl<M: Mode> Runtime<M> {
                 }
                 PumpError::ForeignGraph => panic!("bough: a token from another graph"),
                 PumpError::Poisoned => unreachable!("bough engine: pump checks the poison first"),
+                #[cfg(any(feature = "undo", feature = "stage"))]
+                PumpError::Refused(refusal) => panic!("bough: {refusal}"),
             }
         }
     }
@@ -1312,21 +1413,29 @@ impl<M: Mode> Runtime<M> {
         any(feature = "std", feature = "critical-section")
     ))]
     pub(crate) fn run_remote_unit(&mut self, skip_stale: bool, unit: Unit) -> Result<(), Stop> {
-        self.build.begin();
-        let mut tx = RemoteTransaction {
-            runtime: self,
-            unit: UnitState::new(skip_stale),
-            streams: Vec::new(),
-            cells: Vec::new(),
+        let ran = self.unit(|rt| {
+            rt.build.begin();
+            let mut tx = RemoteTransaction {
+                runtime: rt,
+                unit: UnitState::new(skip_stale),
+                streams: Vec::new(),
+                cells: Vec::new(),
+            };
+            unit(&mut tx);
+            let RemoteTransaction {
+                unit,
+                streams,
+                cells,
+                ..
+            } = tx;
+            let silent = rt.end_unit(unit, streams)?;
+            Ok((silent, cells))
+        });
+        let (silent, cells) = match ran {
+            Ok(ran) => ran?,
+            #[cfg(any(feature = "undo", feature = "stage"))]
+            Err(refusal) => return Err((PumpError::Refused(refusal), SEND)),
         };
-        unit(&mut tx);
-        let RemoteTransaction {
-            unit,
-            streams,
-            cells,
-            ..
-        } = tx;
-        let silent = self.end_unit(unit, streams)?;
         for cell in cells {
             M::register(self, cell, skip_stale)?;
         }
@@ -1380,18 +1489,28 @@ impl<M: Mode> Runtime<M> {
         self.build.edge.slots[k].drained = pump;
         let Connection { input, slot, .. } = self.build.edge.slots[k];
         let mut live = true;
+        let mut refused = None;
         slot.drain(&mut |event| match self.build.lookup(input) {
             Ok(i) => {
-                self.build.begin();
-                let fire = self.build.store.ops[i as usize].fire;
-                fire(&mut self.build, i, event)
-                    .expect("bough engine: a slot's event is its transaction's only send");
-                self.build.finish();
+                let sent = self.unit(|rt| {
+                    rt.build.begin();
+                    let fire = rt.build.store.ops[i as usize].fire;
+                    fire(&mut rt.build, i, event)
+                        .expect("bough engine: a slot's event is its transaction's only send");
+                    rt.build.finish();
+                });
+                refused = sent.err();
                 self.collect_if_due();
             }
             // `connect` checked the graph, so the input was collected.
             Err(_) => live = false,
         });
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if let Some(refusal) = refused {
+            return Err((PumpError::Refused(refusal), SEND));
+        }
+        #[cfg(not(any(feature = "undo", feature = "stage")))]
+        let _: Option<Refused> = refused;
         if !live {
             self.build.edge.slots.remove(k);
             slot.disconnect();

@@ -5,12 +5,54 @@
 //! The bounded engine, when it lands, adds `Exhausted` to three of these and
 //! is a major version for it.
 
+#[cfg(any(feature = "undo", feature = "stage"))]
+use alloc::string::String;
+#[cfg(any(feature = "undo", feature = "stage"))]
+use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
+/// A unit the engine refused, under the rollback probe's `undo` or `stage`
+/// with [`Runtime::set_rollback`](crate::Runtime::set_rollback) on: it
+/// failed, the engine rolled it back, and the graph is as it was before
+/// it. The events it sent are dropped.
+#[cfg(any(feature = "undo", feature = "stage"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The node whose code failed, by number, which is the engine's only
+    /// name for it; `None` when no node's code was running, as when a
+    /// switch's move closes a cycle.
+    pub node: Option<u32>,
+    /// What failed: a panic's message, a cycle, or a closure's error.
+    pub message: String,
+    /// The nodes the unit's events started, by number: the events it
+    /// dropped.
+    pub inputs: Vec<u32>,
+}
+
+#[cfg(any(feature = "undo", feature = "stage"))]
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("refused a transaction: ")?;
+        if let Some(node) = self.node {
+            write!(f, "node {node} failed: ")?;
+        }
+        write!(f, "{}; dropped its events at ", self.message)?;
+        for (k, input) in self.inputs.iter().enumerate() {
+            let sep = if k == 0 { "" } else { ", " };
+            write!(f, "{sep}node {input}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "undo", feature = "stage"))]
+impl Error for Refusal {}
+
 /// Failure modes of [`Runtime::try_send`](crate::Runtime::try_send). One send
 /// opens one transaction, so no double send can occur here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(feature = "undo", feature = "stage")), derive(Copy))]
 pub enum SendError {
     /// The input's node was collected. The panicking variant treats this as
     /// a debug-mode panic and a release-mode no-op.
@@ -19,6 +61,9 @@ pub enum SendError {
     ForeignGraph,
     /// A previous transaction never finished: a panic escaped it.
     Poisoned,
+    /// The transaction failed and was rolled back (the rollback probe).
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    Refused(Refusal),
 }
 
 /// Failure modes of [`Transaction::try_send`](crate::Transaction::try_send).
@@ -123,10 +168,15 @@ pub enum TransactionListenError {
 /// only fail when the driver pumps. The offending call or slot is dropped
 /// whole and the error returned; the rest stay pending for the next pump. An [`Io`](crate::Io) queues units on every target, so
 /// every variant can occur everywhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(feature = "undo", feature = "stage")), derive(Copy))]
 pub enum PumpError {
     /// A previous transaction never finished: a panic escaped it.
     Poisoned,
+    /// A unit failed and was rolled back (the rollback probe); the rest
+    /// stay pending.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    Refused(Refusal),
     /// A queued unit sends to an input that was collected before the driver
     /// pumped, a queued registration names a collected node, or a slot
     /// with a pending event is connected to a collected input.

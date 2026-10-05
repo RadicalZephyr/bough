@@ -11,8 +11,12 @@ use std::task::Waker;
 use std::time::Duration;
 
 use bough::Listener;
+#[cfg(any(feature = "undo", feature = "stage"))]
+use bough::{PumpError, SendError};
 
 use crate::clock::{Clock, WallClock};
+use bough::Input;
+
 use crate::graph::{Arg, Command, Def, Graph, Made};
 use crate::registry::{self, Function};
 use crate::ty::{InputToken, Literal, Node, Type};
@@ -48,6 +52,10 @@ pub struct Repl {
     watching: Vec<(String, Listener)>,
     out: Rc<RefCell<Vec<String>>>,
     clock: Box<dyn Clock>,
+    /// The rollback probe: the engine refuses a command or a tick that
+    /// fails, and the REPL prints the refusal, instead of dying.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    rollback: bool,
 }
 
 type Checked<T> = Result<T, String>;
@@ -67,7 +75,18 @@ impl Repl {
             watching: Vec::new(),
             out: Rc::default(),
             clock: Box::new(clock),
+            #[cfg(any(feature = "undo", feature = "stage"))]
+            rollback: false,
         }
+    }
+
+    /// The rollback probe: with it on, the engine refuses a command or a
+    /// tick that fails and leaves the graph as it was, and the REPL prints
+    /// the refusal as an error.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    pub fn set_rollback(&mut self, on: bool) {
+        self.rollback = on;
+        self.graph.runtime().set_rollback(on);
     }
 
     /// Registers the waker a tick's send wakes, so the driver knows to
@@ -77,10 +96,59 @@ impl Repl {
     }
 
     /// Runs the ticks sent since the last pump, each a transaction of its
-    /// own, and returns what they printed.
+    /// own, and returns what they printed. With rollback on, a tick the
+    /// engine refuses prints its refusal once, its event is dropped, and
+    /// the ticks after it run.
     pub fn pump(&mut self) -> Vec<String> {
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if self.rollback {
+            loop {
+                match self.graph.runtime().try_pump() {
+                    Ok(()) => break,
+                    Err(PumpError::Refused(refusal)) => self.say(format!("error: {refusal}")),
+                    Err(error) => {
+                        self.say(format!("error: {error}"));
+                        break;
+                    }
+                }
+            }
+            return self.out.take();
+        }
         self.graph.runtime().pump();
         self.out.take()
+    }
+
+    /// Runs a command in the graph. With rollback on, a refusal is an
+    /// error, which `run` prints; without it, a failure in the graph
+    /// panics as it always has.
+    fn make(&mut self, command: Command) -> Checked<Made> {
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if self.rollback {
+            return self.graph.try_make(command).map_err(refused);
+        }
+        Ok(self.graph.make(command))
+    }
+
+    /// Sends a redefinition, as [`make`](Repl::make) runs a command.
+    fn redefine(&mut self, binding: Input<Def>, def: Def) -> Checked<()> {
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if self.rollback {
+            return self.graph.try_redefine(binding, def).map_err(refused);
+        }
+        self.graph.redefine(binding, def);
+        Ok(())
+    }
+
+    /// Sends a literal to an input, as [`make`](Repl::make) runs a command.
+    fn send(&mut self, input: InputToken, literal: Literal) -> Checked<()> {
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        if self.rollback {
+            return input
+                .try_send(self.graph.runtime(), literal)
+                .map_err(refused);
+        }
+        input.send(self.graph.runtime(), literal);
+        Ok(())
     }
 
     /// RFD 1's order shuffle, for a test that shows nothing printed depends
@@ -130,7 +198,7 @@ impl Repl {
         let literal = parse_literal(literal)?;
         let shown = format!("input {literal}");
         let ty = literal.ty();
-        let made = self.graph.make(Command::Input(literal));
+        let made = self.make(Command::Input(literal))?;
         self.bind(name, ty, made, shown, Vec::new());
         Ok(())
     }
@@ -143,7 +211,7 @@ impl Repl {
             Ok(ms) if ms > 0 => Duration::from_millis(ms),
             _ => return Err(format!("{period} is not a period in milliseconds")),
         };
-        let made = self.graph.make(Command::Input(Literal::Int(0)));
+        let made = self.make(Command::Input(Literal::Int(0)))?;
         let Made::Input(input) = &made else {
             unreachable!("bough-repl: an input command makes an input")
         };
@@ -164,7 +232,7 @@ impl Repl {
         let Some(&i) = self.by_name.get(name) else {
             self.fresh(name)?;
             let (ty, def, uses) = self.check(definition)?;
-            let made = self.graph.make(Command::Define(def));
+            let made = self.make(Command::Define(def))?;
             self.bind(name, ty, made, shown, uses);
             return Ok(());
         };
@@ -185,7 +253,7 @@ impl Repl {
         if new_ty != ty {
             return Err(format!("{name} is {ty}, and {shown} is {new_ty}"));
         }
-        self.graph.redefine(redefine, def);
+        self.redefine(redefine, def)?;
         let binding = &mut self.bindings[i];
         binding.shown = shown;
         binding.uses = uses;
@@ -207,8 +275,7 @@ impl Repl {
         if literal.ty() != ty {
             return Err(format!("{name} is {ty}, and {literal} is {}", literal.ty()));
         }
-        input.send(self.graph.runtime(), literal);
-        Ok(())
+        self.send(input, literal)
     }
 
     /// `watch y`: prints `y = value` now and at every step.
@@ -410,6 +477,15 @@ impl Printer {
 fn signature(types: &[Type]) -> String {
     let types: Vec<String> = types.iter().map(Type::to_string).collect();
     format!("({})", types.join(", "))
+}
+
+/// A send's error as the REPL prints it: a refusal says what failed.
+#[cfg(any(feature = "undo", feature = "stage"))]
+fn refused(error: SendError) -> String {
+    match error {
+        SendError::Refused(refusal) => refusal.to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn parse_literal(word: &str) -> Checked<Literal> {

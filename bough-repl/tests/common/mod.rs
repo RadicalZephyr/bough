@@ -154,3 +154,68 @@ pub fn watch(graph: &mut Graph, log: &Log, name: &str, node: Node) {
         })
         .keep();
 }
+
+/// An `Int` binding's value now.
+pub fn sample_int(graph: &mut Graph, node: Node) -> i64 {
+    let Node::IntCell(cell) = node else {
+        unreachable!("the probe reads Int bindings")
+    };
+    *graph.runtime().sample(cell)
+}
+
+/// What a refused transaction must leave as it was: every live node's
+/// structure, the live count, and the values of some bindings.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub struct Before {
+    topology: bough::Topology,
+    live: usize,
+    values: Vec<i64>,
+}
+
+/// A graph for the rollback probe: rollback on, and collection only when a
+/// test asks, so a live count compared across a refusal shows that what
+/// the refused transaction made was freed at once.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub fn rollback_graph() -> Graph {
+    let mut graph = Graph::new();
+    let runtime = graph.runtime();
+    runtime.set_rollback(true);
+    runtime.set_collection_policy(bough::CollectionPolicy::Manual);
+    graph
+}
+
+/// Collects, and records what [`Before`] holds.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub fn before(graph: &mut Graph, nodes: &[Node]) -> Before {
+    graph.runtime().collect_garbage();
+    let values = nodes.iter().map(|&n| sample_int(graph, n)).collect();
+    let runtime = graph.runtime();
+    Before {
+        topology: runtime.topology(),
+        live: runtime.live_nodes(),
+        values,
+    }
+}
+
+/// Asserts the graph is as [`before`] found it, with no collection since.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub fn assert_as_before(graph: &mut Graph, nodes: &[Node], before: &Before) {
+    let runtime = graph.runtime();
+    assert_eq!(runtime.live_nodes(), before.live, "the live count");
+    assert_eq!(
+        runtime.topology(),
+        before.topology,
+        "every live node's structure"
+    );
+    let values: Vec<i64> = nodes.iter().map(|&n| sample_int(graph, n)).collect();
+    assert_eq!(values, before.values, "the bindings' values");
+}
+
+/// The refusal a send ended in; anything else fails the test.
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub fn refusal<T: std::fmt::Debug>(sent: Result<T, bough::SendError>) -> bough::Refusal {
+    match sent {
+        Err(bough::SendError::Refused(refusal)) => refusal,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

@@ -16,3 +16,5 @@ bough = { workspace = true, features = ["derive"] }
 # tests can run under each.
 [features]
 force = ["bough/force"]
+undo = ["force", "bough/undo"]
+stage = ["force", "bough/stage"]

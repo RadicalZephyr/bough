@@ -86,7 +86,12 @@ where
             .get()
             .downcast_ref::<F>()
             .expect("bough engine: function type");
-        f.values(b, &b.store.relations[me as usize].deps, passed)
+        #[cfg(feature = "undo")]
+        let running = b.s.probe.running.replace(me);
+        let v = f.values(b, &b.store.relations[me as usize].deps, passed);
+        #[cfg(feature = "undo")]
+        b.s.probe.running.set(running);
+        v
     })
 }
 
@@ -110,7 +115,12 @@ where
             .get()
             .downcast_ref::<F>()
             .expect("bough engine: function type");
-        f.posts(b, &b.store.relations[me as usize].deps)
+        #[cfg(feature = "undo")]
+        let running = b.s.probe.running.replace(me);
+        let v = f.posts(b, &b.store.relations[me as usize].deps);
+        #[cfg(feature = "undo")]
+        b.s.probe.running.set(running);
+        v
     };
     memo_mut::<M, R>(&mut b.store.data[me as usize]).post_value = Some(v);
 }
@@ -129,6 +139,16 @@ fn settle_read<M: Mode, R: 'static>(d: &mut Data<M>) {
     }
 }
 
+/// The rollback probe: forgets the value after the instant beside the
+/// memo, which a later commit would promote, and the memo, which commit
+/// may have promoted already.
+#[cfg(any(feature = "undo", feature = "stage"))]
+fn abort_read<M: Mode, R: 'static>(d: &mut Data<M>) {
+    let memo = memo_mut::<M, R>(d);
+    memo.post_value = None;
+    memo.value.take();
+}
+
 impl<M, V, R, F> NodeOps<M> for ReadNode<V, R, F>
 where
     M: Mode,
@@ -140,6 +160,8 @@ where
         value: value_read::<M, V, R, F>,
         compute_post: post_read::<M, V, R, F>,
         settle_memo: settle_read::<M, R>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        abort_memo: abort_read::<M, R>,
         ..Ops::<M>::DEFAULT
     };
 }

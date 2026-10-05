@@ -133,6 +133,11 @@ pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
+#[cfg(any(feature = "undo", feature = "stage"))]
+#[doc(hidden)]
+pub use engine::Topology;
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub use error::Refusal;
 pub use error::{
     IoError, IoTransactionError, PoisonedError, PumpError, SendError, TokenError,
     TransactionListenError, TransactionSendError,

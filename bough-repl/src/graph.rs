@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bough::{Anchored, Build, Cell, Input, Runtime, Source};
+use bough::{Anchored, Build, Cell, Input, Runtime, SendError, Source};
 
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};
@@ -123,6 +123,22 @@ impl Graph {
     /// Redefines a binding: one send, so one transaction.
     pub fn redefine(&mut self, binding: Input<Def>, def: Def) {
         self.runtime.send(binding, def);
+    }
+
+    /// [`make`](Graph::make), returning the send's error rather than
+    /// panicking on it: under the rollback probe, the refusal.
+    pub fn try_make(&mut self, command: Command) -> Result<Made, SendError> {
+        self.runtime.try_send(self.commands, command)?;
+        Ok(self
+            .made
+            .borrow_mut()
+            .take()
+            .expect("bough-repl: the construct fires once per command"))
+    }
+
+    /// [`redefine`](Graph::redefine), returning the send's error.
+    pub fn try_redefine(&mut self, binding: Input<Def>, def: Def) -> Result<(), SendError> {
+        self.runtime.try_send(binding, def)
     }
 
     /// The runtime, for sends and listeners.

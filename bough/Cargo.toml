@@ -27,8 +27,14 @@ statistics = []
 # bare-metal target pushes the generic engine through code generation.
 smoke = []
 # The rollback probe, not API. `force` computes, before commit, every value
-# a cell listener will read, so dispatch runs no graph code.
+# a cell listener will read, so dispatch runs no graph code. `undo`,
+# mechanism A, catches a panic and undoes the instant from a log; it needs
+# `std` for `catch_unwind`. `stage`, mechanism B, moves every check ahead of
+# commit, so a refusal only throws away what the instant made. Both wait on
+# `Runtime::set_rollback`.
 force = []
+undo = ["force", "std"]
+stage = ["force"]
 
 [dependencies]
 bough-derive = { workspace = true, optional = true }

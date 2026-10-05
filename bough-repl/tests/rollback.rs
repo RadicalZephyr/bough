@@ -334,7 +334,7 @@ fn with_force_a_function_over_a_state_still_fails_in_dispatch() {
 /// The REPL never builds a construct that runs at the instant it was
 /// built, so F5 is a graph of its own: an outer construct whose closure
 /// builds an inner construct over the same stream, which runs at the same
-/// instant, once the outer closure has returned, and panics on 7.
+/// instant, once the outer closure has returned, and panics there on 7.
 #[test]
 fn f5_a_construct_built_in_another_s_run_that_panics_at_the_same_instant_poisons() {
     let (mut runtime, edge) = Runtime::build(|b| {
@@ -342,8 +342,10 @@ fn f5_a_construct_built_in_another_s_run_that_panics_at_the_same_instant_poisons
         let numbers = numbers.share(b);
         let made = numbers.construct(b, move |b, n| {
             let first = b.constant(n);
-            let inner = numbers.construct(b, |b, m: i64| {
-                assert!(m % 7 != 0, "the inner construct on {m}");
+            // It fails only at the instant that built it, on 7, so one
+            // built by an earlier event runs on.
+            let inner = numbers.construct(b, move |b, m: i64| {
+                assert!(m != n || n % 7 != 0, "the inner construct built on {n}");
                 b.constant(m * 10)
             });
             let latest = inner.hold(b, first).switch_cell(b);
@@ -365,6 +367,9 @@ fn f5_a_construct_built_in_another_s_run_that_panics_at_the_same_instant_poisons
         .keep();
     assert_eq!(*runtime.sample(cell), 20, "the inner construct ran at once");
     let message = panic_message(|| runtime.send(numbers_in, 7));
-    assert!(message.contains("the inner construct on 7"), "{message}");
+    assert!(
+        message.contains("the inner construct built on 7"),
+        "{message}"
+    );
     assert_eq!(runtime.try_send(numbers_in, 3), Err(SendError::Poisoned));
 }

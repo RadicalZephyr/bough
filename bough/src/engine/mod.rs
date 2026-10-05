@@ -38,6 +38,7 @@ mod collect;
 pub(crate) mod edge;
 mod loops;
 pub(crate) mod nodes;
+mod probe;
 mod pull;
 mod sched;
 mod store;
@@ -55,6 +56,10 @@ use crate::token::Token;
 use crate::trace::Tracer;
 
 pub(crate) use collect::{clear_slot, trace_cell, trace_in_place};
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub(crate) use probe::Probe;
+#[cfg(any(feature = "undo", feature = "stage"))]
+pub use probe::Topology;
 pub(crate) use pull::Passed;
 pub(crate) use sched::Sched;
 #[cfg(feature = "statistics")]
@@ -316,6 +321,22 @@ pub(crate) struct Ops<M: Mode> {
         allow(dead_code)
     )]
     pub(crate) fire: FireFn<M>,
+    /// The rollback probe's `undo`: commit, parking the replaced value in
+    /// the pending slot until the instant is known to stand.
+    #[cfg(feature = "undo")]
+    pub(crate) park: fn(&mut [M::Carrier], &mut Data<M>),
+    /// `undo`: puts a parked value back.
+    #[cfg(feature = "undo")]
+    pub(crate) unpark: fn(&mut Data<M>),
+    /// The rollback probe: drops a pending value, or a parked one.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    #[cfg_attr(not(feature = "undo"), allow(dead_code))]
+    pub(crate) clear_pending: fn(&mut Data<M>),
+    /// The rollback probe: a read-through cell forgets its memo and the
+    /// value after the instant beside it.
+    #[cfg(any(feature = "undo", feature = "stage"))]
+    #[cfg_attr(not(feature = "undo"), allow(dead_code))]
+    pub(crate) abort_memo: fn(&mut Data<M>),
 }
 
 fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) {}
@@ -338,6 +359,8 @@ fn no_clear_slot<M: Mode>(_: &mut Data<M>) {}
 fn no_fire<M: Mode>(_: &mut Build<M>, n: u32, _: &mut dyn Any) -> Result<(), DoubleSend> {
     unreachable!("bough engine: node {n} is not an input")
 }
+#[cfg(any(feature = "undo", feature = "stage"))]
+fn no_data_op<M: Mode>(_: &mut Data<M>) {}
 
 impl<M: Mode> Ops<M> {
     /// Every entry a no-op: node 0, inputs, constants, `never`.
@@ -354,6 +377,14 @@ impl<M: Mode> Ops<M> {
         trace: no_trace::<M>,
         clear_slot: no_clear_slot::<M>,
         fire: no_fire::<M>,
+        #[cfg(feature = "undo")]
+        park: no_commit::<M>,
+        #[cfg(feature = "undo")]
+        unpark: no_data_op::<M>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        clear_pending: no_data_op::<M>,
+        #[cfg(any(feature = "undo", feature = "stage"))]
+        abort_memo: no_data_op::<M>,
     };
 }
 
