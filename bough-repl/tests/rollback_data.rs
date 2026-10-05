@@ -106,3 +106,36 @@ fn f4_after_a_failing_tick_redefining_the_binding_lets_the_next_one_through() {
         ],
     );
 }
+
+/// Whether a tick is dropped depends on whether anything reads the cell
+/// that fails on it. Unwatched, `boom`'s function never runs, so the
+/// seventh tick commits, `c` shows it, and the failure waits for the first
+/// read, a `watch`, outside any transaction.
+#[test]
+fn f4_unwatched_the_failing_cell_drops_nothing_until_it_is_read() {
+    let (mut repl, ticks) = with_manual_clock();
+    repl.set_rollback(true);
+    ticking(
+        &mut repl,
+        &ticks,
+        &[
+            ("tick t 1000", &[]),
+            ("def c add t 1", &[]),
+            ("def b boom t", &[]),
+            ("watch c", &["c = 1"]),
+        ],
+    );
+    for tick in 1..=7 {
+        ticks.fire();
+        assert_eq!(repl.pump(), [format!("c = {}", tick + 1)], "tick {tick}");
+    }
+    let message = common::panic_message(|| {
+        repl.run("watch b");
+    });
+    assert!(message.contains("boom on 7"), "{message}");
+    ticking(
+        &mut repl,
+        &ticks,
+        &[(TICK, &["c = 9"]), ("watch b", &["b = 8"])],
+    );
+}
