@@ -12,6 +12,18 @@ use std::rc::Rc;
 
 use bough::{Cell, Input, Listener, Runtime, Shared, Source};
 
+/// The rollback probe: with `undo` or `stage`, rollback on, so a shape
+/// measures the mechanism on the happy path; with `rollback-off` too, the
+/// mechanism compiled in and switched off.
+pub fn probe(graph: &mut Runtime) {
+    #[cfg(all(
+        any(feature = "undo", feature = "stage"),
+        not(feature = "rollback-off")
+    ))]
+    graph.set_rollback(true);
+    let _ = graph;
+}
+
 /// Rounds of [`payload`]: about 55 ns of the user's own work on the machine
 /// the stage 1 bar was measured on.
 pub const PAYLOAD_ROUNDS: u32 = 50;
@@ -52,7 +64,7 @@ pub struct Shallow {
 
 impl Shallow {
     pub fn new(share: bool, heavy: bool) -> Self {
-        let (graph, edge) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (numbers, input) = b.input::<u64>();
             let mapped = numbers.map(move |x| if heavy { payload(x) } else { first(x) });
             let out = if share {
@@ -63,6 +75,7 @@ impl Shallow {
             (input, out)
         });
         let (input, out) = edge.keep();
+        probe(&mut graph);
         Shallow { graph, input, out }
     }
 
@@ -109,7 +122,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new() -> Self {
-        let (graph, edge) = Runtime::build(|b| {
+        let (mut graph, edge) = Runtime::build(|b| {
             let (open, _open_in) = b.input_cell(true);
             let mut inputs = Vec::with_capacity(FRAME_INPUTS);
             let mut outs = Vec::with_capacity(FRAME_INPUTS * 4);
@@ -129,6 +142,7 @@ impl Frame {
             (inputs, outs)
         });
         let (inputs, outs) = edge.keep();
+        probe(&mut graph);
         Frame {
             graph,
             inputs,
@@ -222,6 +236,7 @@ impl FanOut {
             (input, numbers)
         });
         let (input, numbers) = edge.keep();
+        probe(&mut graph);
         let sum = Rc::new(StdCell::new(0u64));
         let listeners = (0..LISTENERS)
             .map(|_| {
@@ -290,9 +305,123 @@ impl Default for FanOutBaseline {
     }
 }
 
+/// The rollback probe's data shape: an input cell under a chain of three
+/// read-through cells, the last one watched, so every send computes the
+/// chain for the listener: lazily in dispatch, or under `force` before
+/// commit.
+pub struct Watched {
+    pub graph: Runtime,
+    pub input: Input<u64>,
+    pub seen: Rc<StdCell<u64>>,
+    pub listener: Listener,
+}
+
+impl Watched {
+    pub fn new() -> Self {
+        let (mut graph, edge) = Runtime::build(|b| {
+            let (x, input) = b.input_cell(0u64);
+            let out = x
+                .map_cell(b, |x| x.wrapping_add(1))
+                .map_cell(b, |x| x.wrapping_mul(3))
+                .map_cell(b, |x| x ^ 5);
+            (input, out)
+        });
+        let (input, out) = edge.keep();
+        probe(&mut graph);
+        let seen = Rc::new(StdCell::new(0u64));
+        let shown = seen.clone();
+        let listener = graph.listen_cell(out, move |v| shown.set(*v));
+        Watched {
+            graph,
+            input,
+            seen,
+            listener,
+        }
+    }
+
+    /// One transaction.
+    #[inline]
+    pub fn send(&mut self, x: u64) {
+        self.graph.send(self.input, x);
+    }
+}
+
+impl Default for Watched {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The rollback probe's edit shape: a binding as `bough-repl` makes one,
+/// an input of definitions, a construct that builds each, a hold of the
+/// current one and a switch over it, watched. Each redefinition builds a
+/// node over an older cell, links it, moves the switch to it, computes it
+/// for the watch, and leaves the old definition for collection.
+pub struct Rebind {
+    pub graph: Runtime,
+    pub redefine: Input<u64>,
+    pub seen: Rc<StdCell<u64>>,
+    pub listener: Listener,
+}
+
+impl Rebind {
+    pub fn new() -> Self {
+        let (mut graph, edge) = Runtime::build(|b| {
+            let (a, _a_in) = b.input_cell(1u64);
+            let (definitions, redefine) = b.input::<u64>();
+            let built =
+                definitions.construct(b, move |b, k| a.map_cell(b, move |x| x.wrapping_add(k)));
+            let first = a.map_cell(b, |x| *x);
+            let current = built.hold(b, first).switch_cell(b);
+            (redefine, current)
+        });
+        let (redefine, current) = edge.keep();
+        probe(&mut graph);
+        let seen = Rc::new(StdCell::new(0u64));
+        let shown = seen.clone();
+        let listener = graph.listen_cell(current, move |v| shown.set(*v));
+        Rebind {
+            graph,
+            redefine,
+            seen,
+            listener,
+        }
+    }
+
+    /// One redefinition, one transaction.
+    #[inline]
+    pub fn redefine(&mut self, k: u64) {
+        self.graph.send(self.redefine, k);
+    }
+}
+
+impl Default for Rebind {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_probe_s_shapes_compute_what_they_say() {
+        let mut watched = Watched::new();
+        watched.send(4);
+        assert_eq!(watched.seen.get(), (5 * 3) ^ 5);
+        let mut rebind = Rebind::new();
+        assert_eq!(rebind.seen.get(), 1);
+        for k in 0..100 {
+            rebind.redefine(k);
+            assert_eq!(rebind.seen.get(), 1 + k);
+        }
+        rebind.graph.collect_garbage();
+        assert!(
+            rebind.graph.live_nodes() < 20,
+            "old definitions are collected"
+        );
+    }
 
     #[test]
     fn the_shallow_shapes_agree_with_their_baseline() {

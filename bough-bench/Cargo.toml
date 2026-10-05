@@ -12,6 +12,15 @@ publish = false
 [dependencies]
 bough.workspace = true
 
+# The rollback probe's mechanisms, measured on the happy path. With `undo`
+# or `stage`, every shape turns rollback on, unless `rollback-off` asks to
+# measure the mechanism compiled in and switched off.
+[features]
+force = ["bough/force"]
+undo = ["bough/undo"]
+stage = ["bough/stage"]
+rollback-off = []
+
 [dev-dependencies]
 criterion.workspace = true
 gungraun.workspace = true
@@ -24,4 +33,9 @@ harness = false
 # Instruction counts, run in CI: the regression gate.
 [[bench]]
 name = "regression"
+harness = false
+
+# Instruction counts of the rollback probe's two shapes, by hand.
+[[bench]]
+name = "probe"
 harness = false

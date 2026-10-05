@@ -1,0 +1,48 @@
+unchanged	regression::shapes::shallow plain:(false)	644229
+unchanged	regression::shapes::shallow share:(true)	931958
+unchanged	regression::shapes::frame	63978438
+unchanged	regression::shapes::fan_out	6862941
+unchanged	probe::probe::watched	2017804
+unchanged	probe::probe::rebind	3481898
+none	regression::shapes::shallow plain:(false)	644225
+none	regression::shapes::shallow share:(true)	931954
+none	regression::shapes::frame	63943422
+none	regression::shapes::fan_out	6861937
+none	probe::probe::watched	2016803
+none	probe::probe::rebind	3486895
+force	regression::shapes::shallow plain:(false)	646227
+force	regression::shapes::shallow share:(true)	933956
+force	regression::shapes::frame	63943444
+force	regression::shapes::fan_out	6882939
+force	probe::probe::watched	2457805
+force	probe::probe::rebind	4200897
+undo-on	regression::shapes::shallow plain:(false)	727666
+undo-on	regression::shapes::shallow share:(true)	1024394
+undo-on	regression::shapes::frame	66578458
+undo-on	regression::shapes::fan_out	6914229
+undo-on	probe::probe::watched	2560908
+undo-on	probe::probe::rebind	4276332
+undo-off	regression::shapes::shallow plain:(false)	664043
+undo-off	regression::shapes::shallow share:(true)	952771
+undo-off	regression::shapes::frame	63998117
+undo-off	regression::shapes::fan_out	6901100
+undo-off	probe::probe::watched	2488905
+undo-off	probe::probe::rebind	4146105
+stage-on	regression::shapes::shallow plain:(false)	680431
+stage-on	regression::shapes::shallow share:(true)	968176
+stage-on	regression::shapes::frame	64141090
+stage-on	regression::shapes::fan_out	6918335
+stage-on	probe::probe::watched	2495060
+stage-on	probe::probe::rebind	4459810
+stage-off	regression::shapes::shallow plain:(false)	680430
+stage-off	regression::shapes::shallow share:(true)	968175
+stage-off	regression::shapes::frame	64141089
+stage-off	regression::shapes::fan_out	6918206
+stage-off	probe::probe::watched	2495057
+stage-off	probe::probe::rebind	4281198
+both-on	regression::shapes::shallow plain:(false)	755911
+both-on	regression::shapes::shallow share:(true)	1054658
+both-on	regression::shapes::frame	67038810
+both-on	regression::shapes::fan_out	6945340
+both-on	probe::probe::watched	2595061
+both-on	probe::probe::rebind	4523926

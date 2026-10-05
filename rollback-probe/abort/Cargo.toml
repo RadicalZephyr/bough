@@ -1,0 +1,18 @@
+[package]
+name = "abort-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The rollback probe under panic = \"abort\": what each mechanism does when nothing can be caught."
+
+[dependencies]
+bough = { path = "../../bough", features = ["undo", "stage"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+# Its own workspace, so the panic profile is its own.
+[workspace]

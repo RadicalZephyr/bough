@@ -1,0 +1,17 @@
+== abort-probe undo
+undo: sending 7
+
+thread 'main' (31922) panicked at src/main.rs:31:17:
+graph code on 7
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Aborted
+exit status 134
+== abort-probe stage
+stage: sending 7
+stage: 7 came back Err(Refused(Refusal { node: Some(2), message: "a construct refusing 7", inputs: [1] }))
+stage: then 1, and the cell is 1
+exit status 0
+== wasm-probe under node
+stage_probe: returned 0
+undo_probe: trapped: RuntimeError: unreachable
+stage_probe: returned 0

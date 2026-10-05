@@ -2,7 +2,8 @@
 resolver = "3"
 members = ["bough", "bough-derive", "bough-oracle", "bough-bench", "bough-repl"]
 # The GTK spike needs GTK's system libraries, so it is a workspace of its own.
-exclude = ["bough-gtk"]
+# The rollback probe's experiments set their own panic strategy and target.
+exclude = ["bough-gtk", "rollback-probe"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,15 @@
+[package]
+name = "wasm-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The rollback probe on wasm32-unknown-unknown, where a panic is a trap."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bough = { path = "../../bough", features = ["undo", "stage"] }
+
+# Its own workspace, like the abort probe beside it.
+[workspace]
