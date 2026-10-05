@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -124,4 +125,32 @@ pub fn int_input(graph: &mut Graph, n: i64) -> (Node, Input<i64>) {
         },
         Made::Defined(_) => unreachable!(),
     }
+}
+
+/// The message of the panic `f` makes; a panic is expected.
+pub fn panic_message(f: impl FnOnce()) -> String {
+    let payload = catch_unwind(AssertUnwindSafe(f)).expect_err("a panic");
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload.downcast::<&str>().unwrap().to_string(),
+    }
+}
+
+/// What the watches of [`watch`] print, `name = value`, in the order
+/// their listeners ran.
+pub type Log = Rc<RefCell<Vec<String>>>;
+
+/// Watches an `Int` binding as the REPL does, printing into `log`: its
+/// value now, and at every step.
+pub fn watch(graph: &mut Graph, log: &Log, name: &str, node: Node) {
+    let Node::IntCell(cell) = node else {
+        unreachable!("the probe watches Int bindings")
+    };
+    let (log, name) = (log.clone(), name.to_string());
+    graph
+        .runtime()
+        .listen_cell(cell, move |n| {
+            log.borrow_mut().push(format!("{name} = {n}"))
+        })
+        .keep();
 }

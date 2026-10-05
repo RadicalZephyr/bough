@@ -6,6 +6,8 @@
 //! two types is two entries under one name, which `def` chooses between by
 //! the types of its arguments. Every function is total, since a panic in a
 //! cell's function poisons the runtime: arithmetic wraps, and `mod 0` is 0.
+//! All but one: `boom` panics on purpose, for the rollback probe, which
+//! needs a function that fails on some values only.
 
 use bough::{Build, Lift};
 
@@ -119,7 +121,20 @@ const FUNCTIONS: &[Function] = &[
         result: Str,
         wire: |b, a| Node::StrCell(a[0].int().map_cell(b, |n| n.to_string())),
     },
+    Function {
+        name: "boom",
+        params: &[Int],
+        result: Int,
+        wire: |b, a| Node::IntCell(a[0].int().map_cell(b, |n| boom(*n))),
+    },
 ];
+
+/// `boom`: its argument, except that it panics on a multiple of 7 other
+/// than 0, so a tick, which starts at 0, can be watched through it.
+pub fn boom(n: i64) -> i64 {
+    assert!(n == 0 || n % 7 != 0, "boom on {n}");
+    n
+}
 
 /// An `Int, Int -> Int` function: a lift of `f` over both cells.
 fn int2(b: &mut Build, args: &[Node], f: fn(&i64, &i64) -> i64) -> Node {
