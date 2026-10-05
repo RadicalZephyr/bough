@@ -1,0 +1,20 @@
+input in 0
+tick t 1000
+def x in
+watch x
+def xs str x
+def mod3 mod x 3
+def mod5 mod x 5
+def mod3_p eq mod3 0
+def mod5_p eq mod5 0
+def fizz if mod3_p "fizz" ""
+def buzz if mod5_p "buzz" ""
+def fizzbuzz cat fizz buzz
+def fizzbuzz_empty_p eq fizzbuzz ""
+def out if fizzbuzz_empty_p xs fizzbuzz
+watch out
+def mod7 mod x 7
+def mod7_p eq mod7 0
+def splash if mod7_p "splash" ""
+def fizzbuzzsplash cat fizzbuzz splash
+def fbs_p eq fizzbuzzsplash ""
