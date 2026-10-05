@@ -324,6 +324,7 @@ impl<M: Mode> Build<M> {
     /// before the instant is not a dependency.
     pub fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
         let token = self.loop_node();
+        let token = self.after_commit(token);
         (
             State::from_token(token),
             StateLoop {

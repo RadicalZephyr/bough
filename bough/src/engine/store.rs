@@ -215,6 +215,18 @@ impl<M: Mode> Build<M> {
         n
     }
 
+    /// Marks the node a `State` token names: its value after an instant
+    /// exists only from commit. Only the rollback probe's `force` reads
+    /// the mark.
+    #[inline]
+    pub(crate) fn after_commit(&mut self, token: Token) -> Token {
+        #[cfg(feature = "force")]
+        {
+            self.store.hot[token.index as usize].flags |= super::AFTER_COMMIT;
+        }
+        token
+    }
+
     /// `to` depends on `from`.
     pub(crate) fn link(&mut self, from: u32, to: u32) {
         self.store.relations[from as usize].dependents.push(to);

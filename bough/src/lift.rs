@@ -92,6 +92,11 @@ macro_rules! lift_tuple {
             {
                 let inputs = [$(build.check(self.$i.token()),)+];
                 let token = read_through::<M, ($($cell::Value,)+), R, F>(build, &inputs, f);
+                let token = if <join!($($cell),+) as CellKind>::AFTER_COMMIT {
+                    build.after_commit(token)
+                } else {
+                    token
+                };
                 <join!($($cell),+) as CellKind>::wrap::<R>(token)
             }
         }

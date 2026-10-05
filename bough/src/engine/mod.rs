@@ -136,6 +136,11 @@ pub(crate) const LIVE: u8 = 1 << 5;
 /// A switch_stream over linear streams: the one consumer of the inner it
 /// links, which it records in that inner's `linear_consumer`.
 pub(crate) const TAKES_LINEAR: u8 = 1 << 6;
+/// The node is of `State` kind: its value after an instant exists only
+/// from commit, when an in-place accumulator under it runs its function,
+/// so the rollback probe's `force` can't compute it before commit.
+#[cfg(feature = "force")]
+pub(crate) const AFTER_COMMIT: u8 = 1 << 7;
 
 /// What marking and the evaluation loop touch: 32 bytes, two per cache
 /// line.

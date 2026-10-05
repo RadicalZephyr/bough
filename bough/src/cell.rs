@@ -80,6 +80,10 @@ pub trait CellKind: 'static {
 
     /// The token of this kind naming a node.
     fn wrap<A: 'static>(token: Token) -> Self::Ref<A>;
+
+    /// Whether a node of this kind has its value after an instant only
+    /// from commit: a `State`.
+    const AFTER_COMMIT: bool;
 }
 
 /// The kind of a [`Cell`]: its value after the instant exists during the
@@ -98,6 +102,7 @@ impl CellKind for Steps {
     fn wrap<A: 'static>(token: Token) -> Cell<A> {
         Cell::from_token(token)
     }
+    const AFTER_COMMIT: bool = false;
 }
 
 impl CellKind for NoSteps {
@@ -106,6 +111,7 @@ impl CellKind for NoSteps {
     fn wrap<A: 'static>(token: Token) -> State<A> {
         State::from_token(token)
     }
+    const AFTER_COMMIT: bool = true;
 }
 
 /// A read-through cell over the cells at `inputs`: `f` of their values,
@@ -159,7 +165,8 @@ impl<A: 'static> State<A> {
         F: Fn(&A) -> B + 'static,
     {
         let input = build.check(self.token);
-        State::from_token(read_through::<M, (A,), B, F>(build, &[input], f))
+        let token = read_through::<M, (A,), B, F>(build, &[input], f);
+        State::from_token(build.after_commit(token))
     }
 }
 
@@ -360,7 +367,8 @@ impl<A: 'static> Cell<State<A>> {
     /// assert_eq!(*graph.sample(current), ["ada"]);
     /// ```
     pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> State<A> {
-        State::from_token(build.switch_cell_node::<State<A>>(self.token))
+        let token = build.switch_cell_node::<State<A>>(self.token);
+        State::from_token(build.after_commit(token))
     }
 }
 

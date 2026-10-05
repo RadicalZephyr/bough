@@ -11,3 +11,8 @@ publish = false
 
 [dependencies]
 bough = { workspace = true, features = ["derive"] }
+
+# The rollback probe's mechanisms, forwarded to the engine, so this crate's
+# tests can run under each.
+[features]
+force = ["bough/force"]

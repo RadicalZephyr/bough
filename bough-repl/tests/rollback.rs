@@ -21,6 +21,8 @@ use std::rc::Rc;
 use bough::{Runtime, SendError, Source};
 use bough_repl::Repl;
 use bough_repl::graph::{Arg, Command, Def, Graph, Made};
+#[cfg(feature = "force")]
+use bough_repl::registry;
 use bough_repl::ty::{InputToken, Literal, Node};
 use common::{
     Log, TICK, apply, define, int_input, panic_message, ticking, watch, with_manual_clock,
@@ -53,23 +55,35 @@ fn f1_a_cycle_closed_by_a_redefinition_is_found_at_the_switch_move_and_poisons()
     assert_eq!(graph.runtime().try_send(a_in, 2), Err(SendError::Poisoned));
 }
 
-/// A watch downstream changes nothing: commit, where the switch moves and
-/// the cycle is found, comes before the listeners.
-#[test]
-fn f1_watched_the_cycle_is_still_found_at_the_switch_move() {
+/// F1 with a watch downstream of the cycle, which panics with `message`.
+fn f1_watched(message: &str) {
     let mut graph = Graph::new();
     let (a_in, x_redefine, y) = chain(&mut graph);
     let log = Log::default();
     watch(&mut graph, &log, "y", y);
-    let message = panic_message(|| {
+    let panicked = panic_message(|| {
         graph.redefine(x_redefine, apply("add", vec![Arg::Binding(y), int(1)]));
     });
-    assert!(
-        message.contains("switching closes a same-instant cycle"),
-        "{message}"
-    );
+    assert!(panicked.contains(message), "{panicked}");
     assert_eq!(*log.borrow(), ["y = 3"], "only the watch's first line");
     assert_eq!(graph.runtime().try_send(a_in, 2), Err(SendError::Poisoned));
+}
+
+/// A watch downstream changes nothing: commit, where the switch moves and
+/// the cycle is found, comes before the listeners.
+#[cfg(not(feature = "force"))]
+#[test]
+fn f1_watched_the_cycle_is_still_found_at_the_switch_move() {
+    f1_watched("switching closes a same-instant cycle");
+}
+
+/// Computing the watched value before commit finds the cycle first, as a
+/// read that comes back to a cell it's computing. The switches haven't
+/// moved, so it's a read's check that sees the cycle, not the move's.
+#[cfg(feature = "force")]
+#[test]
+fn f1_watched_with_force_the_cycle_is_found_before_commit() {
+    f1_watched("a same-instant cycle through a read after the instant");
 }
 
 #[test]
@@ -130,38 +144,51 @@ fn f3_a_definition_that_panics_on_the_current_value_poisons_through_the_repl() {
     assert!(message.contains("poisoned"), "{message}");
 }
 
+/// F3 in a transaction that also redefines `x`, with both watched, under
+/// shuffle seed `seed`: whether `x`'s watcher printed before the panic.
+fn f3_sibling_printed(seed: u64) -> bool {
+    let mut graph = Graph::new();
+    graph.runtime().set_shuffle_seed(Some(seed));
+    let (a, a_in) = int_input(&mut graph, 7);
+    let (x, x_redefine) = define(&mut graph, apply("add", vec![Arg::Binding(a), int(1)]));
+    let (b, b_redefine) = define(&mut graph, apply("add", vec![Arg::Binding(a), int(1)]));
+    let log = Log::default();
+    watch(&mut graph, &log, "x", x);
+    watch(&mut graph, &log, "b", b);
+    log.borrow_mut().clear();
+    let message = panic_message(|| {
+        graph.runtime().transaction(|tx| {
+            tx.send(x_redefine, apply("add", vec![Arg::Binding(a), int(2)]));
+            tx.send(b_redefine, apply("boom", vec![Arg::Binding(a)]));
+        });
+    });
+    assert!(message.contains("boom on 7"), "{message}");
+    assert_eq!(graph.runtime().try_send(a_in, 2), Err(SendError::Poisoned));
+    log.borrow().iter().any(|line| line == "x = 9")
+}
+
 /// Where F3 fails: `boom` is a `map_cell`, whose function runs when the
 /// cell is first read after commit, which is a watch's listener. With
 /// another binding redefined in the same transaction, that binding's
 /// watcher has printed first in some listener orders: a side effect of a
 /// transaction that then failed.
+#[cfg(not(feature = "force"))]
 #[test]
 fn f3_the_panic_comes_in_dispatch_after_another_watcher_printed_in_some_orders() {
-    let printed: Vec<u64> = (0..32)
-        .filter(|&seed| {
-            let mut graph = Graph::new();
-            graph.runtime().set_shuffle_seed(Some(seed));
-            let (a, _) = int_input(&mut graph, 7);
-            let (x, x_redefine) = define(&mut graph, apply("add", vec![Arg::Binding(a), int(1)]));
-            let (b, b_redefine) = define(&mut graph, apply("add", vec![Arg::Binding(a), int(1)]));
-            let log = Log::default();
-            watch(&mut graph, &log, "x", x);
-            watch(&mut graph, &log, "b", b);
-            log.borrow_mut().clear();
-            let message = panic_message(|| {
-                graph.runtime().transaction(|tx| {
-                    tx.send(x_redefine, apply("add", vec![Arg::Binding(a), int(2)]));
-                    tx.send(b_redefine, apply("boom", vec![Arg::Binding(a)]));
-                });
-            });
-            assert!(message.contains("boom on 7"), "{message}");
-            log.borrow().iter().any(|line| line == "x = 9")
-        })
-        .collect();
+    let printed: Vec<u64> = (0..32).filter(|&seed| f3_sibling_printed(seed)).collect();
     assert!(
         !printed.is_empty() && printed.len() < 32,
         "x printed under seeds {printed:?}"
     );
+}
+
+/// With every watched value computed before commit, `boom` fails before
+/// any listener runs, under every seed.
+#[cfg(feature = "force")]
+#[test]
+fn f3_with_force_the_panic_comes_before_any_watcher_prints() {
+    let printed: Vec<u64> = (0..32).filter(|&seed| f3_sibling_printed(seed)).collect();
+    assert!(printed.is_empty(), "x printed under seeds {printed:?}");
 }
 
 /// Nothing reads a binding nobody watches, so its new definition's
@@ -213,43 +240,95 @@ fn f4_a_tick_boom_panics_on_poisons_the_runtime() {
     assert!(message.contains("poisoned"), "{message}");
 }
 
+/// F4 with a watched sibling of `b`, `c = add t 1`, under shuffle seed
+/// `seed`: whether `c`'s watcher printed for the seventh tick, the one
+/// that fails.
+fn f4_sibling_printed(seed: u64) -> bool {
+    let (mut repl, ticks) = with_manual_clock();
+    repl.set_shuffle_seed(Some(seed));
+    ticking(
+        &mut repl,
+        &ticks,
+        &[
+            ("tick t 1000", &[]),
+            ("def c add t 1", &[]),
+            ("def b boom t", &[]),
+            ("watch c", &["c = 1"]),
+            ("watch b", &["b = 0"]),
+        ],
+    );
+    for _ in 1..7 {
+        ticks.fire();
+        repl.pump();
+    }
+    ticks.fire();
+    let message = panic_message(|| {
+        repl.pump();
+    });
+    assert!(message.contains("boom on 7"), "{message}");
+    // What the failed pump printed before it panicked.
+    repl.run("").iter().any(|line| line == "c = 8")
+}
+
 /// As in F3, the panic comes in dispatch: a watch on a sibling of `b`
 /// prints for the seventh tick in some listener orders, though the tick's
 /// transaction fails.
+#[cfg(not(feature = "force"))]
 #[test]
 fn f4_a_sibling_watcher_prints_for_the_failing_tick_in_some_orders() {
-    let printed: Vec<u64> = (0..32)
-        .filter(|&seed| {
-            let (mut repl, ticks) = with_manual_clock();
-            repl.set_shuffle_seed(Some(seed));
-            ticking(
-                &mut repl,
-                &ticks,
-                &[
-                    ("tick t 1000", &[]),
-                    ("def c add t 1", &[]),
-                    ("def b boom t", &[]),
-                    ("watch c", &["c = 1"]),
-                    ("watch b", &["b = 0"]),
-                ],
-            );
-            for _ in 1..7 {
-                ticks.fire();
-                repl.pump();
-            }
-            ticks.fire();
-            let message = panic_message(|| {
-                repl.pump();
-            });
-            assert!(message.contains("boom on 7"), "{message}");
-            // What the failed pump printed before it panicked.
-            repl.run("").iter().any(|line| line == "c = 8")
-        })
-        .collect();
+    let printed: Vec<u64> = (0..32).filter(|&seed| f4_sibling_printed(seed)).collect();
     assert!(
         !printed.is_empty() && printed.len() < 32,
         "c printed under seeds {printed:?}"
     );
+}
+
+/// With force, the seventh tick fails before any listener runs.
+#[cfg(feature = "force")]
+#[test]
+fn f4_with_force_no_watcher_prints_for_the_failing_tick() {
+    let printed: Vec<u64> = (0..32).filter(|&seed| f4_sibling_printed(seed)).collect();
+    assert!(printed.is_empty(), "c printed under seeds {printed:?}");
+}
+
+/// A `State`'s value after an instant exists only from commit, once its
+/// in-place accumulator has run, so force leaves a function over one to
+/// dispatch: `boom` over an `accumulate_mut` still fails after a sibling's
+/// watcher has printed, in some orders.
+#[cfg(feature = "force")]
+#[test]
+fn with_force_a_function_over_a_state_still_fails_in_dispatch() {
+    let printed: Vec<u64> = (0..32)
+        .filter(|&seed| {
+            let (mut runtime, edge) = Runtime::build(|b| {
+                let (numbers, numbers_in) = b.input::<i64>();
+                let numbers = numbers.share(b);
+                let total = numbers.accumulate_mut(b, 0i64, |n, total: &mut i64| *total += n);
+                let boomed = total.map_cell(b, |t| registry::boom(*t));
+                let plain = numbers.hold(b, 0i64).map_cell(b, |n| n + 1);
+                (numbers_in, boomed, plain)
+            });
+            let (numbers_in, boomed, plain) = edge.keep();
+            runtime.set_shuffle_seed(Some(seed));
+            let log = Log::default();
+            let l = log.clone();
+            runtime
+                .listen_cell(boomed, move |n| {
+                    l.borrow_mut().push(format!("boomed = {n}"))
+                })
+                .keep();
+            let l = log.clone();
+            runtime
+                .listen_cell(plain, move |n| l.borrow_mut().push(format!("plain = {n}")))
+                .keep();
+            runtime.send(numbers_in, 3);
+            log.borrow_mut().clear();
+            let message = panic_message(|| runtime.send(numbers_in, 4));
+            assert!(message.contains("boom on 7"), "{message}");
+            log.borrow().iter().any(|line| line == "plain = 5")
+        })
+        .collect();
+    assert!(!printed.is_empty(), "plain printed under seeds {printed:?}");
 }
 
 /// The REPL never builds a construct that runs at the instant it was

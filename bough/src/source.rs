@@ -282,7 +282,8 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         let ops = &<InPlaceNode<Self, S, F> as NodeOps<M>>::OPS;
         let n = build.materialize(Kind::InPlace, data, parts, ops, &[dependency], COMMITS);
         build.set_reach(n, cells);
-        State::from_token(build.token(n))
+        let token = build.token(n);
+        State::from_token(build.after_commit(token))
     }
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output

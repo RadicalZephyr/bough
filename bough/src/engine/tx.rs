@@ -192,9 +192,46 @@ impl<M: Mode> Build<M> {
         self.mark();
         self.evaluate();
         self.new_nodes();
+        #[cfg(feature = "force")]
+        self.force();
         self.commit();
         self.disarm();
         self.dispatch();
+    }
+
+    /// The rollback probe's compute-before-commit: every value a cell
+    /// listener will read in dispatch is computed now, while graph code is
+    /// still guarded and before anything commits, so a function that fails
+    /// fails before any listener runs, and dispatch runs no graph code. A
+    /// cell that stepped has its value after the instant computed by
+    /// `prepare`, which commit promotes into its memo; `fill_post` fills
+    /// the memos of the cells the read passes that did not step. A node
+    /// whose listeners are all dead is skipped, since dispatch wouldn't
+    /// read it, so each function runs as often as it did when the
+    /// listeners computed it.
+    ///
+    /// A `State` can't be computed here. Its value after the instant exists
+    /// only once commit has run the in-place accumulator under it, which is
+    /// why it has no stream view, so it stays lazy, read in dispatch as
+    /// before, and a function over one still fails after commit.
+    #[cfg(feature = "force")]
+    fn force(&mut self) {
+        let mut k = 0;
+        while k < self.s.dispatch.len() {
+            let n = self.s.dispatch[k];
+            k += 1;
+            let h = &self.store.hot[n as usize];
+            let lazy = matches!(h.kind, Kind::ReadThrough | Kind::Loop | Kind::SwitchCell)
+                && h.flags & super::AFTER_COMMIT == 0;
+            if lazy
+                && self.store.listeners[n as usize]
+                    .iter()
+                    .any(|e| e.flag.is_live())
+            {
+                self.prepare(n);
+                self.fill_post(n);
+            }
+        }
     }
 
     /// Orders exactly the region the started nodes reach. With the shuffle

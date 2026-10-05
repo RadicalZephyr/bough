@@ -228,6 +228,26 @@ impl<M: Mode> Build<M> {
         self.store.cold[x as usize].prep_done = tx;
     }
 
+    /// After `prepare(x)`, fills the memos that a read of `x` after commit
+    /// would otherwise fill: those of the read-through cells it passes that
+    /// did not step, whose value after the instant is their value before
+    /// it, which commit leaves in place. A cell that stepped needs nothing
+    /// here: `prepare` computed its value after the instant, and commit
+    /// promotes it into the memo. The rollback probe's `force`.
+    #[cfg(feature = "force")]
+    pub(crate) fn fill_post(&self, x: u32) {
+        let h = &self.store.hot[x as usize];
+        let stepped = h.fired == self.tx;
+        match h.kind {
+            Kind::ReadThrough if !stepped => {
+                (self.store.ops[x as usize].value)(self, x, Passed::NOTHING);
+            }
+            Kind::Loop => self.fill_post(self.loop_target(x)),
+            Kind::SwitchCell => self.fill_post(self.selected_after(x)),
+            _ => {}
+        }
+    }
+
     /// The value after the instant: for a cell that stepped, the value its
     /// step carries, and for any other cell, its value before the instant.
     /// The caller has prepared `x`.

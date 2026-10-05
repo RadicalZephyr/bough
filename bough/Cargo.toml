@@ -26,6 +26,9 @@ statistics = []
 # every node kind the engine has so far, so that a library build for a
 # bare-metal target pushes the generic engine through code generation.
 smoke = []
+# The rollback probe, not API. `force` computes, before commit, every value
+# a cell listener will read, so dispatch runs no graph code.
+force = []
 
 [dependencies]
 bough-derive = { workspace = true, optional = true }
