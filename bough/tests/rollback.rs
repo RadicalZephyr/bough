@@ -74,3 +74,49 @@ fn a_split_s_children_queued_before_the_failure_go_with_it() {
         assert_eq!(*runtime.sample(checked), 2);
     }
 }
+
+/// A child instant is an instant of its own, with its own commit and its
+/// own listeners, so when one fails the roll back takes back that instant
+/// alone: its parent and the children before it have committed and been
+/// heard, and the children after it are dropped with it. The unit comes
+/// back refused, though not all of it was undone.
+#[test]
+fn a_failing_child_instant_is_rolled_back_alone() {
+    let (mut runtime, edge) = Runtime::build(|b| {
+        let (lists, lists_in) = b.input::<Vec<u32>>();
+        let lists = lists.share(b);
+        let items = lists
+            .split(b)
+            .map(|n: u32| {
+                assert!(n != 7, "graph code on {n}");
+                n
+            })
+            .share(b);
+        let last = items.hold(b, 0u32);
+        (lists_in, lists, items, last)
+    });
+    runtime.set_rollback(true);
+    let (lists_in, lists, items, last) = edge.keep();
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    runtime
+        .listen(lists, move |list: Vec<u32>| {
+            log.borrow_mut().push(format!("list of {}", list.len()))
+        })
+        .keep();
+    let log = heard.clone();
+    runtime
+        .listen(items, move |n| log.borrow_mut().push(format!("item {n}")))
+        .keep();
+    let refused = runtime.try_send(lists_in, vec![1, 2, 7, 3]);
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(*heard.borrow(), ["list of 4", "item 1", "item 2"]);
+    assert_eq!(
+        *runtime.sample(last),
+        2,
+        "the children before the failure stand"
+    );
+    runtime.send(lists_in, vec![5]);
+    assert_eq!(heard.borrow().last().map(String::as_str), Some("item 5"));
+    assert_eq!(*runtime.sample(last), 5);
+}
