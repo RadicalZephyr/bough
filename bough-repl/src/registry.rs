@@ -119,6 +119,12 @@ const FUNCTIONS: &[Function] = &[
         result: Str,
         wire: |b, a| Node::StrCell(a[0].int().map_cell(b, |n| n.to_string())),
     },
+    Function {
+        name: "cat",
+        params: &[Str, Str],
+        result: Str,
+        wire: |b, a| Node::StrCell((a[0].str(), a[1].str()).lift(b, |p, s| p.to_string() + s)),
+    },
 ];
 
 /// An `Int, Int -> Int` function: a lift of `f` over both cells.
