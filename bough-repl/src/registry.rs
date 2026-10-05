@@ -71,6 +71,12 @@ const FUNCTIONS: &[Function] = &[
         wire: |b, a| Node::BoolCell((a[0].int(), a[1].int()).lift(b, |x, y| x == y)),
     },
     Function {
+        name: "eq",
+        params: &[Str, Str],
+        result: Bool,
+        wire: |b, a| Node::BoolCell((a[0].str(), a[1].str()).lift(b, |x, y| x == y)),
+    },
+    Function {
         name: "gt",
         params: &[Int, Int],
         result: Bool,
