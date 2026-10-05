@@ -247,6 +247,31 @@ fn f3_unwatched_the_definition_still_installs_and_fails_at_the_next_watch() {
     assert_eq!(repl.run("watch b"), ["b = 8"]);
 }
 
+/// A can't refuse what never runs, but an edit can make its definition
+/// run: a construct that reads the new definition's value, here by
+/// sampling it, computes it on the current values inside the edit's
+/// transaction, so an unwatched F3 fails there and is refused, where it
+/// would otherwise install.
+#[test]
+fn f3_unwatched_is_refused_when_the_edit_evaluates_the_definition() {
+    let mut graph = rollback_graph();
+    let (a, _) = int_input(&mut graph, 7);
+    let (b, b_redefine) = define(&mut graph, apply("add", vec![Arg::Binding(a), int(1)]));
+    let nodes = [a, b];
+    let before = before(&mut graph, &nodes);
+    let evaluated = Def::Apply(
+        |b, args| {
+            let cell = args[0].try_int()?.map_cell(b, |n| registry::boom(*n));
+            cell.sample(b);
+            Ok(Node::IntCell(cell))
+        },
+        vec![Arg::Binding(a)],
+    );
+    let refusal = refusal(graph.try_redefine(b_redefine, evaluated));
+    assert!(refusal.message.contains("boom on 7"), "{refusal}");
+    assert_as_before(&mut graph, &nodes, &before);
+}
+
 /// F5: the inner construct's failure takes everything the outer one made
 /// at the instant with it, and the outer construct's event never reaches
 /// its listener. The inner construct the first event built runs on 7 too,
