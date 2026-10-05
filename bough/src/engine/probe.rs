@@ -115,8 +115,9 @@ impl<M: Mode> Build<M> {
     /// it.
     #[inline]
     pub(crate) fn record_move(&mut self, n: u32, at: usize, old: u32, new: u32) {
+        // A switch made at this instant goes with it: nothing to put back.
         #[cfg(any(feature = "undo", feature = "stage"))]
-        if self.s.probe.on {
+        if self.s.probe.on && self.store.hot[n as usize].created != self.tx {
             let position = self.store.relations[old as usize]
                 .dependents
                 .iter()

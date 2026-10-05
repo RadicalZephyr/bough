@@ -233,6 +233,13 @@ impl<M: Mode> Build<M> {
     /// refusal before commit leaves the older node as it was. Evaluation
     /// and the cycle checks follow dependencies, which are linked now.
     pub(crate) fn link(&mut self, from: u32, to: u32) {
+        self.add_dependent(from, to);
+        self.store.relations[to as usize].deps.push(from);
+    }
+
+    /// `to` joins `from`'s dependents: now, or under `stage`, when `to` was
+    /// made at this instant and `from` before it, at commit.
+    pub(crate) fn add_dependent(&mut self, from: u32, to: u32) {
         #[cfg(feature = "stage")]
         if self.s.probe.on
             && self.in_tx
@@ -240,10 +247,31 @@ impl<M: Mode> Build<M> {
             && self.store.hot[from as usize].created != self.tx
         {
             self.s.probe.staged.push((from, to));
-            self.store.relations[to as usize].deps.push(from);
             return;
         }
         self.store.relations[from as usize].dependents.push(to);
-        self.store.relations[to as usize].deps.push(from);
+    }
+
+    /// `to` leaves `from`'s dependents, where it was put by
+    /// [`add_dependent`](Build::add_dependent): under `stage`, perhaps
+    /// still waiting for commit in the staged list.
+    pub(crate) fn remove_dependent(&mut self, from: u32, to: u32) {
+        #[cfg(feature = "stage")]
+        if let Some(k) = self
+            .s
+            .probe
+            .staged
+            .iter()
+            .position(|&staged| staged == (from, to))
+        {
+            self.s.probe.staged.remove(k);
+            return;
+        }
+        let dependents = &mut self.store.relations[from as usize].dependents;
+        let p = dependents
+            .iter()
+            .position(|&d| d == to)
+            .expect("bough engine: a switch is a dependent of its inner");
+        dependents.remove(p);
     }
 }

@@ -343,13 +343,8 @@ impl<M: Mode> Build<M> {
         if *linear == n {
             *linear = 0;
         }
-        let dependents = &mut self.store.relations[old as usize].dependents;
-        let p = dependents
-            .iter()
-            .position(|&d| d == n)
-            .expect("bough engine: a switch is a dependent of its inner");
-        dependents.remove(p);
-        self.store.relations[new as usize].dependents.push(n);
+        self.remove_dependent(old, n);
+        self.add_dependent(new, n);
         self.store.relations[n as usize].deps[at] = new;
         true
     }
