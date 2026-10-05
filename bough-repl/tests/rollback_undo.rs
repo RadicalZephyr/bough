@@ -76,12 +76,14 @@ fn f1_watched_a_cycle_found_before_commit_is_undone() {
     log.borrow_mut().clear();
     let refusal =
         refusal(graph.try_redefine(x_redefine, apply("add", vec![Arg::Binding(y), int(1)])));
-    assert!(
-        refusal
-            .message
-            .contains("a same-instant cycle through a read after the instant"),
-        "{refusal}"
-    );
+    // With `stage` on too, the switch's move is checked before force runs,
+    // and finds the cycle first.
+    let found = if cfg!(feature = "stage") {
+        "switching closes a same-instant cycle"
+    } else {
+        "a same-instant cycle through a read after the instant"
+    };
+    assert!(refusal.message.contains(found), "{refusal}");
     assert_as_before(&mut graph, &nodes, &before);
     assert!(log.borrow().is_empty(), "{:?}", log.borrow());
     graph

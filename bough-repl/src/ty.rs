@@ -48,31 +48,78 @@ impl Node {
     /// sent the command, so any other arm is a bug in the checks; it panics
     /// in graph code, which poisons the runtime.
     pub fn int(self) -> Cell<i64> {
-        match self {
-            Node::IntCell(cell) => cell,
-            other => mismatch(Type::Int, other),
-        }
+        self.try_int().unwrap_or_else(Mismatch::unreachable)
     }
 
     /// The `Bool` cell, as [`int`](Node::int).
     pub fn bool(self) -> Cell<bool> {
-        match self {
-            Node::BoolCell(cell) => cell,
-            other => mismatch(Type::Bool, other),
-        }
+        self.try_bool().unwrap_or_else(Mismatch::unreachable)
     }
 
     /// The `Str` cell, as [`int`](Node::int).
     pub fn str(self) -> Cell<String> {
+        self.try_str().unwrap_or_else(Mismatch::unreachable)
+    }
+
+    /// The `Int` cell, or the mismatch, for a closure that returns it: the
+    /// rollback probe's `try_construct`.
+    pub fn try_int(self) -> Result<Cell<i64>, Mismatch> {
         match self {
-            Node::StrCell(cell) => cell,
-            other => mismatch(Type::Str, other),
+            Node::IntCell(cell) => Ok(cell),
+            got => Err(Mismatch {
+                wanted: Type::Int,
+                got,
+            }),
+        }
+    }
+
+    /// The `Bool` cell, as [`try_int`](Node::try_int).
+    pub fn try_bool(self) -> Result<Cell<bool>, Mismatch> {
+        match self {
+            Node::BoolCell(cell) => Ok(cell),
+            got => Err(Mismatch {
+                wanted: Type::Bool,
+                got,
+            }),
+        }
+    }
+
+    /// The `Str` cell, as [`try_int`](Node::try_int).
+    pub fn try_str(self) -> Result<Cell<String>, Mismatch> {
+        match self {
+            Node::StrCell(cell) => Ok(cell),
+            got => Err(Mismatch {
+                wanted: Type::Str,
+                got,
+            }),
         }
     }
 }
 
-fn mismatch(wanted: Type, got: Node) -> ! {
-    unreachable!("bough-repl: the checks passed a {got:?} where a {wanted} belongs")
+/// A [`Node`] of another type than the one asked for: what the REPL's
+/// checks rule out, and what a definition sent past them, through the
+/// graph API, can still carry.
+#[derive(Clone, Copy, Debug)]
+pub struct Mismatch {
+    /// The type asked for.
+    pub wanted: Type,
+    /// The node that came.
+    pub got: Node,
+}
+
+impl Mismatch {
+    /// The `unreachable!` arm: a bug in the checks, which panics in graph
+    /// code and poisons the runtime.
+    pub fn unreachable<T>(self) -> T {
+        unreachable!("bough-repl: {self}")
+    }
+}
+
+impl fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Mismatch { wanted, got } = self;
+        write!(f, "the checks passed a {got:?} where a {wanted} belongs")
+    }
 }
 
 /// A literal in a command: its syntax gives its [`Type`].

@@ -11,10 +11,12 @@
 
 use bough::{Build, Lift};
 
-use crate::ty::{Node, Type};
+use crate::ty::{Mismatch, Node, Type};
 
-/// Builds a function's cell from its argument cells, inside a `construct`.
-pub type Wire = fn(&mut Build, &[Node]) -> Node;
+/// Builds a function's cell from its argument cells, inside a `construct`,
+/// or says which argument was of the wrong type, which the REPL's checks
+/// rule out.
+pub type Wire = fn(&mut Build, &[Node]) -> Result<Node, Mismatch>;
 
 /// A registry entry.
 pub struct Function {
@@ -64,45 +66,67 @@ const FUNCTIONS: &[Function] = &[
         name: "neg",
         params: &[Int],
         result: Int,
-        wire: |b, a| Node::IntCell(a[0].int().map_cell(b, |x| x.wrapping_neg())),
+        wire: |b, a| {
+            Ok(Node::IntCell(
+                a[0].try_int()?.map_cell(b, |x| x.wrapping_neg()),
+            ))
+        },
     },
     Function {
         name: "eq",
         params: &[Int, Int],
         result: Bool,
-        wire: |b, a| Node::BoolCell((a[0].int(), a[1].int()).lift(b, |x, y| x == y)),
+        wire: |b, a| {
+            Ok(Node::BoolCell(
+                (a[0].try_int()?, a[1].try_int()?).lift(b, |x, y| x == y),
+            ))
+        },
     },
     Function {
         name: "gt",
         params: &[Int, Int],
         result: Bool,
-        wire: |b, a| Node::BoolCell((a[0].int(), a[1].int()).lift(b, |x, y| x > y)),
+        wire: |b, a| {
+            Ok(Node::BoolCell(
+                (a[0].try_int()?, a[1].try_int()?).lift(b, |x, y| x > y),
+            ))
+        },
     },
     Function {
         name: "and",
         params: &[Bool, Bool],
         result: Bool,
-        wire: |b, a| Node::BoolCell((a[0].bool(), a[1].bool()).lift(b, |p, q| *p && *q)),
+        wire: |b, a| {
+            Ok(Node::BoolCell(
+                (a[0].try_bool()?, a[1].try_bool()?).lift(b, |p, q| *p && *q),
+            ))
+        },
     },
     Function {
         name: "or",
         params: &[Bool, Bool],
         result: Bool,
-        wire: |b, a| Node::BoolCell((a[0].bool(), a[1].bool()).lift(b, |p, q| *p || *q)),
+        wire: |b, a| {
+            Ok(Node::BoolCell(
+                (a[0].try_bool()?, a[1].try_bool()?).lift(b, |p, q| *p || *q),
+            ))
+        },
     },
     Function {
         name: "not",
         params: &[Bool],
         result: Bool,
-        wire: |b, a| Node::BoolCell(a[0].bool().map_cell(b, |p| !p)),
+        wire: |b, a| Ok(Node::BoolCell(a[0].try_bool()?.map_cell(b, |p| !p))),
     },
     Function {
         name: "if",
         params: &[Bool, Int, Int],
         result: Int,
         wire: |b, a| {
-            let (c, x, y) = (a[0].bool(), a[1].int(), a[2].int());
-            Node::IntCell((c, x, y).lift(b, |c, x, y| if *c { *x } else { *y }))
+            let (c, x, y) = (a[0].try_bool()?, a[1].try_int()?, a[2].try_int()?);
+            Ok(Node::IntCell(
+                (c, x, y).lift(b, |c, x, y| if *c { *x } else { *y }),
+            ))
         },
     },
     Function {
@@ -110,22 +134,28 @@ const FUNCTIONS: &[Function] = &[
         params: &[Bool, Str, Str],
         result: Str,
         wire: |b, a| {
-            let (c, x, y) = (a[0].bool(), a[1].str(), a[2].str());
+            let (c, x, y) = (a[0].try_bool()?, a[1].try_str()?, a[2].try_str()?);
             // A cell's value is read by reference, so the choice is a clone.
-            Node::StrCell((c, x, y).lift(b, |c, x, y| if *c { x.clone() } else { y.clone() }))
+            Ok(Node::StrCell(
+                (c, x, y).lift(b, |c, x, y| if *c { x.clone() } else { y.clone() }),
+            ))
         },
     },
     Function {
         name: "str",
         params: &[Int],
         result: Str,
-        wire: |b, a| Node::StrCell(a[0].int().map_cell(b, |n| n.to_string())),
+        wire: |b, a| {
+            Ok(Node::StrCell(
+                a[0].try_int()?.map_cell(b, |n| n.to_string()),
+            ))
+        },
     },
     Function {
         name: "boom",
         params: &[Int],
         result: Int,
-        wire: |b, a| Node::IntCell(a[0].int().map_cell(b, |n| boom(*n))),
+        wire: |b, a| Ok(Node::IntCell(a[0].try_int()?.map_cell(b, |n| boom(*n)))),
     },
 ];
 
@@ -137,6 +167,8 @@ pub fn boom(n: i64) -> i64 {
 }
 
 /// An `Int, Int -> Int` function: a lift of `f` over both cells.
-fn int2(b: &mut Build, args: &[Node], f: fn(&i64, &i64) -> i64) -> Node {
-    Node::IntCell((args[0].int(), args[1].int()).lift(b, f))
+fn int2(b: &mut Build, args: &[Node], f: fn(&i64, &i64) -> i64) -> Result<Node, Mismatch> {
+    Ok(Node::IntCell(
+        (args[0].try_int()?, args[1].try_int()?).lift(b, f),
+    ))
 }

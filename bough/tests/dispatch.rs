@@ -128,6 +128,7 @@ fn run(seed: u64) -> Result<Vec<[i64; 5]>, String> {
 }
 
 /// What every order gives: the semantics don't move with the computing.
+#[cfg(feature = "force")]
 const SEEN: [[i64; 5]; 6] = [
     [4, 20, 20, 20, 2],
     [4, 20, 7, 20, 2],

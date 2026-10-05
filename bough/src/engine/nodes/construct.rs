@@ -67,3 +67,62 @@ where
         ..Ops::<M>::DEFAULT
     };
 }
+
+/// The rollback probe's `stage`: `try_construct`, whose closure returns a
+/// `Result`. Its parts are the chain and the closure, as `construct`'s.
+#[cfg(feature = "stage")]
+pub(crate) struct TryConstructNode<S, F, B, E>(Marker<(S, F, B, E)>);
+
+/// As `eval_construct`, but an error refuses the instant: the closure's
+/// scope is dropped, open loops and all, since the roll back throws away
+/// everything the instant made, and the construct emits nothing.
+#[cfg(feature = "stage")]
+fn eval_try_construct<M, S, F, B, E>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+where
+    M: Mode,
+    S: Source,
+    B: 'static,
+    E: core::fmt::Display + 'static,
+    F: FnMut(&mut Build<M>, S::Event) -> Result<B, E> + 'static,
+{
+    use alloc::string::ToString;
+    let [chain, f] = parts else {
+        unreachable!("bough engine: a construct has two parts")
+    };
+    let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) else {
+        return;
+    };
+    let graph = b.graph_id;
+    b.push_scope();
+    let out = part::<M, F>(f)(b, event);
+    assert!(
+        b.graph_id == graph,
+        "bough: a construct closure swapped its build context for another graph's"
+    );
+    match out {
+        Ok(v) => {
+            b.pop_scope();
+            b.put_event(me, v);
+        }
+        Err(e) => {
+            b.drop_scope();
+            b.refuse(me, e.to_string());
+        }
+    }
+}
+
+#[cfg(feature = "stage")]
+impl<M, S, F, B, E> NodeOps<M> for TryConstructNode<S, F, B, E>
+where
+    M: Mode,
+    S: Source,
+    B: 'static,
+    E: core::fmt::Display + 'static,
+    F: FnMut(&mut Build<M>, S::Event) -> Result<B, E> + 'static,
+{
+    const OPS: Ops<M> = Ops {
+        eval: eval_try_construct::<M, S, F, B, E>,
+        clear_slot: clear_slot::<M, B>,
+        ..Ops::<M>::DEFAULT
+    };
+}

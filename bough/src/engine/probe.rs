@@ -13,9 +13,6 @@
 //! that reads it. Every hook the engine calls is an empty inline function
 //! without the features, so the unchanged engine is what they add to.
 
-// Until `stage` refuses anything, only `undo` reads the roll back.
-#![cfg_attr(not(feature = "undo"), allow(dead_code))]
-
 #[cfg(any(feature = "undo", feature = "stage"))]
 use alloc::string::String;
 #[cfg(any(feature = "undo", feature = "stage"))]
@@ -285,6 +282,16 @@ impl<M: Mode> Build<M> {
             let mut k = 0;
             while k < self.store.relations[at].deps.len() {
                 let d = self.store.relations[at].deps[k] as usize;
+                // `stage` links a new node into an older node's dependents
+                // only at commit, so there it has nothing to unlink.
+                #[cfg(feature = "stage")]
+                debug_assert!(
+                    !self.s.probe.on
+                        || self.store.hot[d].created == self.tx
+                        || !self.store.relations[d].dependents.contains(&n),
+                    "bough engine: node {n}, made at a refused instant, joined node {d}'s \
+                     dependents before commit"
+                );
                 self.store.relations[d].dependents.retain(|&x| x != n);
                 if self.store.cold[d].linear_consumer == n {
                     self.store.cold[d].linear_consumer = NOOP;
@@ -395,5 +402,80 @@ impl<M: Mode> Build<M> {
             anchors: self.anchors.iter().map(|&(i, _)| i).collect(),
             live: store.live,
         }
+    }
+}
+
+impl<M: Mode> Build<M> {
+    /// `stage`: a construct closure at node `n` returned an error. With
+    /// rollback on, the instant is refused before commit, naming the
+    /// first; without it, the error poisons, as a panic in graph code
+    /// does.
+    #[cfg(feature = "stage")]
+    pub(crate) fn refuse(&mut self, n: u32, message: String) {
+        assert!(
+            self.s.probe.on,
+            "bough: a construct closure at node {n} returned an error: {message}"
+        );
+        if self.s.probe.refusing.is_none() {
+            self.s.probe.refusing = Some((Some(n), message));
+        }
+    }
+
+    /// `stage`: rolls back the instant if a construct closure refused it.
+    /// Returns whether it did.
+    #[cfg(feature = "stage")]
+    pub(crate) fn refused_early(&mut self) -> bool {
+        match self.s.probe.refusing.take() {
+            Some((node, message)) => {
+                self.roll_back(node, message);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `stage`, with rollback on: moves every queued switch to the inner its
+    /// outer holds after the instant, and checks the moves together, as
+    /// relink does at commit, but before anything commits. A move that
+    /// closes a cycle refuses the instant, and the roll back moves the
+    /// switches back. Returns whether it refused.
+    #[cfg(feature = "stage")]
+    pub(crate) fn relink_early(&mut self) -> bool {
+        if !self.s.probe.on {
+            return false;
+        }
+        let mut moved = 0;
+        let mut k = 0;
+        while k < self.s.relinks.len() {
+            let n = self.s.relinks[k];
+            if self.move_inner(n, true) {
+                self.s.relinks[moved] = n;
+                moved += 1;
+            }
+            k += 1;
+        }
+        self.s.relinks.truncate(moved);
+        let mut k = 0;
+        while k < self.s.relinks.len() {
+            let n = self.s.relinks[k];
+            if let Some(cycle) = self.check_moved_or_refuse(n) {
+                self.roll_back(None, cycle);
+                return true;
+            }
+            k += 1;
+        }
+        false
+    }
+
+    /// `stage`: the links that waited for commit, in the order they were
+    /// made.
+    #[cfg(feature = "stage")]
+    pub(crate) fn link_staged(&mut self) {
+        let mut staged = core::mem::take(&mut self.s.probe.staged);
+        for &(from, to) in &staged {
+            self.store.relations[from as usize].dependents.push(to);
+        }
+        staged.clear();
+        self.s.probe.staged = staged;
     }
 }

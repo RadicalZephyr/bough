@@ -193,6 +193,13 @@ impl<M: Mode> Build<M> {
         self.mark();
         self.evaluate();
         self.new_nodes();
+        // The rollback probe's `stage`: a construct's error, or a cycle at
+        // a switch's move, refuses the instant here, before anything
+        // commits, and the roll back has only to throw away what it made.
+        #[cfg(feature = "stage")]
+        if self.refused_early() || self.relink_early() {
+            return;
+        }
         #[cfg(feature = "force")]
         self.force();
         self.commit();
@@ -429,7 +436,17 @@ impl<M: Mode> Build<M> {
                 (store.ops[n as usize].settle_memo)(&mut store.data[n as usize]);
             }
         }
-        self.relink();
+        // Under the rollback probe's `stage`, the switches moved before
+        // commit, and the links that waited for it are made now.
+        #[cfg(feature = "stage")]
+        let early = self.s.probe.on;
+        #[cfg(not(feature = "stage"))]
+        let early = false;
+        if !early {
+            self.relink();
+        }
+        #[cfg(feature = "stage")]
+        self.link_staged();
         #[cfg(feature = "undo")]
         self.drop_parked();
     }
@@ -461,7 +478,7 @@ impl<M: Mode> Build<M> {
         let mut k = 0;
         while k < self.s.relinks.len() {
             let n = self.s.relinks[k];
-            if self.move_inner(n) {
+            if self.move_inner(n, false) {
                 self.s.relinks[moved] = n;
                 moved += 1;
             }

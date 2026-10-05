@@ -56,6 +56,8 @@ use crate::Build;
 use crate::cell::CellRef;
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
 use crate::engine::nodes::construct::ConstructNode;
+#[cfg(feature = "stage")]
+use crate::engine::nodes::construct::TryConstructNode;
 use crate::engine::nodes::split::{DeferNode, SplitNode};
 use crate::engine::nodes::stream::{
     ChainNode, FirstHalf, MergeNode, SecondHalf, SlotNode, UnzipNode,
@@ -692,6 +694,34 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
             <M as Accepts<F>>::erase(Erase::Value(f)),
         ]);
         let ops = &<ConstructNode<Self, F, B> as NodeOps<M>>::OPS;
+        let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
+        build.set_reach(n, cells);
+        Stream::from_token(build.token(n))
+    }
+
+    /// The rollback probe's `stage`: [`construct`](Source::construct), with
+    /// a closure that returns a `Result`. On `Ok` it's `construct`. On
+    /// `Err`, with [`Runtime::set_rollback`](crate::Runtime::set_rollback)
+    /// on, the transaction is refused before anything commits: what the
+    /// closure built, and everything else the instant made, is thrown away
+    /// before it joins the dependents of anything older, and `try_send`
+    /// returns the refusal, with the error's text. With rollback off, an
+    /// `Err` poisons the runtime, as a panic in the closure would.
+    #[cfg(feature = "stage")]
+    fn try_construct<M, B, E, F>(self, build: &mut Build<M>, f: F) -> Stream<B>
+    where
+        M: Mode + Accepts<Self> + Accepts<F> + Accepts<B>,
+        B: 'static,
+        E: core::fmt::Display + 'static,
+        F: FnMut(&mut Build<M>, Self::Event) -> Result<B, E> + 'static,
+    {
+        let (dependency, cells) = build.chain_reach(&self);
+        let data = Data::Slot(<M as Accepts<B>>::erase(Erase::Slot));
+        let parts: Box<[M::Carrier]> = Box::new([
+            <M as Accepts<Self>>::erase(Erase::Value(self)),
+            <M as Accepts<F>>::erase(Erase::Value(f)),
+        ]);
+        let ops = &<TryConstructNode<Self, F, B, E> as NodeOps<M>>::OPS;
         let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
         build.set_reach(n, cells);
         Stream::from_token(build.token(n))

@@ -20,7 +20,7 @@ use std::rc::Rc;
 use bough::{Anchored, Build, Cell, Input, Runtime, SendError, Source};
 
 use crate::registry::Wire;
-use crate::ty::{InputToken, Literal, Node};
+use crate::ty::{InputToken, Literal, Mismatch, Node};
 
 /// An argument of a definition: a binding's node, or a literal to make a
 /// constant of.
@@ -52,13 +52,22 @@ pub enum Def {
 
 impl Def {
     /// Builds the definition's cell. An alias of a binding builds nothing.
+    /// An argument of the wrong type is a bug in the REPL's checks, and
+    /// panics.
     pub fn build(self, b: &mut Build) -> Node {
+        self.try_build(b).unwrap_or_else(Mismatch::unreachable)
+    }
+
+    /// [`build`](Def::build), returning an argument of the wrong type as
+    /// an error rather than panicking: for the rollback probe's
+    /// `try_construct`.
+    pub fn try_build(self, b: &mut Build) -> Result<Node, Mismatch> {
         match self {
             Def::Apply(wire, args) => {
                 let args: Vec<Node> = args.into_iter().map(|arg| arg.node(b)).collect();
                 wire(b, &args)
             }
-            Def::Alias(arg) => arg.node(b),
+            Def::Alias(arg) => Ok(arg.node(b)),
         }
     }
 }
@@ -94,7 +103,14 @@ impl Graph {
     pub fn new() -> Graph {
         let (mut runtime, edge) = Runtime::build(|b| {
             let (commands, commands_in) = b.input::<Command>();
-            let made = commands.construct(b, make);
+            // Under the rollback probe's `stage`, a mismatch the checks
+            // missed is the closure's error, which refuses the command.
+            #[cfg(feature = "stage")]
+            let made = commands.try_construct(b, make);
+            #[cfg(not(feature = "stage"))]
+            let made = commands.construct(b, |b, command| {
+                make(b, command).unwrap_or_else(Mismatch::unreachable)
+            });
             (commands_in, made)
         });
         let (commands, made_events) = edge.keep();
@@ -154,18 +170,18 @@ impl Default for Graph {
 }
 
 /// The root construct's closure.
-fn make(b: &mut Build, command: Command) -> Made {
-    match command {
+fn make(b: &mut Build, command: Command) -> Result<Made, Mismatch> {
+    Ok(match command {
         Command::Input(literal) => {
             let made = literal.input(b);
             Made::Input(b.anchor(made))
         }
         Command::Define(def) => {
-            let first = def.build(b);
+            let first = def.try_build(b)?;
             let binding = bind_node(b, first);
             Made::Defined(b.anchor(binding))
         }
-    }
+    })
 }
 
 /// A rebindable binding over its first definition: [`bind`] for the cell
@@ -173,15 +189,15 @@ fn make(b: &mut Build, command: Command) -> Made {
 fn bind_node(b: &mut Build, first: Node) -> (Node, Input<Def>) {
     match first {
         Node::IntCell(cell) => {
-            let (cell, redefine) = bind(b, cell, Node::int);
+            let (cell, redefine) = bind(b, cell, Node::try_int);
             (Node::IntCell(cell), redefine)
         }
         Node::BoolCell(cell) => {
-            let (cell, redefine) = bind(b, cell, Node::bool);
+            let (cell, redefine) = bind(b, cell, Node::try_bool);
             (Node::BoolCell(cell), redefine)
         }
         Node::StrCell(cell) => {
-            let (cell, redefine) = bind(b, cell, Node::str);
+            let (cell, redefine) = bind(b, cell, Node::try_str);
             (Node::StrCell(cell), redefine)
         }
     }
@@ -195,10 +211,16 @@ fn bind_node(b: &mut Build, first: Node) -> (Node, Input<Def>) {
 fn bind<A: 'static>(
     b: &mut Build,
     first: Cell<A>,
-    cell: fn(Node) -> Cell<A>,
+    cell: fn(Node) -> Result<Cell<A>, Mismatch>,
 ) -> (Cell<A>, Input<Def>) {
     let (redefinitions, redefine) = b.input::<Def>();
-    let definitions = redefinitions.construct(b, move |b, def| cell(def.build(b)));
+    #[cfg(feature = "stage")]
+    let definitions =
+        redefinitions.try_construct(b, move |b, def: Def| def.try_build(b).and_then(cell));
+    #[cfg(not(feature = "stage"))]
+    let definitions = redefinitions.construct(b, move |b, def: Def| {
+        cell(def.build(b)).unwrap_or_else(Mismatch::unreachable)
+    });
     let current = definitions.hold(b, first);
     (current.switch_cell(b), redefine)
 }

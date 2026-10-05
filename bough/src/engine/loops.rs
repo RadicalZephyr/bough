@@ -27,6 +27,8 @@
 //! was.
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -79,6 +81,15 @@ impl<M: Mode> Build<M> {
             self.s.open_loops.len() == start,
             "bough: a loop declared in this scope was never closed"
         );
+    }
+
+    /// The rollback probe's `stage`: closes a scope whose construct closure
+    /// refused, with no check: the loops it left open go with everything
+    /// else the instant made.
+    #[cfg(feature = "stage")]
+    pub(crate) fn drop_scope(&mut self) {
+        let start = self.s.scopes.pop().expect("bough engine: a scope is open");
+        self.s.open_loops.truncate(start);
     }
 
     /// Records a new forward's node as open in the current scope.
@@ -196,18 +207,26 @@ impl<M: Mode> Build<M> {
     /// The walk goes upstream from the new inner, usually a small region,
     /// since downstream of a switch is often the rest of the program.
     pub(crate) fn refuse_switch_cycle(&mut self, inner: u32, switch: u32) {
-        if let Some(path) = self.path(inner, switch, Walk::Dependencies) {
-            let cycle = Cycle(
-                path.iter()
-                    .rev()
-                    .map(|&n| (n, self.store.hot[n as usize].kind))
-                    .collect(),
-            );
-            panic!(
-                "bough: switching closes a same-instant cycle: {cycle}. The cell a switch \
-                 selects may not depend on the switch at the same instant"
-            );
+        if let Some(message) = self.switch_cycle(inner, switch) {
+            panic!("{message}");
         }
+    }
+
+    /// The panic [`refuse_switch_cycle`](Build::refuse_switch_cycle) makes,
+    /// if the move closes a cycle, which the rollback probe's `stage`
+    /// refuses instead.
+    pub(crate) fn switch_cycle(&mut self, inner: u32, switch: u32) -> Option<String> {
+        let path = self.path(inner, switch, Walk::Dependencies)?;
+        let cycle = Cycle(
+            path.iter()
+                .rev()
+                .map(|&n| (n, self.store.hot[n as usize].kind))
+                .collect(),
+        );
+        Some(format!(
+            "bough: switching closes a same-instant cycle: {cycle}. The cell a switch \
+             selects may not depend on the switch at the same instant"
+        ))
     }
 
     /// Whether `from` reaches `target` over `walk`, and the path from one to

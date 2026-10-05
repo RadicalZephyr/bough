@@ -227,8 +227,22 @@ impl<M: Mode> Build<M> {
         token
     }
 
-    /// `to` depends on `from`.
+    /// `to` depends on `from`. Under the rollback probe's `stage`, with
+    /// rollback on, a node made at this instant that depends on one made
+    /// before it waits for commit to join that node's dependents, so a
+    /// refusal before commit leaves the older node as it was. Evaluation
+    /// and the cycle checks follow dependencies, which are linked now.
     pub(crate) fn link(&mut self, from: u32, to: u32) {
+        #[cfg(feature = "stage")]
+        if self.s.probe.on
+            && self.in_tx
+            && self.store.hot[to as usize].created == self.tx
+            && self.store.hot[from as usize].created != self.tx
+        {
+            self.s.probe.staged.push((from, to));
+            self.store.relations[to as usize].deps.push(from);
+            return;
+        }
         self.store.relations[from as usize].dependents.push(to);
         self.store.relations[to as usize].deps.push(from);
     }

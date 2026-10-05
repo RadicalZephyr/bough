@@ -330,12 +330,10 @@ pub(crate) struct Ops<M: Mode> {
     pub(crate) unpark: fn(&mut Data<M>),
     /// The rollback probe: drops a pending value, or a parked one.
     #[cfg(any(feature = "undo", feature = "stage"))]
-    #[cfg_attr(not(feature = "undo"), allow(dead_code))]
     pub(crate) clear_pending: fn(&mut Data<M>),
     /// The rollback probe: a read-through cell forgets its memo and the
     /// value after the instant beside it.
     #[cfg(any(feature = "undo", feature = "stage"))]
-    #[cfg_attr(not(feature = "undo"), allow(dead_code))]
     pub(crate) abort_memo: fn(&mut Data<M>),
 }
 

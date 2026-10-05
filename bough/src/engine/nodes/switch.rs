@@ -44,6 +44,8 @@
 //! trade streams in one instant are accepted in either order.
 
 use alloc::boxed::Box;
+#[cfg(feature = "stage")]
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::Marker;
@@ -319,9 +321,17 @@ impl<M: Mode> Build<M> {
     /// outer holds now, if that is another node, giving up its claim on
     /// the old one. Returns whether it moved. A dependents list keeps its
     /// capacity, so moving back and forth between inners seen before
-    /// allocates nothing.
-    pub(crate) fn move_inner(&mut self, n: u32) -> bool {
-        let new = self.selected(n, false);
+    /// allocates nothing. The rollback probe's `stage` relinks before
+    /// commit instead, `after` the instant: the outer's value after it is
+    /// the value commit will leave.
+    pub(crate) fn move_inner(&mut self, n: u32, after: bool) -> bool {
+        let new = if after {
+            let outer = self.outer_of(n);
+            self.prepare(outer);
+            self.selected_after(n)
+        } else {
+            self.selected(n, false)
+        };
         let at = inner_at(self.store.hot[n as usize].kind);
         let old = self.store.relations[n as usize].deps[at];
         if new == old {
@@ -352,5 +362,18 @@ impl<M: Mode> Build<M> {
         let inner = self.store.relations[n as usize].deps[at];
         self.refuse_switch_cycle(inner, n);
         self.claim_linear(inner, n);
+    }
+
+    /// The rollback probe's `stage`: [`check_moved`](Build::check_moved),
+    /// with a cycle returned rather than a panic.
+    #[cfg(feature = "stage")]
+    pub(crate) fn check_moved_or_refuse(&mut self, n: u32) -> Option<String> {
+        let at = inner_at(self.store.hot[n as usize].kind);
+        let inner = self.store.relations[n as usize].deps[at];
+        if let Some(cycle) = self.switch_cycle(inner, n) {
+            return Some(cycle);
+        }
+        self.claim_linear(inner, n);
+        None
     }
 }
