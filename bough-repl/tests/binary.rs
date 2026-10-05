@@ -55,3 +55,22 @@ fn a_redefinition_under_a_real_timer_neither_restarts_nor_skips_it() {
     }
     assert!(out[moved..].iter().all(|&v| v >= 1000), "{stdout}");
 }
+
+#[test]
+fn piped_input_prints_only_what_the_commands_print() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bough-repl"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the binary runs");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(b"input x 1\nwatch x\nset x 2\ngraph\n")
+        .unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    // No prompt and no editor escapes: a script's transcript is unchanged.
+    assert_eq!(stdout, "x = 1\nx = 2\nx : Int = input 1\n");
+}

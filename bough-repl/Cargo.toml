@@ -11,3 +11,4 @@ publish = false
 
 [dependencies]
 bough = { workspace = true, features = ["derive"] }
+rustyline.workspace = true

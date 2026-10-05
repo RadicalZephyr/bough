@@ -1,10 +1,16 @@
 //! Reads commands from stdin, one per line, and prints what they print.
 //!
 //! The main thread is the driver: it owns the runtime and handles one event
-//! at a time, a line from the stdin thread or a wake from a tick's send,
+//! at a time, a line from the editor thread or a wake from a tick's send,
 //! which it answers with a pump. End of input ends the program.
+//!
+//! On a terminal, the editor gives line editing and history, and what the
+//! driver prints goes above the prompt, so a tick's watch lines never break
+//! into the line being typed. Piped, it reads plain lines and prints no
+//! prompt, so a script's output is just what the commands print.
 
-use std::io::{self, BufRead};
+use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, ExternalPrinter};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::task::{Wake, Waker};
@@ -34,11 +40,21 @@ fn main() {
     let (events, inbox) = mpsc::channel();
     let mut repl = Repl::new();
     repl.set_waker(Waker::from(Arc::new(Wakeup(events.clone()))));
+    let mut editor = DefaultEditor::new().expect("an editor over stdin");
+    // There is no printer when stdin isn't a terminal; then we print plainly.
+    let mut printer = editor.create_external_printer().ok();
     thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if events.send(Event::Line(line)).is_err() {
-                return;
+        loop {
+            match editor.readline("> ") {
+                Ok(line) => {
+                    let _ = editor.add_history_entry(&line);
+                    if events.send(Event::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                // Ctrl-C drops the line being typed, not the running graph.
+                Err(ReadlineError::Interrupted) => continue,
+                Err(_) => break,
             }
         }
         let _ = events.send(Event::End);
@@ -50,7 +66,14 @@ fn main() {
             Event::End => break,
         };
         for line in printed {
-            println!("{line}");
+            match &mut printer {
+                // Between two readlines the printer writes the line as is,
+                // and the next prompt clears a line with no newline.
+                Some(printer) => printer
+                    .print(format!("{line}\n"))
+                    .expect("printing above the prompt"),
+                None => println!("{line}"),
+            }
         }
     }
 }
