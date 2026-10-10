@@ -11,6 +11,7 @@
 
 use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor, ExternalPrinter};
+use std::io::{self, BufRead, IsTerminal};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::task::{Wake, Waker};
@@ -40,25 +41,40 @@ fn main() {
     let (events, inbox) = mpsc::channel();
     let mut repl = Repl::new();
     repl.set_waker(Waker::from(Arc::new(Wakeup(events.clone()))));
-    let mut editor = DefaultEditor::new().expect("an editor over stdin");
-    // There is no printer when stdin isn't a terminal; then we print plainly.
-    let mut printer = editor.create_external_printer().ok();
-    thread::spawn(move || {
-        loop {
-            match editor.readline("> ") {
-                Ok(line) => {
-                    let _ = editor.add_history_entry(&line);
-                    if events.send(Event::Line(line)).is_err() {
-                        return;
+    let mut printer = None;
+    if io::stdin().is_terminal() {
+        let mut editor = DefaultEditor::new().expect("an editor over stdin");
+        // An unsupported terminal has no printer; then we print plainly.
+        printer = editor.create_external_printer().ok();
+        thread::spawn(move || {
+            loop {
+                match editor.readline("> ") {
+                    Ok(line) => {
+                        let _ = editor.add_history_entry(&line);
+                        if events.send(Event::Line(line)).is_err() {
+                            return;
+                        }
                     }
+                    // Ctrl-C drops the line being typed, not the running graph.
+                    Err(ReadlineError::Interrupted) => continue,
+                    Err(_) => break,
                 }
-                // Ctrl-C drops the line being typed, not the running graph.
-                Err(ReadlineError::Interrupted) => continue,
-                Err(_) => break,
             }
-        }
-        let _ = events.send(Event::End);
-    });
+            let _ = events.send(Event::End);
+        });
+    } else {
+        // Not through the editor, which prints its prompt to stdout under
+        // some values of TERM even when stdin is a pipe.
+        thread::spawn(move || {
+            for line in io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if events.send(Event::Line(line)).is_err() {
+                    return;
+                }
+            }
+            let _ = events.send(Event::End);
+        });
+    }
     for event in inbox {
         let printed = match event {
             Event::Line(line) => repl.run(&line),
