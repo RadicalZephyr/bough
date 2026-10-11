@@ -9,13 +9,14 @@ use common::{listing, transcript, with_manual_clock};
 
 const WORD_FOR_MOD_N: &str = "(defgraph word-for-mod-n [x n word] (if (eq (mod x n) 0) word \"\"))";
 
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
     "(input name literal)               declare an input; `literal` gives its type",
     "(tick name ms)                     an `Int` input a timer counts up, one step every `ms`",
     "(set name literal)                 send a value to an input",
     "(def name expr)                    bind `name` to an expression, or rebind it",
     "(defgraph name [param ...] expr)   name a piece of graph, built afresh at each call",
     "(watch name)                       print a binding's value now and at every step",
+    "(unwatch name)                     stop printing a binding's value",
     "(graph)                            list every defgraph and binding",
     "(help topic)                       this help",
 ];
@@ -151,8 +152,8 @@ fn every_command_and_function_has_help_that_starts_with_its_usage() {
         .chain(fns.iter().filter(|line| line.starts_with('(')))
         .map(|line| line.split("   ").next().unwrap().to_string())
         .collect::<Vec<_>>();
-    // Eight commands, and fourteen names in the registry.
-    assert_eq!(usages.len(), 8 + 14);
+    // Nine commands, and fourteen names in the registry.
+    assert_eq!(usages.len(), 9 + 14);
     for usage in usages {
         let name = usage[1..].split([' ', ')']).next().unwrap();
         let detail = repl.run(&format!("(help {name})"));
@@ -180,7 +181,7 @@ fn the_signatures_of_one_name_share_their_help() {
 fn the_commands_and_the_topics_are_reserved_and_parameters_may_use_them() {
     let (mut repl, ticks) = with_manual_clock();
     let commands = [
-        "input", "tick", "set", "def", "defgraph", "watch", "graph", "help",
+        "input", "tick", "set", "def", "defgraph", "watch", "unwatch", "graph", "help",
     ];
     for (words, what) in [
         (&commands[..], "a command"),

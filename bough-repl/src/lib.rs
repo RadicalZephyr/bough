@@ -17,6 +17,7 @@
 //! | `(defgraph g [a n] (add (mul a n) 1))` | Name a body of graph building: `(def y (g x 2))` builds it afresh, with `x` and `2` for `a` and `n`. |
 //! | `(set x 5)` | Send a value to an input. |
 //! | `(watch y)` | Print `y = value` now and at every step. |
+//! | `(unwatch y)` | Stop printing `y`. |
 //! | `(graph)` | Print every binding with its type and definition. |
 //! | `(tick t 1000)` | An `Int` input a timer thread sets to 1, 2, 3, ..., one every 1000 ms. |
 //! | `(help)` | List the help topics: `(help commands)`, `(help fns)`, `(help all)` and `(help name)`. |

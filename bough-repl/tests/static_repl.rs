@@ -262,3 +262,29 @@ fn div_and_mod_put_a_back_together() {
         }
     }
 }
+
+#[test]
+fn unwatch_stops_one_watch_and_leaves_the_binding() {
+    let mut repl = Repl::new();
+    transcript(
+        &mut repl,
+        &[
+            ("(input a 1)", &[]),
+            ("(def b (add a 1))", &[]),
+            ("(watch a)", &["a = 1"]),
+            ("(watch b)", &["b = 2"]),
+            ("(unwatch b)", &[]),
+            ("(set a 2)", &["a = 2"]),
+            ("(unwatch b)", &["error: not watching b"]),
+            ("(unwatch q)", &["error: no binding named q"]),
+            ("(watch b)", &["b = 3"]),
+            ("(set a 3)", &["a = 3", "b = 4"]),
+            ("(unwatch a)", &[]),
+            ("(unwatch b)", &[]),
+            ("(set a 4)", &[]),
+            // The bindings are still there, and still compute.
+            ("(def b (mul a 10))", &[]),
+            ("(watch b)", &["b = 40"]),
+        ],
+    );
+}

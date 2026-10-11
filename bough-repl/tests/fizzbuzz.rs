@@ -210,3 +210,26 @@ fn the_nested_demo_grows_splash_in_one_line() {
     );
     assert_eq!(ticks.timers(), 1, "the timer was never restarted");
 }
+
+#[test]
+fn an_unwatched_binding_prints_nothing_under_a_running_timer() {
+    let (mut repl, ticks) = with_manual_clock();
+    ticking(
+        &mut repl,
+        &ticks,
+        &[
+            ("(tick t 1000)", &[]),
+            ("(def u (mul t 2))", &[]),
+            ("(watch t)", &["t = 0"]),
+            ("(watch u)", &["u = 0"]),
+            (TICK, &["t = 1", "u = 2"]),
+            ("(unwatch u)", &[]),
+            (TICK, &["t = 2"]),
+            ("(unwatch t)", &[]),
+            (TICK, &[]),
+            ("(watch u)", &["u = 6"]),
+            (TICK, &["u = 8"]),
+        ],
+    );
+    assert_eq!(ticks.timers(), 1);
+}

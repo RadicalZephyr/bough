@@ -118,6 +118,19 @@ const COMMANDS: &[Spec] = &[
         run: |repl, args| repl.watch(&args[0]),
     },
     Spec {
+        name: "unwatch",
+        usage: "(unwatch name)",
+        summary: "stop printing a binding's value",
+        detail: &[
+            "Stops the printing `(watch name)` started. `name` stays bound, and",
+            "can be watched again.",
+            "",
+            "    (unwatch label)",
+        ],
+        arity: (1, 1),
+        run: |repl, args| repl.unwatch(&args[0]),
+    },
+    Spec {
         name: "graph",
         usage: "(graph)",
         summary: "list every defgraph and binding",

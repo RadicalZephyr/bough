@@ -327,6 +327,21 @@ impl Repl {
         Ok(())
     }
 
+    /// `(unwatch y)`: stops the printing `(watch y)` started.
+    fn unwatch(&mut self, name: &Form) -> Checked<()> {
+        let name = &self.lookup(name)?.name;
+        let Some(i) = self
+            .watching
+            .iter()
+            .position(|(watched, _)| watched == name)
+        else {
+            return Err(format!("not watching {name}"));
+        };
+        let (_, listener) = self.watching.remove(i);
+        listener.unlisten();
+        Ok(())
+    }
+
     /// `(graph)`: every defgraph, and every binding, its type and its
     /// definition.
     fn graph(&self) {
