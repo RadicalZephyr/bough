@@ -22,43 +22,32 @@ use bough::{Anchored, Build, Cell, Input, Runtime, Source};
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};
 
-/// An argument of a definition: a binding's node, or a literal to make a
-/// constant of.
+/// What a `def` asks the graph to build: a tree whose leaves are bindings
+/// and literals, and whose inner nodes are registry functions.
 #[derive(Debug)]
-pub enum Arg {
+pub enum Def {
+    /// A registry function applied to arguments, each a definition of its
+    /// own.
+    Apply(Wire, Vec<Def>),
     /// An existing binding.
     Binding(Node),
-    /// A literal.
+    /// A literal, to make a constant of.
     Literal(Literal),
 }
 
-impl Arg {
-    fn node(self, b: &mut Build) -> Node {
-        match self {
-            Arg::Binding(node) => node,
-            Arg::Literal(literal) => literal.constant(b),
-        }
-    }
-}
-
-/// What a `def` asks the graph to build.
-#[derive(Debug)]
-pub enum Def {
-    /// A registry function applied to arguments.
-    Apply(Wire, Vec<Arg>),
-    /// Another binding, or a literal: no function.
-    Alias(Arg),
-}
-
 impl Def {
-    /// Builds the definition's cell. An alias of a binding builds nothing.
+    /// Builds the definition's cell: a cell for each application and each
+    /// literal in it, and none for a binding it names. The cells under the
+    /// top one are plain, with no binding's switch: nothing names them, so
+    /// nothing redefines them.
     pub fn build(self, b: &mut Build) -> Node {
         match self {
             Def::Apply(wire, args) => {
-                let args: Vec<Node> = args.into_iter().map(|arg| arg.node(b)).collect();
+                let args: Vec<Node> = args.into_iter().map(|arg| arg.build(b)).collect();
                 wire(b, &args)
             }
-            Def::Alias(arg) => arg.node(b),
+            Def::Binding(node) => node,
+            Def::Literal(literal) => literal.constant(b),
         }
     }
 }

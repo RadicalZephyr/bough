@@ -13,7 +13,7 @@ use std::time::Duration;
 use bough::Listener;
 
 use crate::clock::{Clock, WallClock};
-use crate::graph::{Arg, Command, Def, Graph, Made};
+use crate::graph::{Command, Def, Graph, Made};
 use crate::read::{Form, read};
 use crate::registry::{self, Function};
 use crate::ty::{InputToken, Literal, Node, Type};
@@ -180,7 +180,8 @@ impl Repl {
         };
         let Some(i) = bound else {
             let name = self.fresh(name)?;
-            let (ty, def, uses) = self.check(definition)?;
+            let (ty, def) = self.check(definition)?;
+            let uses = uses(definition);
             let made = self.graph.make(Command::Define(def));
             self.bind(name, ty, made, shown, uses);
             return Ok(());
@@ -190,7 +191,8 @@ impl Repl {
             return Err(format!("{name} is an input, and an input is not redefined"));
         };
         let (redefine, ty) = (made.1, binding.ty);
-        let (new_ty, def, uses) = self.check(definition)?;
+        let (new_ty, def) = self.check(definition)?;
+        let uses = uses(definition);
         // 3: no cycle, through the definitions the bindings have now.
         let name = &binding.name;
         if let Some(cycle) = self.cycle(name, &uses) {
@@ -262,14 +264,19 @@ impl Repl {
     }
 
     /// Checks a definition against the namespace and the registry, before
-    /// anything touches the graph: (1) the function exists and the count of
-    /// arguments is its arity, and (2) each argument's type is the one its
-    /// signature names, for one of the signatures its name has. Returns the
-    /// result's type, the definition, and the bindings it names.
-    fn check(&self, definition: &Form) -> Checked<(Type, Def, Vec<String>)> {
-        let Form::List(forms) = definition else {
-            let (ty, arg) = self.arg(definition)?;
-            return Ok((ty, Def::Alias(arg), uses(std::slice::from_ref(definition))));
+    /// anything touches the graph: a literal, the name of a binding, or an
+    /// application, of which (1) the function exists and the count of
+    /// arguments is its arity, and (2) each argument checks, and its type is
+    /// the one the signature names, for one of the signatures its name has.
+    /// Returns the result's type and the definition.
+    fn check(&self, definition: &Form) -> Checked<(Type, Def)> {
+        let forms = match definition {
+            Form::Literal(literal) => return Ok((literal.ty(), Def::Literal(literal.clone()))),
+            Form::Symbol(_) => {
+                let binding = self.lookup(definition)?;
+                return Ok((binding.ty, Def::Binding(binding.node())));
+            }
+            Form::List(forms) => forms,
         };
         let Some((Form::Symbol(function), args)) = forms.split_first() else {
             return Err(format!(
@@ -291,12 +298,12 @@ impl Repl {
         let mut types = Vec::with_capacity(args.len());
         let mut checked = Vec::with_capacity(args.len());
         for form in args {
-            let (ty, arg) = self.arg(form)?;
+            let (ty, arg) = self.check(form)?;
             types.push(ty);
             checked.push(arg);
         }
         if let Some(f) = candidates.iter().find(|f| f.params == types) {
-            return Ok((f.result, Def::Apply(f.wire, checked), uses(args)));
+            return Ok((f.result, Def::Apply(f.wire, checked)));
         }
         Err(match candidates.as_slice() {
             [f] => {
@@ -322,20 +329,6 @@ impl Repl {
                 )
             }
         })
-    }
-
-    /// An argument: a literal, or the name of a binding.
-    fn arg(&self, form: &Form) -> Checked<(Type, Arg)> {
-        match form {
-            Form::Literal(literal) => Ok((literal.ty(), Arg::Literal(literal.clone()))),
-            Form::Symbol(_) => {
-                let binding = self.lookup(form)?;
-                Ok((binding.ty, Arg::Binding(binding.node())))
-            }
-            Form::List(_) => Err(format!(
-                "an argument is a name or a literal, and {form} is neither"
-            )),
-        }
     }
 
     /// The path from `name` back to itself, if a definition naming `uses`
@@ -446,12 +439,19 @@ fn literal_of(form: &Form) -> Checked<Literal> {
     }
 }
 
-/// The bindings among a definition's arguments, for the cycle check.
-fn uses(args: &[Form]) -> Vec<String> {
-    args.iter()
-        .filter_map(|form| match form {
-            Form::Symbol(name) => Some(name.clone()),
-            _ => None,
-        })
-        .collect()
+/// The bindings a checked definition names, at any depth, for the cycle
+/// check.
+fn uses(definition: &Form) -> Vec<String> {
+    let mut names = Vec::new();
+    named(definition, &mut names);
+    names
+}
+
+fn named(form: &Form, names: &mut Vec<String>) {
+    match form {
+        Form::Symbol(name) => names.push(name.clone()),
+        // The head of a checked list is a function's name, not a binding's.
+        Form::List(forms) => forms.iter().skip(1).for_each(|form| named(form, names)),
+        Form::Literal(_) => {}
+    }
 }

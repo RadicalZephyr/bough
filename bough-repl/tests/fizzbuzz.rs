@@ -156,3 +156,54 @@ fn a_tick_is_an_input_only_its_timer_sets() {
     );
     assert_eq!(ticks.timers(), 2);
 }
+
+/// The demo as it's shown, nested: FizzBuzz fed by hand, then handed to
+/// the timer, then splash on multiples of 7 as one new binding and one
+/// redefinition, under the running timer.
+#[test]
+fn the_nested_demo_grows_splash_in_one_line() {
+    let (mut repl, ticks) = with_manual_clock();
+    ticking(
+        &mut repl,
+        &ticks,
+        &[
+            ("(input in 1)", &[]),
+            ("(tick t 1000)", &[]),
+            ("(def x in)", &[]),
+            ("(def fizz (if (eq (mod x 3) 0) \"Fizz\" \"\"))", &[]),
+            ("(def buzz (if (eq (mod x 5) 0) \"Buzz\" \"\"))", &[]),
+            ("(def words (cat fizz buzz))", &[]),
+            ("(def out (if (eq words \"\") (str x) words))", &[]),
+            ("(watch out)", &["out = 1"]),
+            ("(set in 3)", &["out = Fizz"]),
+            ("(set in 10)", &["out = Buzz"]),
+            ("(set in 30)", &["out = FizzBuzz"]),
+            // The timer has been counting all along, unwatched.
+            (TICK, &[]),
+            (TICK, &[]),
+            (TICK, &[]),
+            ("(def x t)", &["out = Fizz"]),
+            (TICK, &["out = 4"]),
+            (TICK, &["out = Buzz"]),
+            (TICK, &["out = Fizz"]),
+            (TICK, &["out = 7"]),
+            ("(def splash (if (eq (mod x 7) 0) \"Splash\" \"\"))", &[]),
+            ("(def words (cat (cat fizz buzz) splash))", &["out = Splash"]),
+            (TICK, &["out = 8"]),
+            (TICK, &["out = Fizz"]),
+            (TICK, &["out = Buzz"]),
+            (TICK, &["out = 11"]),
+            (TICK, &["out = Fizz"]),
+            (TICK, &["out = 13"]),
+            (TICK, &["out = Splash"]),
+            (TICK, &["out = FizzBuzz"]),
+            (TICK, &["out = 16"]),
+            (TICK, &["out = 17"]),
+            (TICK, &["out = Fizz"]),
+            (TICK, &["out = 19"]),
+            (TICK, &["out = Buzz"]),
+            (TICK, &["out = FizzSplash"]),
+        ],
+    );
+    assert_eq!(ticks.timers(), 1, "the timer was never restarted");
+}

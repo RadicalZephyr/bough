@@ -204,11 +204,6 @@ fn comments_and_blank_lines_print_nothing_and_nonsense_is_an_error() {
                 "(def y (1 2))",
                 &["error: (1 2) does not start with a function's name"],
             ),
-            // Nesting comes in the next step.
-            (
-                "(def y (add (add 1 2) 3))",
-                &["error: an argument is a name or a literal, and (add 1 2) is neither"],
-            ),
         ],
     );
 }

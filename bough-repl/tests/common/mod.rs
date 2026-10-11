@@ -11,7 +11,7 @@ use std::time::Duration;
 use bough::{Input, RemoteIo};
 use bough_repl::Repl;
 use bough_repl::clock::Clock;
-use bough_repl::graph::{Arg, Command, Def, Graph, Made};
+use bough_repl::graph::{Command, Def, Graph, Made};
 use bough_repl::registry;
 use bough_repl::ty::{InputToken, Literal, Node};
 
@@ -103,7 +103,7 @@ impl Ticks {
 
 /// A registry function over arguments, for driving the graph API past the
 /// REPL.
-pub fn apply(function: &str, args: Vec<Arg>) -> Def {
+pub fn apply(function: &str, args: Vec<Def>) -> Def {
     Def::Apply(registry::named(function).next().unwrap().wire, args)
 }
 
