@@ -89,7 +89,7 @@ fn each_check_rejects_before_the_graph_is_touched() {
             ("(def x (add a q))", &["error: no binding named q"]),
             (
                 "(def a (add a 1))",
-                &["error: a is an input, and an input is not redefined"],
+                &["error: a is an input, and an input cannot be redefined"],
             ),
             ("(def 3 (add a 1))", &["error: 3 cannot be a name"]),
             ("(def -x (add a 1))", &["error: -x cannot be a name"]),
@@ -191,9 +191,30 @@ fn comments_and_blank_lines_print_nothing_and_nonsense_is_an_error() {
             ("   ", &[]),
             ("; a comment", &[]),
             ("(graph) ; a comment after a command", &[]),
-            ("frobnicate", &["error: cannot read `frobnicate`"]),
-            ("(def y)", &["error: cannot read `(def y)`"]),
-            ("(def y 1 2)", &["error: cannot read `(def y 1 2)`"]),
+            (
+                "frobnicate",
+                &["error: cannot read `frobnicate`: a command is a list, such as `(help)`"],
+            ),
+            (
+                "()",
+                &["error: cannot read `()`: a command is a list, such as `(help)`"],
+            ),
+            (
+                "(frob)",
+                &["error: no command named frob; `(help commands)` lists them"],
+            ),
+            (
+                "(def y)",
+                &["error: def takes 2 arguments, not 1: (def name expr)"],
+            ),
+            (
+                "(def y 1 2)",
+                &["error: def takes 2 arguments, not 3: (def name expr)"],
+            ),
+            (
+                "(graph 1)",
+                &["error: graph takes 0 arguments, not 1: (graph)"],
+            ),
             ("(def y (add 1 2)", &["error: a ( is not closed"]),
             (
                 "(watch y) (watch y)",

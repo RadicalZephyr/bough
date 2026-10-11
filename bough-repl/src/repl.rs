@@ -18,6 +18,8 @@ use crate::read::{Form, read};
 use crate::registry::{self, Function};
 use crate::ty::{InputToken, Literal, Node, Type};
 
+mod commands;
+
 /// A name with a fixed [`Type`] and a [`Node`].
 struct Binding {
     name: String,
@@ -48,6 +50,14 @@ struct Graphdef {
     body: Form,
     /// The `defgraph` as typed, for `graph`.
     shown: String,
+}
+
+impl Graphdef {
+    /// A call with its parameters for arguments, as `(g a b)`.
+    fn usage(&self) -> String {
+        let params: String = self.params.iter().map(|p| format!(" {p}")).collect();
+        format!("({}{params})", self.name)
+    }
 }
 
 /// What a symbol in an expression names: a binding, at the top, or a
@@ -136,29 +146,6 @@ impl Repl {
         self.out.borrow_mut().push(line);
     }
 
-    /// One command: a list whose head names it.
-    fn command(&mut self, form: &Form) -> Checked<()> {
-        let Form::List(forms) = form else {
-            return Err(format!("cannot read `{form}`"));
-        };
-        let Some((Form::Symbol(head), args)) = forms.split_first() else {
-            return Err(format!("cannot read `{form}`"));
-        };
-        match (head.as_str(), args) {
-            ("input", [name, literal]) => self.input(name, literal),
-            ("def", [name, definition]) => self.def(name, definition),
-            ("defgraph", [name, params, body]) => self.defgraph(name, params, body),
-            ("set", [name, literal]) => self.set(name, literal),
-            ("watch", [name]) => self.watch(name),
-            ("tick", [name, period]) => self.tick(name, period),
-            ("graph", []) => {
-                self.graph();
-                Ok(())
-            }
-            _ => Err(format!("cannot read `{form}`")),
-        }
-    }
-
     /// `(input x 0)`: a new input whose type is the literal's.
     fn input(&mut self, name: &Form, literal: &Form) -> Checked<()> {
         let name = self.fresh(name)?;
@@ -210,7 +197,9 @@ impl Repl {
         };
         let binding = &self.bindings[i];
         let Made::Defined(made) = &binding.made else {
-            return Err(format!("{name} is an input, and an input is not redefined"));
+            return Err(format!(
+                "{name} is an input, and an input cannot be redefined"
+            ));
         };
         let (redefine, ty) = (made.1, binding.ty);
         let (new_ty, def) = self.check(definition, Scope::Top)?;
@@ -243,7 +232,7 @@ impl Repl {
             && self.graphdef(name).is_some()
         {
             return Err(format!(
-                "{name} is a defgraph, and a defgraph is not redefined: \
+                "{name} is a defgraph, and a defgraph cannot be redefined: \
                  the bindings built from it would not follow"
             ));
         }
@@ -498,6 +487,9 @@ impl Repl {
         };
         if !identifier(name) {
             return Err(format!("{name} cannot be a name"));
+        }
+        if let Some(what) = commands::reserved(name) {
+            return Err(format!("{name} is {what}, and cannot be a name"));
         }
         if self.by_name.contains_key(name) {
             return Err(format!("{name} is already bound"));

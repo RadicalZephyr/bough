@@ -19,6 +19,7 @@
 //! | `(watch y)` | Print `y = value` now and at every step. |
 //! | `(graph)` | Print every binding with its type and definition. |
 //! | `(tick t 1000)` | An `Int` input a timer thread sets to 1, 2, 3, ..., one every 1000 ms. |
+//! | `(help)` | List the help topics: `(help commands)`, `(help fns)`, `(help all)` and `(help name)`. |
 
 pub mod clock;
 pub mod graph;

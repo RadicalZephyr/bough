@@ -168,7 +168,10 @@ fn a_defgraph_is_checked_for_what_it_names_and_builds_nothing() {
                 "(defgraph w (a) a)",
                 &["error: (a) is not a vector of parameters"],
             ),
-            ("(defgraph w a)", &["error: cannot read `(defgraph w a)`"]),
+            (
+                "(defgraph w a)",
+                &["error: defgraph takes 3 arguments, not 2: (defgraph name [param ...] expr)"],
+            ),
             (
                 "(defgraph add [a] a)",
                 &["error: add is a function in the registry"],
@@ -178,7 +181,7 @@ fn a_defgraph_is_checked_for_what_it_names_and_builds_nothing() {
             (
                 "(defgraph twice [a] (mul a 2))",
                 &[
-                    "error: twice is a defgraph, and a defgraph is not redefined: \
+                    "error: twice is a defgraph, and a defgraph cannot be redefined: \
                      the bindings built from it would not follow",
                 ],
             ),

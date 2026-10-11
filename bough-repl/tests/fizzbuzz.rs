@@ -144,7 +144,7 @@ fn a_tick_is_an_input_only_its_timer_sets() {
             ("(set t 5)", &["error: t is a tick, which its timer sets"]),
             (
                 "(def t 5)",
-                &["error: t is an input, and an input is not redefined"],
+                &["error: t is an input, and an input cannot be redefined"],
             ),
             ("(tick u 20)", &[]),
             ("(def sum (add t u))", &[]),

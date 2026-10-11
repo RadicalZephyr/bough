@@ -155,7 +155,7 @@ fn an_input_is_not_redefined() {
         &mut repl,
         &[(
             "(def a 5)",
-            &["error: a is an input, and an input is not redefined"],
+            &["error: a is an input, and an input cannot be redefined"],
         )],
     );
 }
