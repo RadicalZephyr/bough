@@ -20,10 +20,11 @@ const COMMANDS: [&str; 8] = [
     "(help topic)                       this help",
 ];
 
-const FNS: [&str; 15] = [
+const FNS: [&str; 16] = [
     "(add a b)    (Int, Int) -> Int         `a` + `b`, wrapping on overflow",
     "(sub a b)    (Int, Int) -> Int         `a` - `b`, wrapping on overflow",
     "(mul a b)    (Int, Int) -> Int         `a` * `b`, wrapping on overflow",
+    "(div a n)    (Int, Int) -> Int         the quotient of `a` / `n`, the one `mod` is the remainder of",
     "(mod a n)    (Int, Int) -> Int         the remainder of `a` / `n`, never negative",
     "(neg a)      (Int) -> Int              the negation of `a`, wrapping on overflow",
     "(eq a b)     (Int, Int) -> Bool        whether `a` and `b` are equal",
@@ -150,8 +151,8 @@ fn every_command_and_function_has_help_that_starts_with_its_usage() {
         .chain(fns.iter().filter(|line| line.starts_with('(')))
         .map(|line| line.split("   ").next().unwrap().to_string())
         .collect::<Vec<_>>();
-    // Eight commands, and thirteen names in the registry.
-    assert_eq!(usages.len(), 8 + 13);
+    // Eight commands, and fourteen names in the registry.
+    assert_eq!(usages.len(), 8 + 14);
     for usage in usages {
         let name = usage[1..].split([' ', ')']).next().unwrap();
         let detail = repl.run(&format!("(help {name})"));

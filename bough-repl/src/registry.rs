@@ -5,7 +5,8 @@
 //! No polymorphism: a signature names concrete types, and an operation over
 //! two types is two entries under one name, which `def` chooses between by
 //! the types of its arguments. Every function is total, since a panic in a
-//! cell's function poisons the runtime: arithmetic wraps, and `mod 0` is 0.
+//! cell's function poisons the runtime: arithmetic wraps, and `div 0` and
+//! `mod 0` are 0.
 
 use bough::{Build, Lift};
 
@@ -74,6 +75,17 @@ const MUL: Doc = Doc {
     detail: &[
         "Multiplies `a` by `b`. On overflow it wraps around, since a function",
         "in the graph must never panic.",
+    ],
+};
+
+const DIV: Doc = Doc {
+    usage: "(div a n)",
+    summary: "the quotient of `a` / `n`, the one `mod` is the remainder of",
+    detail: &[
+        "The quotient of `a` divided by `n`, the one `mod` gives the remainder",
+        "of: for `n` other than 0, `(add (mul n (div a n)) (mod a n))` is `a`.",
+        "So `(div -7 3)` is -3, not -2. `(div a 0)` is 0, and on overflow it",
+        "wraps around, since a function in the graph must never panic.",
     ],
 };
 
@@ -170,6 +182,21 @@ const FUNCTIONS: &[Function] = &[
         params: &[Int, Int],
         result: Int,
         wire: |b, a| int2(b, a, |x, y| x.wrapping_mul(*y)),
+    },
+    Function {
+        name: "div",
+        doc: &DIV,
+        params: &[Int, Int],
+        result: Int,
+        wire: |b, a| {
+            int2(b, a, |x, y| {
+                if *y == 0 {
+                    0
+                } else {
+                    x.wrapping_div_euclid(*y)
+                }
+            })
+        },
     },
     Function {
         name: "mod",

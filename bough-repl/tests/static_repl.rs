@@ -133,6 +133,14 @@ fn every_function_in_the_registry_computes_what_it_says() {
         ("add", "add x y", "10"),
         ("sub", "sub x y", "4"),
         ("mul", "mul x y", "21"),
+        ("quot", "div x y", "2"),
+        ("negdiv", "div -7 y", "-3"),
+        ("zerodiv", "div x 0", "0"),
+        (
+            "wrapdiv",
+            "div -9223372036854775808 -1",
+            "-9223372036854775808",
+        ),
         ("rem", "mod x y", "1"),
         ("negmod", "mod -7 y", "2"),
         ("zeromod", "mod x 0", "0"),
@@ -230,4 +238,27 @@ fn comments_and_blank_lines_print_nothing_and_nonsense_is_an_error() {
             ),
         ],
     );
+}
+
+#[test]
+fn div_and_mod_put_a_back_together() {
+    let mut repl = Repl::new();
+    for line in [
+        "(input a 0)",
+        "(input n 1)",
+        "(def back (add (mul n (div a n)) (mod a n)))",
+        "(def same (eq back a))",
+        "(def rem-ok (not (gt 0 (mod a n))))",
+        "(def ok (and same rem-ok))",
+    ] {
+        assert_eq!(repl.run(line), Vec::<String>::new(), "`{line}` printed");
+    }
+    assert_eq!(repl.run("(watch ok)"), ["ok = true"]);
+    for n in [-3, -2, -1, 1, 2, 3] {
+        repl.run(&format!("(set n {n})"));
+        for a in -10..=10 {
+            let printed = repl.run(&format!("(set a {a})"));
+            assert_eq!(printed, ["ok = true"], "a = {a}, n = {n}");
+        }
+    }
 }
