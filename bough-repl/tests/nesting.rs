@@ -175,6 +175,7 @@ fn graph_prints_a_nested_definition_back() {
             ("(tick t 1000)", &[]),
             ("(def splash (if (eq (mod t 7) 0) \"Splash\" \"\"))", &[]),
             ("(def n (add  (mul t 2)\t1))", &[]),
+            ("(def times-two-plus-1 (add (mul t 2) 1))", &[]),
         ],
     );
     assert_eq!(
@@ -183,6 +184,7 @@ fn graph_prints_a_nested_definition_back() {
             "t : Int = (tick 1000)",
             "splash : Str = (if (eq (mod t 7) 0) \"Splash\" \"\")",
             "n : Int = (add (mul t 2) 1)",
+            "times-two-plus-1 : Int = (add (mul t 2) 1)",
         ]
     );
 }

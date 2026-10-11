@@ -271,6 +271,7 @@ impl Repl {
     /// Returns the result's type and the definition.
     fn check(&self, definition: &Form) -> Checked<(Type, Def)> {
         let forms = match definition {
+            Form::Vector(_) => return Err(format!("{definition} is not an expression")),
             Form::Literal(literal) => return Ok((literal.ty(), Def::Literal(literal.clone()))),
             Form::Symbol(_) => {
                 let binding = self.lookup(definition)?;
@@ -384,7 +385,7 @@ impl Repl {
         let identifier = chars
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
         if !identifier {
             return Err(format!("{name} cannot be a name"));
         }
@@ -452,6 +453,6 @@ fn named(form: &Form, names: &mut Vec<String>) {
         Form::Symbol(name) => names.push(name.clone()),
         // The head of a checked list is a function's name, not a binding's.
         Form::List(forms) => forms.iter().skip(1).for_each(|form| named(form, names)),
-        Form::Literal(_) => {}
+        Form::Literal(_) | Form::Vector(_) => {}
     }
 }

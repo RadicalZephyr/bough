@@ -1,11 +1,11 @@
 //! The reader: one line of text to one [`Form`], before anything checks
 //! what the form means.
 //!
-//! A form is an atom or a parenthesized list of forms. An atom is a
-//! literal, or else a symbol: an integer such as `-3`, `true` or `false`,
-//! a string in double quotes, which may hold spaces and parentheses but no
-//! escapes, and any other run of characters up to whitespace, a
-//! parenthesis or a quote. A `;` outside a string starts a comment that
+//! A form is an atom, a parenthesized list of forms, or a bracketed vector
+//! of them. An atom is a literal, or else a symbol: an integer such as
+//! `-3`, `true` or `false`, a string in double quotes, which may hold
+//! spaces and brackets but no escapes, and any other run of characters up
+//! to whitespace, a bracket or a quote. A `;` outside a string starts a comment that
 //! runs to the end of the line.
 
 use std::fmt;
@@ -21,6 +21,8 @@ pub enum Form {
     Symbol(String),
     /// A parenthesized list.
     List(Vec<Form>),
+    /// A bracketed vector, such as a `defgraph`'s parameters.
+    Vector(Vec<Form>),
 }
 
 impl fmt::Display for Form {
@@ -29,18 +31,21 @@ impl fmt::Display for Form {
         match self {
             Form::Literal(literal) => write!(f, "{literal}"),
             Form::Symbol(symbol) => f.write_str(symbol),
-            Form::List(forms) => {
-                f.write_str("(")?;
-                for (i, form) in forms.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "{form}")?;
-                }
-                f.write_str(")")
-            }
+            Form::List(forms) => sequence(f, '(', forms, ')'),
+            Form::Vector(forms) => sequence(f, '[', forms, ']'),
         }
     }
+}
+
+fn sequence(f: &mut fmt::Formatter<'_>, open: char, forms: &[Form], close: char) -> fmt::Result {
+    write!(f, "{open}")?;
+    for (i, form) in forms.iter().enumerate() {
+        if i > 0 {
+            f.write_str(" ")?;
+        }
+        write!(f, "{form}")?;
+    }
+    write!(f, "{close}")
 }
 
 /// Reads a line holding at most one form: `None` if it holds only
@@ -53,7 +58,7 @@ pub fn read(line: &str) -> Result<Option<Form>, String> {
     let form = form(first, &mut tokens)?;
     match tokens.next()? {
         None => Ok(Some(form)),
-        Some(Token::Close) => Err("a ) closes nothing".to_string()),
+        Some(Token::Close(close)) => Err(format!("a {close} closes nothing")),
         Some(_) => Err(format!("more than one form on the line, after {form}")),
     }
 }
@@ -61,17 +66,24 @@ pub fn read(line: &str) -> Result<Option<Form>, String> {
 /// The form `token` begins, with the rest of a list read from `tokens`.
 fn form(token: Token, tokens: &mut Tokens) -> Result<Form, String> {
     match token {
-        Token::Open => {
+        Token::Open(open) => {
+            let close = if open == '(' { ')' } else { ']' };
             let mut forms = Vec::new();
             loop {
                 match tokens.next()? {
-                    None => return Err("a ( is not closed".to_string()),
-                    Some(Token::Close) => return Ok(Form::List(forms)),
+                    None => return Err(format!("a {open} is not closed")),
+                    Some(Token::Close(c)) if c == close => break,
+                    Some(Token::Close(c)) => return Err(format!("a {open} is closed by {c}")),
                     Some(token) => forms.push(form(token, tokens)?),
                 }
             }
+            Ok(if open == '(' {
+                Form::List(forms)
+            } else {
+                Form::Vector(forms)
+            })
         }
-        Token::Close => Err("a ) closes nothing".to_string()),
+        Token::Close(close) => Err(format!("a {close} closes nothing")),
         Token::Str(text) => Ok(Form::Literal(Literal::Str(text))),
         Token::Word(word) => Ok(atom(word)),
     }
@@ -90,8 +102,10 @@ fn atom(word: &str) -> Form {
 }
 
 enum Token<'a> {
-    Open,
-    Close,
+    /// `(` or `[`.
+    Open(char),
+    /// `)` or `]`.
+    Close(char),
     Str(String),
     Word(&'a str),
 }
@@ -115,13 +129,13 @@ impl<'a> Tokens<'a> {
                 self.rest = "";
                 return Ok(None);
             }
-            '(' => {
+            '(' | '[' => {
                 self.rest = &self.rest[1..];
-                Token::Open
+                Token::Open(c)
             }
-            ')' => {
+            ')' | ']' => {
                 self.rest = &self.rest[1..];
-                Token::Close
+                Token::Close(c)
             }
             '"' => {
                 let Some(end) = self.rest[1..].find('"') else {
@@ -134,7 +148,7 @@ impl<'a> Tokens<'a> {
             _ => {
                 let end = self
                     .rest
-                    .find(|c: char| c.is_whitespace() || "();\"".contains(c))
+                    .find(|c: char| c.is_whitespace() || "()[];\"".contains(c))
                     .unwrap_or(self.rest.len());
                 let (word, rest) = self.rest.split_at(end);
                 self.rest = rest;

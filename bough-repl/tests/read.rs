@@ -19,6 +19,10 @@ fn list(forms: &[Form]) -> Form {
     Form::List(forms.to_vec())
 }
 
+fn vector(forms: &[Form]) -> Form {
+    Form::Vector(forms.to_vec())
+}
+
 fn one(line: &str) -> Form {
     read(line)
         .expect("the line reads")
@@ -112,4 +116,39 @@ fn a_form_prints_back_as_it_reads() {
     let line = "(def out (if (eq (cat fizz buzz) \"\") (str x) (cat fizz buzz)))";
     assert_eq!(one(line).to_string(), line);
     assert_eq!(one("(  add   x\t3 )").to_string(), "(add x 3)");
+}
+
+#[test]
+fn brackets_read_as_a_vector() {
+    assert_eq!(
+        one("(defgraph twice [a] (add a a))"),
+        list(&[
+            symbol("defgraph"),
+            symbol("twice"),
+            vector(&[symbol("a")]),
+            list(&[symbol("add"), symbol("a"), symbol("a")]),
+        ])
+    );
+    assert_eq!(one("[]"), vector(&[]));
+    assert_eq!(
+        one("[a[b]]"),
+        vector(&[symbol("a"), vector(&[symbol("b")])])
+    );
+    assert_eq!(one("(f [a b] \"[c]\")").to_string(), "(f [a b] \"[c]\")");
+}
+
+#[test]
+fn a_bracket_is_closed_by_its_own_kind() {
+    assert_eq!(read("(f [a b)"), Err("a [ is closed by )".to_string()));
+    assert_eq!(read("(f a]"), Err("a ( is closed by ]".to_string()));
+    assert_eq!(read("[a"), Err("a [ is not closed".to_string()));
+    assert_eq!(read("]"), Err("a ] closes nothing".to_string()));
+    assert_eq!(read("[a]]"), Err("a ] closes nothing".to_string()));
+}
+
+#[test]
+fn a_hyphen_is_part_of_a_symbol_and_a_leading_one_of_an_integer() {
+    assert_eq!(one("word-for-mod-n"), symbol("word-for-mod-n"));
+    assert_eq!(one("-3"), int(-3));
+    assert_eq!(one("-x"), symbol("-x"));
 }

@@ -188,7 +188,10 @@ fn the_nested_demo_grows_splash_in_one_line() {
             (TICK, &["out = Fizz"]),
             (TICK, &["out = 7"]),
             ("(def splash (if (eq (mod x 7) 0) \"Splash\" \"\"))", &[]),
-            ("(def words (cat (cat fizz buzz) splash))", &["out = Splash"]),
+            (
+                "(def words (cat (cat fizz buzz) splash))",
+                &["out = Splash"],
+            ),
             (TICK, &["out = 8"]),
             (TICK, &["out = Fizz"]),
             (TICK, &["out = Buzz"]),
