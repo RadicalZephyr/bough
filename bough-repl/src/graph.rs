@@ -22,13 +22,19 @@ use bough::{Anchored, Build, Cell, Input, Runtime, Source};
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};
 
-/// What a `def` asks the graph to build: a tree whose leaves are bindings
-/// and literals, and whose inner nodes are registry functions.
+/// What a `def` asks the graph to build: a tree whose leaves are bindings,
+/// literals and parameters, and whose inner nodes are registry functions
+/// and `defgraph` calls.
 #[derive(Debug)]
 pub enum Def {
     /// A registry function applied to arguments, each a definition of its
     /// own.
     Apply(Wire, Vec<Def>),
+    /// A `defgraph` called with arguments: each is built once, and the
+    /// body's [`Param`](Def::Param)s share it.
+    Call(Vec<Def>, Box<Def>),
+    /// An argument of the innermost call, by position.
+    Param(usize),
     /// An existing binding.
     Binding(Node),
     /// A literal, to make a constant of.
@@ -41,15 +47,31 @@ impl Def {
     /// top one are plain, with no binding's switch: nothing names them, so
     /// nothing redefines them.
     pub fn build(self, b: &mut Build) -> Node {
+        self.build_with(b, &[])
+    }
+
+    /// [`build`](Def::build), inside a call whose arguments are `params`.
+    fn build_with(self, b: &mut Build, params: &[Node]) -> Node {
         match self {
             Def::Apply(wire, args) => {
-                let args: Vec<Node> = args.into_iter().map(|arg| arg.build(b)).collect();
+                let args = build_all(b, args, params);
                 wire(b, &args)
             }
+            Def::Call(args, body) => {
+                let args = build_all(b, args, params);
+                body.build_with(b, &args)
+            }
+            Def::Param(i) => params[i],
             Def::Binding(node) => node,
             Def::Literal(literal) => literal.constant(b),
         }
     }
+}
+
+fn build_all(b: &mut Build, defs: Vec<Def>, params: &[Node]) -> Vec<Node> {
+    defs.into_iter()
+        .map(|def| def.build_with(b, params))
+        .collect()
 }
 
 /// An event of the root construct: each makes a new binding.

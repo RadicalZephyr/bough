@@ -40,12 +40,32 @@ impl Binding {
     }
 }
 
+/// A `defgraph`: a body that names only its parameters, checked and
+/// spliced in afresh at each call.
+struct Graphdef {
+    name: String,
+    params: Vec<String>,
+    body: Form,
+    /// The `defgraph` as typed, for `graph`.
+    shown: String,
+}
+
+/// What a symbol in an expression names: a binding, at the top, or a
+/// parameter, in a `defgraph`'s body, whose argument has the type given.
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    Top,
+    Body(&'a [String], &'a [Type]),
+}
+
 /// The REPL: one running graph, its bindings, and what it has printed.
 pub struct Repl {
     graph: Graph,
     /// In definition order, for `graph`.
     bindings: Vec<Binding>,
     by_name: HashMap<String, usize>,
+    /// In definition order, for `graph`.
+    graphdefs: Vec<Graphdef>,
     watching: Vec<(String, Listener)>,
     out: Rc<RefCell<Vec<String>>>,
     clock: Box<dyn Clock>,
@@ -65,6 +85,7 @@ impl Repl {
             graph: Graph::new(),
             bindings: Vec::new(),
             by_name: HashMap::new(),
+            graphdefs: Vec::new(),
             watching: Vec::new(),
             out: Rc::default(),
             clock: Box::new(clock),
@@ -126,6 +147,7 @@ impl Repl {
         match (head.as_str(), args) {
             ("input", [name, literal]) => self.input(name, literal),
             ("def", [name, definition]) => self.def(name, definition),
+            ("defgraph", [name, params, body]) => self.defgraph(name, params, body),
             ("set", [name, literal]) => self.set(name, literal),
             ("watch", [name]) => self.watch(name),
             ("tick", [name, period]) => self.tick(name, period),
@@ -180,7 +202,7 @@ impl Repl {
         };
         let Some(i) = bound else {
             let name = self.fresh(name)?;
-            let (ty, def) = self.check(definition)?;
+            let (ty, def) = self.check(definition, Scope::Top)?;
             let uses = uses(definition);
             let made = self.graph.make(Command::Define(def));
             self.bind(name, ty, made, shown, uses);
@@ -191,7 +213,7 @@ impl Repl {
             return Err(format!("{name} is an input, and an input is not redefined"));
         };
         let (redefine, ty) = (made.1, binding.ty);
-        let (new_ty, def) = self.check(definition)?;
+        let (new_ty, def) = self.check(definition, Scope::Top)?;
         let uses = uses(definition);
         // 3: no cycle, through the definitions the bindings have now.
         let name = &binding.name;
@@ -210,6 +232,69 @@ impl Repl {
         binding.shown = shown;
         binding.uses = uses;
         Ok(())
+    }
+
+    /// `(defgraph g [a b] (f a b))`: a name for the body, which a call
+    /// builds afresh with the call's arguments for its parameters. The body
+    /// names only its parameters, and functions in the registry or defined
+    /// before it, with their arities; its types are checked at each call.
+    fn defgraph(&mut self, name: &Form, params: &Form, body: &Form) -> Checked<()> {
+        if let Form::Symbol(name) = name
+            && self.graphdef(name).is_some()
+        {
+            return Err(format!(
+                "{name} is a defgraph, and a defgraph is not redefined: \
+                 the bindings built from it would not follow"
+            ));
+        }
+        let name = self.fresh(name)?;
+        if registry::named(name).next().is_some() {
+            return Err(format!("{name} is a function in the registry"));
+        }
+        let Form::Vector(forms) = params else {
+            return Err(format!("{params} is not a vector of parameters"));
+        };
+        let mut names: Vec<String> = Vec::with_capacity(forms.len());
+        for form in forms {
+            let param = match form {
+                Form::Symbol(param) if identifier(param) => param,
+                _ => return Err(format!("{form} cannot be a name")),
+            };
+            if names.contains(param) {
+                return Err(format!("{params} names {param} twice"));
+            }
+            names.push(param.clone());
+        }
+        self.shape(name, &names, body)?;
+        self.graphdefs.push(Graphdef {
+            name: name.to_string(),
+            params: names,
+            body: body.clone(),
+            shown: format!("(defgraph {name} {params} {body})"),
+        });
+        Ok(())
+    }
+
+    /// Checks what can be checked of a `defgraph`'s body without its
+    /// arguments' types: that it names only parameters, and functions that
+    /// exist with the count of arguments each takes.
+    fn shape(&self, graph: &str, params: &[String], body: &Form) -> Checked<()> {
+        match body {
+            Form::Literal(_) => Ok(()),
+            Form::Symbol(name) if params.contains(name) => Ok(()),
+            Form::Symbol(name) => Err(format!(
+                "the body of {graph} names {name}, which is not one of its parameters"
+            )),
+            Form::Vector(_) => Err(format!("{body} is not an expression")),
+            Form::List(forms) => {
+                let Some((Form::Symbol(function), args)) = forms.split_first() else {
+                    return Err(format!("{body} does not start with a function's name"));
+                };
+                self.arity_of(function, args.len())?;
+                args.iter()
+                    .try_for_each(|arg| self.shape(graph, params, arg))
+            }
+        }
     }
 
     /// `(set x 5)`: a send to an input.
@@ -253,8 +338,12 @@ impl Repl {
         Ok(())
     }
 
-    /// `(graph)`: every binding, its type and its definition.
+    /// `(graph)`: every defgraph, and every binding, its type and its
+    /// definition.
     fn graph(&self) {
+        for graph in &self.graphdefs {
+            self.say(graph.shown.clone());
+        }
         for binding in &self.bindings {
             self.say(format!(
                 "{} : {} = {}",
@@ -264,18 +353,27 @@ impl Repl {
     }
 
     /// Checks a definition against the namespace and the registry, before
-    /// anything touches the graph: a literal, the name of a binding, or an
-    /// application, of which (1) the function exists and the count of
-    /// arguments is its arity, and (2) each argument checks, and its type is
-    /// the one the signature names, for one of the signatures its name has.
-    /// Returns the result's type and the definition.
-    fn check(&self, definition: &Form) -> Checked<(Type, Def)> {
+    /// anything touches the graph: a literal, a name, or an application, of
+    /// which (1) the function exists and the count of arguments is its
+    /// arity, and (2) each argument checks, and its type is the one the
+    /// signature names, for one of the signatures its name has; or, for a
+    /// defgraph, the body checks with the arguments' types for its
+    /// parameters. Returns the result's type and the definition.
+    fn check(&self, definition: &Form, scope: Scope) -> Checked<(Type, Def)> {
         let forms = match definition {
             Form::Vector(_) => return Err(format!("{definition} is not an expression")),
             Form::Literal(literal) => return Ok((literal.ty(), Def::Literal(literal.clone()))),
-            Form::Symbol(_) => {
-                let binding = self.lookup(definition)?;
-                return Ok((binding.ty, Def::Binding(binding.node())));
+            Form::Symbol(name) => {
+                return match scope {
+                    Scope::Top => {
+                        let binding = self.lookup(definition)?;
+                        Ok((binding.ty, Def::Binding(binding.node())))
+                    }
+                    Scope::Body(params, types) => match params.iter().position(|p| p == name) {
+                        Some(i) => Ok((types[i], Def::Param(i))),
+                        None => Err(format!("no parameter named {name}")),
+                    },
+                };
             }
             Form::List(forms) => forms,
         };
@@ -284,25 +382,21 @@ impl Repl {
                 "{definition} does not start with a function's name"
             ));
         };
-        let candidates: Vec<&Function> = registry::named(function).collect();
-        let Some(first) = candidates.first() else {
-            return Err(format!("no function named {function}"));
-        };
-        // The signatures of one name share an arity.
-        if args.len() != first.params.len() {
-            return Err(format!(
-                "{function} takes {} arguments, not {}",
-                first.params.len(),
-                args.len()
-            ));
-        }
+        self.arity_of(function, args.len())?;
         let mut types = Vec::with_capacity(args.len());
         let mut checked = Vec::with_capacity(args.len());
         for form in args {
-            let (ty, arg) = self.check(form)?;
+            let (ty, arg) = self.check(form, scope)?;
             types.push(ty);
             checked.push(arg);
         }
+        if let Some(graph) = self.graphdef(function) {
+            let (ty, body) = self
+                .check(&graph.body, Scope::Body(&graph.params, &types))
+                .map_err(|message| format!("in {definition}: {message}"))?;
+            return Ok((ty, Def::Call(checked, Box::new(body))));
+        }
+        let candidates: Vec<&Function> = registry::named(function).collect();
         if let Some(f) = candidates.iter().find(|f| f.params == types) {
             return Ok((f.result, Def::Apply(f.wire, checked)));
         }
@@ -330,6 +424,27 @@ impl Repl {
                 )
             }
         })
+    }
+
+    /// Checks that `function` is in the registry or a defgraph, and takes
+    /// `count` arguments.
+    fn arity_of(&self, function: &str, count: usize) -> Checked<()> {
+        // The signatures of one name share an arity.
+        let arity = match registry::named(function).next() {
+            Some(f) => f.params.len(),
+            None => match self.graphdef(function) {
+                Some(graph) => graph.params.len(),
+                None => return Err(format!("no function named {function}")),
+            },
+        };
+        if count != arity {
+            return Err(format!("{function} takes {arity} arguments, not {count}"));
+        }
+        Ok(())
+    }
+
+    fn graphdef(&self, name: &str) -> Option<&Graphdef> {
+        self.graphdefs.iter().find(|graph| graph.name == name)
     }
 
     /// The path from `name` back to itself, if a definition naming `uses`
@@ -381,16 +496,14 @@ impl Repl {
         let Form::Symbol(name) = name else {
             return Err(format!("{name} cannot be a name"));
         };
-        let mut chars = name.chars();
-        let identifier = chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if !identifier {
+        if !identifier(name) {
             return Err(format!("{name} cannot be a name"));
         }
         if self.by_name.contains_key(name) {
             return Err(format!("{name} is already bound"));
+        }
+        if self.graphdef(name).is_some() {
+            return Err(format!("{name} is a defgraph"));
         }
         Ok(name)
     }
@@ -431,6 +544,15 @@ impl Printer {
 fn signature(types: &[Type]) -> String {
     let types: Vec<String> = types.iter().map(Type::to_string).collect();
     format!("({})", types.join(", "))
+}
+
+/// Whether a symbol can name a binding, a defgraph or a parameter.
+fn identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn literal_of(form: &Form) -> Checked<Literal> {

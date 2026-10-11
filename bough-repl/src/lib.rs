@@ -11,9 +11,10 @@
 //! | Command | Meaning |
 //! |---|---|
 //! | `(input x 0)` / `(input b true)` | Declare a typed input; the literal's syntax gives its type. |
-//! | `(def y (add x 3))` | Bind `y` to a registry function applied to bindings or literals. |
+//! | `(def y (add x (mul x 2)))` | Bind `y` to an expression of bindings, literals and functions, nested as deep as you like. |
 //! | `(def y x)` | Bind `y` to an existing binding, or to a literal. |
 //! | `(def y (mul x x))` | Redefine `y`, of the same type and with no cycle; everything downstream follows. |
+//! | `(defgraph g [a n] (add (mul a n) 1))` | Name a body of graph building: `(def y (g x 2))` builds it afresh, with `x` and `2` for `a` and `n`. |
 //! | `(set x 5)` | Send a value to an input. |
 //! | `(watch y)` | Print `y = value` now and at every step. |
 //! | `(graph)` | Print every binding with its type and definition. |

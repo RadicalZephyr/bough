@@ -2,8 +2,9 @@
 (input in 1)
 (tick t 1000)
 (def x in)
-(def fizz (if (eq (mod x 3) 0) "Fizz" ""))
-(def buzz (if (eq (mod x 5) 0) "Buzz" ""))
+(defgraph word-for-mod-n [x n word] (if (eq (mod x n) 0) word ""))
+(def fizz (word-for-mod-n x 3 "Fizz"))
+(def buzz (word-for-mod-n x 5 "Buzz"))
 (def words (cat fizz buzz))
 (def out (if (eq words "") (str x) words))
 (watch out)
@@ -12,6 +13,7 @@
 (set in 30)
 ; Hand it to the timer.
 (def x t)
-; Splash on multiples of 7: one binding, and words redefined.
-(def splash (if (eq (mod x 7) 0) "Splash" ""))
+; Splash on multiples of 7: one more call, and words redefined.
+(def splash (word-for-mod-n x 7 "Splash"))
 (def words (cat (cat fizz buzz) splash))
+(graph)
