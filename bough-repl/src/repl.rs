@@ -1,4 +1,4 @@
-//! The REPL layer: parses a command, checks it against [`Type`] tags and
+//! The REPL layer: reads a command, checks it against [`Type`] tags and
 //! the binding namespace, and only then touches the graph. It never handles
 //! a binding's value; a literal in a command is the one value it carries,
 //! into the graph.
@@ -14,6 +14,7 @@ use bough::Listener;
 
 use crate::clock::{Clock, WallClock};
 use crate::graph::{Arg, Command, Def, Graph, Made};
+use crate::read::{Form, read};
 use crate::registry::{self, Function};
 use crate::ty::{InputToken, Literal, Node, Type};
 
@@ -91,20 +92,10 @@ impl Repl {
 
     /// Runs one line, and returns what it printed, watch lines included.
     pub fn run(&mut self, line: &str) -> Vec<String> {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let result = match words.as_slice() {
-            [] => Ok(()),
-            [first, ..] if first.starts_with('#') => Ok(()),
-            ["input", name, literal] => self.input(name, literal),
-            ["def", name, definition @ ..] if !definition.is_empty() => self.def(name, definition),
-            ["set", name, literal] => self.set(name, literal),
-            ["watch", name] => self.watch(name),
-            ["tick", name, period] => self.tick(name, period),
-            ["graph"] => {
-                self.graph();
-                Ok(())
-            }
-            _ => Err(format!("cannot read `{}`", line.trim())),
+        let result = match read(line) {
+            Ok(None) => Ok(()),
+            Ok(Some(form)) => self.command(&form),
+            Err(message) => Err(message),
         };
         if let Err(message) = result {
             self.say(format!("error: {message}"));
@@ -124,23 +115,45 @@ impl Repl {
         self.out.borrow_mut().push(line);
     }
 
-    /// `input x 0`: a new input whose type is the literal's.
-    fn input(&mut self, name: &str, literal: &str) -> Checked<()> {
-        self.fresh(name)?;
-        let literal = parse_literal(literal)?;
-        let shown = format!("input {literal}");
+    /// One command: a list whose head names it.
+    fn command(&mut self, form: &Form) -> Checked<()> {
+        let Form::List(forms) = form else {
+            return Err(format!("cannot read `{form}`"));
+        };
+        let Some((Form::Symbol(head), args)) = forms.split_first() else {
+            return Err(format!("cannot read `{form}`"));
+        };
+        match (head.as_str(), args) {
+            ("input", [name, literal]) => self.input(name, literal),
+            ("def", [name, definition]) => self.def(name, definition),
+            ("set", [name, literal]) => self.set(name, literal),
+            ("watch", [name]) => self.watch(name),
+            ("tick", [name, period]) => self.tick(name, period),
+            ("graph", []) => {
+                self.graph();
+                Ok(())
+            }
+            _ => Err(format!("cannot read `{form}`")),
+        }
+    }
+
+    /// `(input x 0)`: a new input whose type is the literal's.
+    fn input(&mut self, name: &Form, literal: &Form) -> Checked<()> {
+        let name = self.fresh(name)?;
+        let literal = literal_of(literal)?;
+        let shown = format!("(input {literal})");
         let ty = literal.ty();
         let made = self.graph.make(Command::Input(literal));
         self.bind(name, ty, made, shown, Vec::new());
         Ok(())
     }
 
-    /// `tick t 1000`: an `Int` input that a timer sets to 1, 2, 3, ..., one
-    /// every 1000 ms, starting at 0.
-    fn tick(&mut self, name: &str, period: &str) -> Checked<()> {
-        self.fresh(name)?;
-        let period = match period.parse::<u64>() {
-            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+    /// `(tick t 1000)`: an `Int` input that a timer sets to 1, 2, 3, ...,
+    /// one every 1000 ms, starting at 0.
+    fn tick(&mut self, name: &Form, period: &Form) -> Checked<()> {
+        let name = self.fresh(name)?;
+        let period = match period {
+            Form::Literal(Literal::Int(ms)) if *ms > 0 => Duration::from_millis(*ms as u64),
             _ => return Err(format!("{period} is not a period in milliseconds")),
         };
         let made = self.graph.make(Command::Input(Literal::Int(0)));
@@ -152,17 +165,21 @@ impl Repl {
         };
         let remote = self.graph.runtime().remote_io();
         self.clock.start(period, remote, input);
-        let shown = format!("tick {}", period.as_millis());
+        let shown = format!("(tick {})", period.as_millis());
         self.bind(name, Type::Int, made, shown, Vec::new());
         self.bindings.last_mut().expect("just bound").ticks = true;
         Ok(())
     }
 
-    /// `def y f a b` or `def y x`, of a new name or an existing one.
-    fn def(&mut self, name: &str, definition: &[&str]) -> Checked<()> {
-        let shown = definition.join(" ");
-        let Some(&i) = self.by_name.get(name) else {
-            self.fresh(name)?;
+    /// `(def y (f a b))` or `(def y x)`, of a new name or an existing one.
+    fn def(&mut self, name: &Form, definition: &Form) -> Checked<()> {
+        let shown = definition.to_string();
+        let bound = match name {
+            Form::Symbol(name) => self.by_name.get(name).copied(),
+            _ => None,
+        };
+        let Some(i) = bound else {
+            let name = self.fresh(name)?;
             let (ty, def, uses) = self.check(definition)?;
             let made = self.graph.make(Command::Define(def));
             self.bind(name, ty, made, shown, uses);
@@ -175,9 +192,10 @@ impl Repl {
         let (redefine, ty) = (made.1, binding.ty);
         let (new_ty, def, uses) = self.check(definition)?;
         // 3: no cycle, through the definitions the bindings have now.
+        let name = &binding.name;
         if let Some(cycle) = self.cycle(name, &uses) {
             return Err(format!(
-                "def {name} {shown} would make a cycle: {}",
+                "(def {name} {shown}) would make a cycle: {}",
                 cycle.join(" -> ")
             ));
         }
@@ -192,9 +210,10 @@ impl Repl {
         Ok(())
     }
 
-    /// `set x 5`: a send to an input.
-    fn set(&mut self, name: &str, literal: &str) -> Checked<()> {
+    /// `(set x 5)`: a send to an input.
+    fn set(&mut self, name: &Form, literal: &Form) -> Checked<()> {
         let binding = self.lookup(name)?;
+        let name = &binding.name;
         let Made::Input(made) = &binding.made else {
             return Err(format!("{name} is not an input"));
         };
@@ -203,7 +222,7 @@ impl Repl {
         }
         let input = made.1;
         let ty = binding.ty;
-        let literal = parse_literal(literal)?;
+        let literal = literal_of(literal)?;
         if literal.ty() != ty {
             return Err(format!("{name} is {ty}, and {literal} is {}", literal.ty()));
         }
@@ -211,15 +230,16 @@ impl Repl {
         Ok(())
     }
 
-    /// `watch y`: prints `y = value` now and at every step.
-    fn watch(&mut self, name: &str) -> Checked<()> {
-        if self.watching.iter().any(|(watched, _)| watched == name) {
+    /// `(watch y)`: prints `y = value` now and at every step.
+    fn watch(&mut self, name: &Form) -> Checked<()> {
+        let binding = self.lookup(name)?;
+        let (name, node) = (binding.name.clone(), binding.node());
+        if self.watching.iter().any(|(watched, _)| *watched == name) {
             return Err(format!("already watching {name}"));
         }
-        let node = self.lookup(name)?.node();
         let print = Printer {
             out: self.out.clone(),
-            label: name.to_string(),
+            label: name.clone(),
         };
         let runtime = self.graph.runtime();
         let listener = match node {
@@ -227,11 +247,11 @@ impl Repl {
             Node::BoolCell(cell) => runtime.listen_cell(cell, move |p| print.line(p)),
             Node::StrCell(cell) => runtime.listen_cell(cell, move |text| print.line(text)),
         };
-        self.watching.push((name.to_string(), listener));
+        self.watching.push((name, listener));
         Ok(())
     }
 
-    /// `graph`: every binding, its type and its definition.
+    /// `(graph)`: every binding, its type and its definition.
     fn graph(&self) {
         for binding in &self.bindings {
             self.say(format!(
@@ -246,77 +266,76 @@ impl Repl {
     /// arguments is its arity, and (2) each argument's type is the one its
     /// signature names, for one of the signatures its name has. Returns the
     /// result's type, the definition, and the bindings it names.
-    fn check(&self, definition: &[&str]) -> Checked<(Type, Def, Vec<String>)> {
-        let uses = definition
-            .iter()
-            .skip(usize::from(definition.len() > 1))
-            .filter(|word| Literal::parse(word).is_none())
-            .map(|word| word.to_string())
-            .collect();
-        match definition {
-            [word] => {
-                let (ty, arg) = self.arg(word)?;
-                Ok((ty, Def::Alias(arg), uses))
-            }
-            [function, words @ ..] => {
-                let candidates: Vec<&Function> = registry::named(function).collect();
-                let Some(first) = candidates.first() else {
-                    return Err(format!("no function named {function}"));
-                };
-                // The signatures of one name share an arity.
-                if words.len() != first.params.len() {
-                    return Err(format!(
-                        "{function} takes {} arguments, not {}",
-                        first.params.len(),
-                        words.len()
-                    ));
-                }
-                let mut types = Vec::with_capacity(words.len());
-                let mut args = Vec::with_capacity(words.len());
-                for word in words {
-                    let (ty, arg) = self.arg(word)?;
-                    types.push(ty);
-                    args.push(arg);
-                }
-                if let Some(f) = candidates.iter().find(|f| f.params == types) {
-                    return Ok((f.result, Def::Apply(f.wire, args), uses));
-                }
-                Err(match candidates.as_slice() {
-                    [f] => {
-                        let i = (0..types.len())
-                            .find(|&i| f.params[i] != types[i])
-                            .expect("an argument of another type");
-                        format!(
-                            "{function} takes {} as argument {}, and {} is {}",
-                            f.params[i],
-                            i + 1,
-                            words[i],
-                            types[i]
-                        )
-                    }
-                    _ => {
-                        let takes: Vec<String> =
-                            candidates.iter().map(|f| signature(f.params)).collect();
-                        format!(
-                            "{function} takes {}, and {} is {}",
-                            takes.join(" or "),
-                            words.join(" "),
-                            signature(&types)
-                        )
-                    }
-                })
-            }
-            [] => unreachable!("run passes a definition of at least one word"),
+    fn check(&self, definition: &Form) -> Checked<(Type, Def, Vec<String>)> {
+        let Form::List(forms) = definition else {
+            let (ty, arg) = self.arg(definition)?;
+            return Ok((ty, Def::Alias(arg), uses(std::slice::from_ref(definition))));
+        };
+        let Some((Form::Symbol(function), args)) = forms.split_first() else {
+            return Err(format!(
+                "{definition} does not start with a function's name"
+            ));
+        };
+        let candidates: Vec<&Function> = registry::named(function).collect();
+        let Some(first) = candidates.first() else {
+            return Err(format!("no function named {function}"));
+        };
+        // The signatures of one name share an arity.
+        if args.len() != first.params.len() {
+            return Err(format!(
+                "{function} takes {} arguments, not {}",
+                first.params.len(),
+                args.len()
+            ));
         }
+        let mut types = Vec::with_capacity(args.len());
+        let mut checked = Vec::with_capacity(args.len());
+        for form in args {
+            let (ty, arg) = self.arg(form)?;
+            types.push(ty);
+            checked.push(arg);
+        }
+        if let Some(f) = candidates.iter().find(|f| f.params == types) {
+            return Ok((f.result, Def::Apply(f.wire, checked), uses(args)));
+        }
+        Err(match candidates.as_slice() {
+            [f] => {
+                let i = (0..types.len())
+                    .find(|&i| f.params[i] != types[i])
+                    .expect("an argument of another type");
+                format!(
+                    "{function} takes {} as argument {}, and {} is {}",
+                    f.params[i],
+                    i + 1,
+                    args[i],
+                    types[i]
+                )
+            }
+            _ => {
+                let takes: Vec<String> = candidates.iter().map(|f| signature(f.params)).collect();
+                let args: Vec<String> = args.iter().map(Form::to_string).collect();
+                format!(
+                    "{function} takes {}, and {} is {}",
+                    takes.join(" or "),
+                    args.join(" "),
+                    signature(&types)
+                )
+            }
+        })
     }
 
     /// An argument: a literal, or the name of a binding.
-    fn arg(&self, word: &str) -> Checked<(Type, Arg)> {
-        if let Some(literal) = Literal::parse(word) {
-            return Ok((literal.ty(), Arg::Literal(literal)));
+    fn arg(&self, form: &Form) -> Checked<(Type, Arg)> {
+        match form {
+            Form::Literal(literal) => Ok((literal.ty(), Arg::Literal(literal.clone()))),
+            Form::Symbol(_) => {
+                let binding = self.lookup(form)?;
+                Ok((binding.ty, Arg::Binding(binding.node())))
+            }
+            Form::List(_) => Err(format!(
+                "an argument is a name or a literal, and {form} is neither"
+            )),
         }
-        let binding = self.lookup(word)?;
-        Ok((binding.ty, Arg::Binding(binding.node())))
     }
 
     /// The path from `name` back to itself, if a definition naming `uses`
@@ -351,27 +370,35 @@ impl Repl {
         false
     }
 
-    fn lookup(&self, name: &str) -> Checked<&Binding> {
-        match self.by_name.get(name) {
+    /// The binding a form names.
+    fn lookup(&self, name: &Form) -> Checked<&Binding> {
+        let found = match name {
+            Form::Symbol(name) => self.by_name.get(name),
+            _ => None,
+        };
+        match found {
             Some(&i) => Ok(&self.bindings[i]),
             None => Err(format!("no binding named {name}")),
         }
     }
 
-    /// Checks that `name` can name a new binding.
-    fn fresh(&self, name: &str) -> Checked<()> {
+    /// Checks that a form can name a new binding, and returns the name.
+    fn fresh<'f>(&self, name: &'f Form) -> Checked<&'f str> {
+        let Form::Symbol(name) = name else {
+            return Err(format!("{name} cannot be a name"));
+        };
         let mut chars = name.chars();
         let identifier = chars
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !identifier || Literal::parse(name).is_some() {
+        if !identifier {
             return Err(format!("{name} cannot be a name"));
         }
         if self.by_name.contains_key(name) {
             return Err(format!("{name} is already bound"));
         }
-        Ok(())
+        Ok(name)
     }
 
     fn bind(&mut self, name: &str, ty: Type, made: Made, shown: String, uses: Vec<String>) {
@@ -412,6 +439,19 @@ fn signature(types: &[Type]) -> String {
     format!("({})", types.join(", "))
 }
 
-fn parse_literal(word: &str) -> Checked<Literal> {
-    Literal::parse(word).ok_or_else(|| format!("{word} is not a literal"))
+fn literal_of(form: &Form) -> Checked<Literal> {
+    match form {
+        Form::Literal(literal) => Ok(literal.clone()),
+        _ => Err(format!("{form} is not a literal")),
+    }
+}
+
+/// The bindings among a definition's arguments, for the cycle check.
+fn uses(args: &[Form]) -> Vec<String> {
+    args.iter()
+        .filter_map(|form| match form {
+            Form::Symbol(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }

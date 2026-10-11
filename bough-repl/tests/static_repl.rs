@@ -12,13 +12,13 @@ fn a_diamond_prints_one_correct_update_per_set() {
     transcript(
         &mut repl,
         &[
-            ("input a 1", &[]),
-            ("def b add a a", &[]),
-            ("def c mul a b", &[]),
-            ("watch c", &["c = 2"]),
-            ("set a 2", &["c = 8"]),
-            ("set a 3", &["c = 18"]),
-            ("set a -1", &["c = 2"]),
+            ("(input a 1)", &[]),
+            ("(def b (add a a))", &[]),
+            ("(def c (mul a b))", &[]),
+            ("(watch c)", &["c = 2"]),
+            ("(set a 2)", &["c = 8"]),
+            ("(set a 3)", &["c = 18"]),
+            ("(set a -1)", &["c = 2"]),
         ],
     );
 }
@@ -26,7 +26,12 @@ fn a_diamond_prints_one_correct_update_per_set() {
 #[test]
 fn an_ill_typed_def_is_rejected_and_leaves_the_graph_unchanged() {
     let mut repl = Repl::new();
-    for line in ["input a 1", "def b add a a", "def c mul a b", "watch c"] {
+    for line in [
+        "(input a 1)",
+        "(def b (add a a))",
+        "(def c (mul a b))",
+        "(watch c)",
+    ] {
         repl.run(line);
     }
     let before = listing(&mut repl);
@@ -34,7 +39,7 @@ fn an_ill_typed_def_is_rejected_and_leaves_the_graph_unchanged() {
     transcript(
         &mut repl,
         &[(
-            "def d add a true",
+            "(def d (add a true))",
             &["error: add takes Int as argument 2, and true is Bool"],
         )],
     );
@@ -43,8 +48,8 @@ fn an_ill_typed_def_is_rejected_and_leaves_the_graph_unchanged() {
     transcript(
         &mut repl,
         &[
-            ("watch d", &["error: no binding named d"]),
-            ("set a 2", &["c = 8"]),
+            ("(watch d)", &["error: no binding named d"]),
+            ("(set a 2)", &["c = 8"]),
         ],
     );
 }
@@ -52,7 +57,7 @@ fn an_ill_typed_def_is_rejected_and_leaves_the_graph_unchanged() {
 #[test]
 fn each_check_rejects_before_the_graph_is_touched() {
     let mut repl = Repl::new();
-    for line in ["input a 1", "input p true"] {
+    for line in ["(input a 1)", "(input p true)"] {
         repl.run(line);
     }
     let nodes = repl.live_nodes();
@@ -60,39 +65,42 @@ fn each_check_rejects_before_the_graph_is_touched() {
         &mut repl,
         &[
             // 1: the function exists and the argument count is its arity.
-            ("def x frob a", &["error: no function named frob"]),
-            ("def x add a", &["error: add takes 2 arguments, not 1"]),
-            ("def x not p p", &["error: not takes 1 arguments, not 2"]),
+            ("(def x (frob a))", &["error: no function named frob"]),
+            ("(def x (add a))", &["error: add takes 2 arguments, not 1"]),
+            (
+                "(def x (not p p))",
+                &["error: not takes 1 arguments, not 2"],
+            ),
             // 2: each argument's type is the signature's.
             (
-                "def x if a a a",
+                "(def x (if a a a))",
                 &[
                     "error: if takes (Bool, Int, Int) or (Bool, Str, Str), and a a a is (Int, Int, Int)",
                 ],
             ),
             (
-                "def x and p 3",
+                "(def x (and p 3))",
                 &["error: and takes Bool as argument 2, and 3 is Int"],
             ),
             // 3: no cycle. A new name is not bound until its definition
             // is, so the only cycle it could make is through itself.
-            ("def x add x 1", &["error: no binding named x"]),
+            ("(def x (add x 1))", &["error: no binding named x"]),
             // Names: an argument names a binding, a new name is fresh.
-            ("def x add a q", &["error: no binding named q"]),
+            ("(def x (add a q))", &["error: no binding named q"]),
             (
-                "def a add a 1",
+                "(def a (add a 1))",
                 &["error: a is an input, and an input is not redefined"],
             ),
-            ("def 3 add a 1", &["error: 3 cannot be a name"]),
-            ("def true p", &["error: true cannot be a name"]),
-            ("input a 2", &["error: a is already bound"]),
-            ("input z nope", &["error: nope is not a literal"]),
+            ("(def 3 (add a 1))", &["error: 3 cannot be a name"]),
+            ("(def true p)", &["error: true cannot be a name"]),
+            ("(input a 2)", &["error: a is already bound"]),
+            ("(input z nope)", &["error: nope is not a literal"]),
         ],
     );
     assert_eq!(repl.live_nodes(), nodes);
     assert_eq!(
         listing(&mut repl),
-        ["a : Int = input 1", "p : Bool = input true"]
+        ["a : Int = (input 1)", "p : Bool = (input true)"]
     );
 }
 
@@ -102,13 +110,13 @@ fn set_is_checked_against_the_input_s_type() {
     transcript(
         &mut repl,
         &[
-            ("input a 5", &[]),
-            ("def b neg a", &[]),
-            ("watch b", &["b = -5"]),
-            ("set a true", &["error: a is Int, and true is Bool"]),
-            ("set b 4", &["error: b is not an input"]),
-            ("set q 4", &["error: no binding named q"]),
-            ("set a 4", &["b = -4"]),
+            ("(input a 5)", &[]),
+            ("(def b (neg a))", &[]),
+            ("(watch b)", &["b = -5"]),
+            ("(set a true)", &["error: a is Int, and true is Bool"]),
+            ("(set b 4)", &["error: b is not an input"]),
+            ("(set q 4)", &["error: no binding named q"]),
+            ("(set a 4)", &["b = -4"]),
         ],
     );
 }
@@ -116,8 +124,8 @@ fn set_is_checked_against_the_input_s_type() {
 #[test]
 fn every_function_in_the_registry_computes_what_it_says() {
     let mut repl = Repl::new();
-    let mut lines = vec!["input x 7".to_string(), "input y 3".to_string()];
-    lines.extend(["input p true", "input q false"].map(String::from));
+    let mut lines = vec!["(input x 7)".to_string(), "(input y 3)".to_string()];
+    lines.extend(["(input p true)", "(input q false)"].map(String::from));
     let defs = [
         ("add", "add x y", "10"),
         ("sub", "sub x y", "4"),
@@ -138,9 +146,12 @@ fn every_function_in_the_registry_computes_what_it_says() {
         repl.run(&line);
     }
     for (name, def, value) in defs {
-        assert_eq!(repl.run(&format!("def {name} {def}")), Vec::<String>::new());
         assert_eq!(
-            repl.run(&format!("watch {name}")),
+            repl.run(&format!("(def {name} ({def}))")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            repl.run(&format!("(watch {name})")),
             [format!("{name} = {value}")]
         );
     }
@@ -152,18 +163,18 @@ fn an_alias_follows_its_binding() {
     transcript(
         &mut repl,
         &[
-            ("input a 1", &[]),
-            ("def b a", &[]),
-            ("def k 5", &[]),
-            ("watch b", &["b = 1"]),
-            ("watch k", &["k = 5"]),
-            ("watch k", &["error: already watching k"]),
-            ("set a 2", &["b = 2"]),
+            ("(input a 1)", &[]),
+            ("(def b a)", &[]),
+            ("(def k 5)", &[]),
+            ("(watch b)", &["b = 1"]),
+            ("(watch k)", &["k = 5"]),
+            ("(watch k)", &["error: already watching k"]),
+            ("(set a 2)", &["b = 2"]),
         ],
     );
     assert_eq!(
         listing(&mut repl),
-        ["a : Int = input 1", "b : Int = a", "k : Int = 5"]
+        ["a : Int = (input 1)", "b : Int = a", "k : Int = 5"]
     );
 }
 
@@ -175,9 +186,29 @@ fn comments_and_blank_lines_print_nothing_and_nonsense_is_an_error() {
         &[
             ("", &[]),
             ("   ", &[]),
-            ("# a comment", &[]),
+            ("; a comment", &[]),
+            ("(graph) ; a comment after a command", &[]),
             ("frobnicate", &["error: cannot read `frobnicate`"]),
-            ("def y", &["error: cannot read `def y`"]),
+            ("(def y)", &["error: cannot read `(def y)`"]),
+            ("(def y 1 2)", &["error: cannot read `(def y 1 2)`"]),
+            ("(def y (add 1 2)", &["error: a ( is not closed"]),
+            (
+                "(watch y) (watch y)",
+                &["error: more than one form on the line, after (watch y)"],
+            ),
+            (
+                "(def y ())",
+                &["error: () does not start with a function's name"],
+            ),
+            (
+                "(def y (1 2))",
+                &["error: (1 2) does not start with a function's name"],
+            ),
+            // Nesting comes in the next step.
+            (
+                "(def y (add (add 1 2) 3))",
+                &["error: an argument is a name or a literal, and (add 1 2) is neither"],
+            ),
         ],
     );
 }

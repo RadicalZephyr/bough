@@ -44,7 +44,7 @@ pub fn ticking(repl: &mut Repl, ticks: &Ticks, steps: &[(&str, &[&str])]) {
 
 /// The `graph` listing, in definition order.
 pub fn listing(repl: &mut Repl) -> Vec<String> {
-    repl.run("graph")
+    repl.run("(graph)")
 }
 
 /// A REPL whose timers fire when the test says.

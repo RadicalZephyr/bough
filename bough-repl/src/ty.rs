@@ -87,22 +87,6 @@ pub enum Literal {
 }
 
 impl Literal {
-    /// Parses a word as a literal, or `None` if it is not one. A string
-    /// is one word, so it has no spaces, and no escapes.
-    pub fn parse(word: &str) -> Option<Literal> {
-        if let Ok(n) = word.parse::<i64>() {
-            return Some(Literal::Int(n));
-        }
-        if let Some(text) = word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
-            return Some(Literal::Str(text.to_string()));
-        }
-        match word {
-            "true" => Some(Literal::Bool(true)),
-            "false" => Some(Literal::Bool(false)),
-            _ => None,
-        }
-    }
-
     /// The literal's type.
     pub fn ty(&self) -> Type {
         match self {

@@ -6,18 +6,18 @@
 //! purpose, so the friction shows. The findings are a note in the RFD
 //! repository; this crate is the harness that produced them.
 //!
-//! The commands:
+//! The commands, one parenthesized form per line, `;` starting a comment:
 //!
 //! | Command | Meaning |
 //! |---|---|
-//! | `input x 0` / `input b true` | Declare a typed input; the literal's syntax gives its type. |
-//! | `def y add x 3` | Bind `y` to a registry function applied to bindings or literals. |
-//! | `def y x` | Bind `y` to an existing binding, or to a literal. |
-//! | `def y mul x x` | Redefine `y`, of the same type and with no cycle; everything downstream follows. |
-//! | `set x 5` | Send a value to an input. |
-//! | `watch y` | Print `y = value` now and at every step. |
-//! | `graph` | Print every binding with its type and definition. |
-//! | `tick t 1000` | An `Int` input a timer thread sets to 1, 2, 3, ..., one every 1000 ms. |
+//! | `(input x 0)` / `(input b true)` | Declare a typed input; the literal's syntax gives its type. |
+//! | `(def y (add x 3))` | Bind `y` to a registry function applied to bindings or literals. |
+//! | `(def y x)` | Bind `y` to an existing binding, or to a literal. |
+//! | `(def y (mul x x))` | Redefine `y`, of the same type and with no cycle; everything downstream follows. |
+//! | `(set x 5)` | Send a value to an input. |
+//! | `(watch y)` | Print `y = value` now and at every step. |
+//! | `(graph)` | Print every binding with its type and definition. |
+//! | `(tick t 1000)` | An `Int` input a timer thread sets to 1, 2, 3, ..., one every 1000 ms. |
 
 pub mod clock;
 pub mod graph;
