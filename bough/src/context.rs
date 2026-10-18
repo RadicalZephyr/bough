@@ -383,6 +383,26 @@ impl<M: Mode> Context for Build<M> {
 /// });
 /// edge.keep();
 /// ```
+///
+/// A `construct` in a portable core hands its closure a `&mut Portable`,
+/// and the closure is stored, so it must be `Send`:
+///
+/// ```compile_fail,E0277
+/// use std::rc::Rc;
+///
+/// use bough::{Cell, Portable, Runtime, Source, Stream};
+///
+/// fn spawner(b: &mut Portable<'_>, numbers: Stream<u32>) -> Stream<Cell<u32>> {
+///     let by = Rc::new(5u32);
+///     numbers.construct(b, move |b, n| b.constant(n + *by)) // error: Rc is not Send
+/// }
+///
+/// let (_graph, edge) = Runtime::build(|b| {
+///     let (numbers, _numbers_in) = b.input::<u32>();
+///     spawner(&mut b.portable(), numbers)
+/// });
+/// edge.keep();
+/// ```
 pub struct Portable<'a> {
     arm: Arm<'a>,
 }
