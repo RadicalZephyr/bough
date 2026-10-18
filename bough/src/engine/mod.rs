@@ -82,7 +82,7 @@ pub(crate) const START: u32 = u32::MAX;
 /// stage 2 the next two, stage 3 `Loop`, stage 4 the split pair and stage 5
 /// the switches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// Index 0.
     Noop,
     /// Fired by a send; never evaluated.
@@ -241,7 +241,7 @@ impl<A> Memo<A> {
 }
 
 /// A node's data plane: what other nodes, samples and listeners read.
-pub(crate) enum Data<M: Mode> {
+pub enum Data<M: Mode> {
     /// Node 0, `never`, a cell loop, a stream loop until its close creates
     /// its slot, a split capture, a switch_cell.
     Empty,
@@ -269,7 +269,7 @@ pub(crate) type FireFn<M> = fn(&mut Build<M>, u32, &mut dyn Any) -> Result<(), D
 
 /// A node type's static functions, monomorphized at materialization and
 /// promoted to `'static`. Entries a kind does not use are no-ops.
-pub(crate) struct Ops<M: Mode> {
+pub struct Ops<M: Mode> {
     /// Runs the node at this instant: program nodes only.
     pub(crate) eval: EvalFn<M>,
     /// Commit: a hold moves `pending` into `value`; an in-place accumulator
@@ -354,7 +354,7 @@ impl<M: Mode> Ops<M> {
 
 /// Implemented by one zero-sized marker type per node type. `&T::OPS` is
 /// promoted to `&'static`, so a node carries one pointer to its functions.
-pub(crate) trait NodeOps<M: Mode> {
+pub trait NodeOps<M: Mode> {
     const OPS: Ops<M>;
 }
 

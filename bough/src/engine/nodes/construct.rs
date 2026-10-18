@@ -19,20 +19,55 @@
 
 use super::Marker;
 use crate::build::Build;
+use crate::context::Portable;
 use crate::engine::{Cx, NodeOps, Ops, clear_slot, part};
 use crate::mode::Mode;
 use crate::source::Source;
 
 /// `construct` over a chain `S`, running `F`, whose events are `B`s. Its
-/// parts are the chain and the closure.
-pub(crate) struct ConstructNode<S, F, B>(Marker<(S, F, B)>);
+/// parts are the chain and the closure. `V` says what the closure takes:
+/// the builder itself ([`Direct`]), or a [`Portable`] view of it
+/// ([`ThroughPortable`]).
+pub(crate) struct ConstructNode<S, F, B, V>(Marker<(S, F, B, V)>);
 
-fn eval_construct<M, S, F, B>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+/// How a construct node hands its builder to its closure.
+pub trait Via<M: Mode, F, E, B> {
+    /// Runs the closure with the builder.
+    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B;
+}
+
+/// A closure that takes `&mut Build<M>`: a `construct` built on a `Build`.
+pub struct Direct;
+
+/// A closure that takes `&mut Portable`: a `construct` built in a portable
+/// core, whichever mode its builder is.
+pub struct ThroughPortable;
+
+impl<M: Mode, F, E, B> Via<M, F, E, B> for Direct
+where
+    F: FnMut(&mut Build<M>, E) -> B,
+{
+    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B {
+        f(b, event)
+    }
+}
+
+impl<M: Mode, F, E, B> Via<M, F, E, B> for ThroughPortable
+where
+    F: for<'p> FnMut(&mut Portable<'p>, E) -> B,
+{
+    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B {
+        f(&mut M::portable(b), event)
+    }
+}
+
+fn eval_construct<M, S, F, B, V>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
 where
     M: Mode,
     S: Source,
     B: 'static,
-    F: FnMut(&mut Build<M>, S::Event) -> B + 'static,
+    F: 'static,
+    V: Via<M, F, S::Event, B>,
 {
     let [chain, f] = parts else {
         unreachable!("bough engine: a construct has two parts")
@@ -42,7 +77,7 @@ where
     };
     let graph = b.graph_id;
     b.push_scope();
-    let out = part::<M, F>(f)(b, event);
+    let out = V::call(part::<M, F>(f), b, event);
     // A `mem::swap` with another graph's build context is safe code; with
     // no `unsafe` in the engine it is a wrong-graph error, caught here
     // before anything indexes the arena with this node's index.
@@ -54,15 +89,16 @@ where
     b.put_event(me, out);
 }
 
-impl<M, S, F, B> NodeOps<M> for ConstructNode<S, F, B>
+impl<M, S, F, B, V> NodeOps<M> for ConstructNode<S, F, B, V>
 where
     M: Mode,
     S: Source,
     B: 'static,
-    F: FnMut(&mut Build<M>, S::Event) -> B + 'static,
+    F: 'static,
+    V: Via<M, F, S::Event, B>,
 {
     const OPS: Ops<M> = Ops {
-        eval: eval_construct::<M, S, F, B>,
+        eval: eval_construct::<M, S, F, B, V>,
         clear_slot: clear_slot::<M, B>,
         ..Ops::<M>::DEFAULT
     };

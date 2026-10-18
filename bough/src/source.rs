@@ -54,14 +54,14 @@ use alloc::vec::Vec;
 
 use crate::Build;
 use crate::cell::CellRef;
+use crate::context::{AllOps, Context, Plane, Stores};
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
-use crate::engine::nodes::construct::ConstructNode;
 use crate::engine::nodes::split::{DeferNode, SplitNode};
 use crate::engine::nodes::stream::{
     ChainNode, FirstHalf, MergeNode, SecondHalf, SlotNode, UnzipNode,
 };
-use crate::engine::{COMMITS, Cx, Data, Kind, NodeOps, Ops};
-use crate::mode::{Accepts, Erase, Mode};
+use crate::engine::{COMMITS, Cx, Kind};
+use crate::mode::{Erase, Mode};
 use crate::token::{Cell, Shared, State, Stream, Token};
 use crate::trace::{Trace, Tracer};
 
@@ -203,18 +203,17 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The hold is the chain's sole consumer and moves the event into its
     /// committed value at commit, so no `Clone` is needed.
-    fn hold<M>(self, build: &mut Build<M>, initial: Self::Event) -> Cell<Self::Event>
+    fn hold<C>(self, build: &mut C, initial: Self::Event) -> Cell<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<Self::Event>,
         Self::Event: Trace + 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::Cell(<M as Accepts<Self::Event>>::erase(Erase::Cell(initial)));
-        let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<Self>>::erase(Erase::Value(self))]);
-        let ops = &<HoldNode<Self> as NodeOps<M>>::OPS;
-        let n = build.materialize(Kind::Hold, data, parts, ops, &[dependency], COMMITS);
-        build.set_reach(n, cells);
-        Cell::from_token(build.token(n))
+        let (dependency, cells) = build.reach_of(&self);
+        let data = Plane::Cell(<C as Stores<Self::Event>>::erase(Erase::Cell(initial)));
+        let parts: Box<[C::Erased]> = Box::new([<C as Stores<Self>>::erase(Erase::Value(self))]);
+        let n =
+            build.make::<HoldNode<Self>>(Kind::Hold, data, parts, &[dependency], COMMITS, cells);
+        Cell::from_token(build.token_of(n))
     }
 
     /// Sodium's `accum`: `hold initial (snapshot f self cell)`, with `f`
@@ -223,22 +222,27 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// The cell being snapshotted is the result itself, so `f` reads the
     /// accumulator's value from before the instant, as every reader in the
     /// transaction does.
-    fn accumulate<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> Cell<S>
+    fn accumulate<C, S, F>(self, build: &mut C, initial: S, f: F) -> Cell<S>
     where
-        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F>,
+        C: Context + Stores<Self> + Stores<S> + Stores<F>,
         S: Trace + 'static,
         F: Fn(Self::Event, &S) -> S + 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::Cell(<M as Accepts<S>>::erase(Erase::Cell(initial)));
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<F>>::erase(Erase::Value(f)),
+        let (dependency, cells) = build.reach_of(&self);
+        let data = Plane::Cell(<C as Stores<S>>::erase(Erase::Cell(initial)));
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
         ]);
-        let ops = &<AccumulateNode<Self, S, F> as NodeOps<M>>::OPS;
-        let n = build.materialize(Kind::Hold, data, parts, ops, &[dependency], COMMITS);
-        build.set_reach(n, cells);
-        Cell::from_token(build.token(n))
+        let n = build.make::<AccumulateNode<Self, S, F>>(
+            Kind::Hold,
+            data,
+            parts,
+            &[dependency],
+            COMMITS,
+            cells,
+        );
+        Cell::from_token(build.token_of(n))
     }
 
     /// In-place accumulation: `f` mutates the state at commit, after every
@@ -263,26 +267,31 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn accumulate_mut<M, S, F>(self, build: &mut Build<M>, initial: S, f: F) -> State<S>
+    fn accumulate_mut<C, S, F>(self, build: &mut C, initial: S, f: F) -> State<S>
     where
-        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<S> + Stores<F> + Stores<Self::Event>,
         S: Trace + 'static,
         F: FnMut(Self::Event, &mut S) + 'static,
         Self::Event: 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::InPlace {
-            state: <M as Accepts<S>>::erase(Erase::Value(initial)),
-            pending: <M as Accepts<Self::Event>>::erase(Erase::Slot),
+        let (dependency, cells) = build.reach_of(&self);
+        let data = Plane::InPlace {
+            state: <C as Stores<S>>::erase(Erase::Value(initial)),
+            pending: <C as Stores<Self::Event>>::erase(Erase::Slot),
         };
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<F>>::erase(Erase::Value(f)),
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
         ]);
-        let ops = &<InPlaceNode<Self, S, F> as NodeOps<M>>::OPS;
-        let n = build.materialize(Kind::InPlace, data, parts, ops, &[dependency], COMMITS);
-        build.set_reach(n, cells);
-        State::from_token(build.token(n))
+        let n = build.make::<InPlaceNode<Self, S, F>>(
+            Kind::InPlace,
+            data,
+            parts,
+            &[dependency],
+            COMMITS,
+            cells,
+        );
+        State::from_token(build.token_of(n))
     }
 
     /// Sodium's `collect`, `Iterator::scan`: a running state and an output
@@ -305,32 +314,37 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn scan<M, S, B, F>(self, build: &mut Build<M>, initial: S, f: F) -> Stream<B>
+    fn scan<C, S, B, F>(self, build: &mut C, initial: S, f: F) -> Stream<B>
     where
-        M: Mode + Accepts<Self> + Accepts<S> + Accepts<F> + Accepts<B>,
+        C: Context + Stores<Self> + Stores<S> + Stores<F> + Stores<B>,
         S: Trace + 'static,
         B: 'static,
         F: Fn(Self::Event, &S) -> (B, S) + 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::Slot(<M as Accepts<B>>::erase(Erase::Slot));
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<F>>::erase(Erase::Value(f)),
-            <M as Accepts<S>>::erase(Erase::Value(initial)),
+        let (dependency, cells) = build.reach_of(&self);
+        let data = Plane::Slot(<C as Stores<B>>::erase(Erase::Slot));
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
+            <C as Stores<S>>::erase(Erase::Value(initial)),
         ]);
-        let ops = &<ScanNode<Self, S, B, F> as NodeOps<M>>::OPS;
-        let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
-        build.set_reach(n, cells);
-        Stream::from_token(build.token(n))
+        let n = build.make::<ScanNode<Self, S, B, F>>(
+            Kind::Stream,
+            data,
+            parts,
+            &[dependency],
+            0,
+            cells,
+        );
+        Stream::from_token(build.token_of(n))
     }
 
     /// Explicit fan-out: a stream with any number of consumers, each of which
     /// clones the event. This and `map_to` are the only places `Clone` is
     /// required of a stream's events.
-    fn share<M>(self, build: &mut Build<M>) -> Shared<Self::Event>
+    fn share<C>(self, build: &mut C) -> Shared<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<Self::Event>,
         Self::Event: Clone + 'static,
     {
         Shared::from_token(chain_node(self, build))
@@ -353,9 +367,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn node<M>(self, build: &mut Build<M>) -> Stream<Self::Event>
+    fn node<C>(self, build: &mut C) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<Self::Event>,
         Self::Event: 'static,
     {
         Stream::from_token(chain_node(self, build))
@@ -386,51 +400,50 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn unzip<M, A, B>(self, build: &mut Build<M>) -> (Stream<A>, Stream<B>)
+    fn unzip<C, A, B>(self, build: &mut C) -> (Stream<A>, Stream<B>)
     where
         Self: Source<Event = (A, B)>,
-        M: Mode + Accepts<Self> + Accepts<(Option<A>, Option<B>)> + Accepts<A> + Accepts<B>,
+        C: Context + Stores<Self> + Stores<(Option<A>, Option<B>)> + Stores<A> + Stores<B>,
         A: 'static,
         B: 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::Slot(<M as Accepts<(Option<A>, Option<B>)>>::erase(Erase::Slot));
-        let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<Self>>::erase(Erase::Value(self))]);
-        let ops = &<UnzipNode<Self, A, B> as NodeOps<M>>::OPS;
-        let pairs = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
-        build.set_reach(pairs, cells);
-        let first = half_node::<M, A>(build, pairs, &<FirstHalf<A, B> as NodeOps<M>>::OPS);
-        let second = half_node::<M, B>(build, pairs, &<SecondHalf<A, B> as NodeOps<M>>::OPS);
+        let (dependency, cells) = build.reach_of(&self);
+        let data = Plane::Slot(<C as Stores<(Option<A>, Option<B>)>>::erase(Erase::Slot));
+        let parts: Box<[C::Erased]> = Box::new([<C as Stores<Self>>::erase(Erase::Value(self))]);
+        let pairs =
+            build.make::<UnzipNode<Self, A, B>>(Kind::Stream, data, parts, &[dependency], 0, cells);
+        let first = half_node::<C, A, FirstHalf<A, B>>(build, pairs);
+        let second = half_node::<C, B, SecondHalf<A, B>>(build, pairs);
         (Stream::from_token(first), Stream::from_token(second))
     }
 
     /// Merges two streams; `f` combines simultaneous events, with this
     /// stream's event on the left. Both inputs move through.
-    fn merge<M, T, F>(self, build: &mut Build<M>, other: T, f: F) -> Stream<Self::Event>
+    fn merge<C, T, F>(self, build: &mut C, other: T, f: F) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<T> + Accepts<F> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<T> + Stores<F> + Stores<Self::Event>,
         T: Source<Event = Self::Event>,
         F: Fn(Self::Event, Self::Event) -> Self::Event + 'static,
         Self::Event: 'static,
     {
-        let f = <M as Accepts<F>>::erase(Erase::Value(f));
-        merge_node::<M, Self, T, F>(self, build, other, f)
+        let f = <C as Stores<F>>::erase(Erase::Value(f));
+        merge_node::<C, Self, T, F>(self, build, other, f)
     }
 
     /// Merges two streams, this stream winning when both fire.
-    fn or_else<M, T>(self, build: &mut Build<M>, other: T) -> Stream<Self::Event>
+    fn or_else<C, T>(self, build: &mut C, other: T) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<T> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<T> + Stores<Self::Event>,
         T: Source<Event = Self::Event>,
         Self::Event: 'static,
     {
         // An engine-made function pointer is `Send` whatever the event type.
         let left: fn(Self::Event, Self::Event) -> Self::Event = |left, _| left;
-        merge_node::<M, Self, T, fn(Self::Event, Self::Event) -> Self::Event>(
+        merge_node::<C, Self, T, fn(Self::Event, Self::Event) -> Self::Event>(
             self,
             build,
             other,
-            M::erase_send(left),
+            C::erase_send(left),
         )
     }
 
@@ -498,25 +511,26 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn split<M>(self, build: &mut Build<M>) -> Stream<<Self::Event as IntoIterator>::Item>
+    fn split<C>(self, build: &mut C) -> Stream<<Self::Event as IntoIterator>::Item>
     where
-        M: Mode
-            + Accepts<Self>
-            + Accepts<<Self::Event as IntoIterator>::IntoIter>
-            + Accepts<<Self::Event as IntoIterator>::Item>,
+        C: Context
+            + Stores<Self>
+            + Stores<<Self::Event as IntoIterator>::IntoIter>
+            + Stores<<Self::Event as IntoIterator>::Item>,
         Self::Event: IntoIterator + 'static,
         <Self::Event as IntoIterator>::Item: 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<<Self::Event as IntoIterator>::IntoIter>>::erase(Erase::Stack),
+        let (dependency, cells) = build.reach_of(&self);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<<Self::Event as IntoIterator>::IntoIter>>::erase(Erase::Stack),
         ]);
-        let slot = <M as Accepts<<Self::Event as IntoIterator>::Item>>::erase(Erase::Slot);
-        let ops = &<SplitNode<Self> as NodeOps<M>>::OPS;
-        let output_ops = &<SlotNode<<Self::Event as IntoIterator>::Item> as NodeOps<M>>::OPS;
-        let output = build.capture_pair(dependency, cells, parts, ops, slot, output_ops);
-        Stream::from_token(build.token(output))
+        let slot = <C as Stores<<Self::Event as IntoIterator>::Item>>::erase(Erase::Slot);
+        let output = build
+            .make_pair::<SplitNode<Self>, SlotNode<<Self::Event as IntoIterator>::Item>>(
+                dependency, cells, parts, slot,
+            );
+        Stream::from_token(build.token_of(output))
     }
 
     /// Emits each event again in the first child transaction of the
@@ -580,21 +594,20 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn defer<M>(self, build: &mut Build<M>) -> Stream<Self::Event>
+    fn defer<C>(self, build: &mut C) -> Stream<Self::Event>
     where
-        M: Mode + Accepts<Self> + Accepts<Self::Event>,
+        C: Context + Stores<Self> + Stores<Self::Event>,
         Self::Event: 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<Self::Event>>::erase(Erase::Stack),
+        let (dependency, cells) = build.reach_of(&self);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<Self::Event>>::erase(Erase::Stack),
         ]);
-        let slot = <M as Accepts<Self::Event>>::erase(Erase::Slot);
-        let ops = &<DeferNode<Self> as NodeOps<M>>::OPS;
-        let output_ops = &<SlotNode<Self::Event> as NodeOps<M>>::OPS;
-        let output = build.capture_pair(dependency, cells, parts, ops, slot, output_ops);
-        Stream::from_token(build.token(output))
+        let slot = <C as Stores<Self::Event>>::erase(Erase::Slot);
+        let output = build
+            .make_pair::<DeferNode<Self>, SlotNode<Self::Event>>(dependency, cells, parts, slot);
+        Stream::from_token(build.token_of(output))
     }
 
     /// The semantics' `Execute`: runs `f` at each event with a fresh
@@ -678,80 +691,71 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// });
     /// edge.keep();
     /// ```
-    fn construct<M, B, F>(self, build: &mut Build<M>, f: F) -> Stream<B>
+    fn construct<C, B, F>(self, build: &mut C, f: F) -> Stream<B>
     where
-        M: Mode + Accepts<Self> + Accepts<F> + Accepts<B>,
+        C: Context + Stores<Self> + Stores<F> + Stores<B>,
         B: 'static,
-        F: FnMut(&mut Build<M>, Self::Event) -> B + 'static,
+        F: for<'p> FnMut(&mut C::Inner<'p>, Self::Event) -> B + 'static,
     {
-        let (dependency, cells) = build.chain_reach(&self);
-        let data = Data::Slot(<M as Accepts<B>>::erase(Erase::Slot));
-        let parts: Box<[M::Carrier]> = Box::new([
-            <M as Accepts<Self>>::erase(Erase::Value(self)),
-            <M as Accepts<F>>::erase(Erase::Value(f)),
+        let (dependency, cells) = build.reach_of(&self);
+        let slot = <C as Stores<B>>::erase(Erase::Slot);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
         ]);
-        let ops = &<ConstructNode<Self, F, B> as NodeOps<M>>::OPS;
-        let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
-        build.set_reach(n, cells);
-        Stream::from_token(build.token(n))
+        let n = build.make_construct::<Self, B, F>(dependency, cells, slot, parts);
+        Stream::from_token(build.token_of(n))
     }
 }
 
 /// The node of `node` and `share`: the chain, fused into one program.
-fn chain_node<S, M>(chain: S, build: &mut Build<M>) -> Token
+fn chain_node<S, C>(chain: S, build: &mut C) -> Token
 where
     S: Source,
-    M: Mode + Accepts<S> + Accepts<S::Event>,
+    C: Context + Stores<S> + Stores<S::Event>,
     S::Event: 'static,
 {
-    let (dependency, cells) = build.chain_reach(&chain);
-    let data = Data::Slot(<M as Accepts<S::Event>>::erase(Erase::Slot));
-    let parts: Box<[M::Carrier]> = Box::new([<M as Accepts<S>>::erase(Erase::Value(chain))]);
-    let ops = &<ChainNode<S> as NodeOps<M>>::OPS;
-    let n = build.materialize(Kind::Stream, data, parts, ops, &[dependency], 0);
-    build.set_reach(n, cells);
-    build.token(n)
+    let (dependency, cells) = build.reach_of(&chain);
+    let data = Plane::Slot(<C as Stores<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[C::Erased]> = Box::new([<C as Stores<S>>::erase(Erase::Value(chain))]);
+    let n = build.make::<ChainNode<S>>(Kind::Stream, data, parts, &[dependency], 0, cells);
+    build.token_of(n)
 }
 
-/// One of `unzip`'s halves: a stream node whose slot holds `H`s, with no
-/// parts, which depends on the pairs node and takes its half from there.
-fn half_node<M, H>(build: &mut Build<M>, pairs: u32, ops: &'static Ops<M>) -> Token
+/// One of `unzip`'s halves, of node type `N`: a stream node whose slot
+/// holds `H`s, with no parts, which depends on the pairs node and takes its
+/// half from there.
+fn half_node<C, H, N>(build: &mut C, pairs: u32) -> Token
 where
-    M: Mode + Accepts<H>,
+    C: Context + Stores<H>,
     H: 'static,
+    N: AllOps,
 {
-    let data = Data::Slot(<M as Accepts<H>>::erase(Erase::Slot));
-    let n = build.materialize(Kind::Stream, data, Box::new([]), ops, &[pairs], 0);
-    build.token(n)
+    let data = Plane::Slot(<C as Stores<H>>::erase(Erase::Slot));
+    let n = build.make::<N>(Kind::Stream, data, Box::new([]), &[pairs], 0, Vec::new());
+    build.token_of(n)
 }
 
 /// The node of `merge` and `or_else`: two chains and an erased function.
-fn merge_node<M, S, T, F>(
-    left: S,
-    build: &mut Build<M>,
-    right: T,
-    f: M::Carrier,
-) -> Stream<S::Event>
+fn merge_node<C, S, T, F>(left: S, build: &mut C, right: T, f: C::Erased) -> Stream<S::Event>
 where
-    M: Mode + Accepts<S> + Accepts<T> + Accepts<S::Event>,
+    C: Context + Stores<S> + Stores<T> + Stores<S::Event>,
     S: Source,
     T: Source<Event = S::Event>,
     F: Fn(S::Event, S::Event) -> S::Event + 'static,
     S::Event: 'static,
 {
-    let (l, mut cells) = build.chain_reach(&left);
-    let (r, more) = build.chain_reach(&right);
+    let (l, mut cells) = build.reach_of(&left);
+    let (r, more) = build.reach_of(&right);
     cells.extend(more);
-    let data = Data::Slot(<M as Accepts<S::Event>>::erase(Erase::Slot));
-    let parts: Box<[M::Carrier]> = Box::new([
-        <M as Accepts<S>>::erase(Erase::Value(left)),
-        <M as Accepts<T>>::erase(Erase::Value(right)),
+    let data = Plane::Slot(<C as Stores<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[C::Erased]> = Box::new([
+        <C as Stores<S>>::erase(Erase::Value(left)),
+        <C as Stores<T>>::erase(Erase::Value(right)),
         f,
     ]);
-    let ops = &<MergeNode<S, T, F> as NodeOps<M>>::OPS;
-    let n = build.materialize(Kind::Stream, data, parts, ops, &[l, r], 0);
-    build.set_reach(n, cells);
-    Stream::from_token(build.token(n))
+    let n = build.make::<MergeNode<S, T, F>>(Kind::Stream, data, parts, &[l, r], 0, cells);
+    Stream::from_token(build.token_of(n))
 }
 
 impl<M: Mode> Build<M> {

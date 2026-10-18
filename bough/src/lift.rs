@@ -1,8 +1,7 @@
 //! `lift` over a tuple of cells (RFD 4).
 
-use crate::Build;
 use crate::cell::{CellKind, CellRef, read_through};
-use crate::mode::{Accepts, Mode};
+use crate::context::{Context, Stores};
 
 mod sealed {
     pub trait Sealed {}
@@ -60,9 +59,9 @@ pub trait Lift<F, R>: sealed::Sealed + Sized {
     /// A read-through cell of these cells: `f` over their values, computed on
     /// read and memoized until one of them steps. Two inputs stepping in one
     /// instant are one step of the result.
-    fn lift<M>(self, build: &mut Build<M>, f: F) -> Self::Output
+    fn lift<X>(self, build: &mut X, f: F) -> Self::Output
     where
-        M: Mode + Accepts<F> + Accepts<R>;
+        X: Context + Stores<F> + Stores<R>;
 }
 
 /// The kind of a lifted cell: the join of its inputs' kinds, a `State` if
@@ -86,12 +85,12 @@ macro_rules! lift_tuple {
         {
             type Output = <join!($($cell),+) as CellKind>::Ref<R>;
 
-            fn lift<M>(self, build: &mut Build<M>, f: F) -> Self::Output
+            fn lift<X>(self, build: &mut X, f: F) -> Self::Output
             where
-                M: Mode + Accepts<F> + Accepts<R>,
+                X: Context + Stores<F> + Stores<R>,
             {
-                let inputs = [$(build.check(self.$i.token()),)+];
-                let token = read_through::<M, ($($cell::Value,)+), R, F>(build, &inputs, f);
+                let inputs = [$(build.check_token(self.$i.token()),)+];
+                let token = read_through::<X, ($($cell::Value,)+), R, F>(build, &inputs, f);
                 <join!($($cell),+) as CellKind>::wrap::<R>(token)
             }
         }

@@ -10,9 +10,11 @@
 //!
 //! Every value, closure and chain a node stores is erased into the mode's
 //! carrier: `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
-//! Exactly two functions build a carrier: [`Accepts::erase`], whose
-//! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send`, which
-//! requires `T: Send` itself. So `Runtime<Threaded>: Send` is derived by the
+//! Exactly three functions build a carrier: [`Accepts::erase`], whose
+//! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send` and the
+//! erasure of a [`Portable`](crate::Portable) view, which require `T: Send`
+//! themselves; a `Portable`'s `Send` box becomes a `Local` carrier by
+//! forgetting it is `Send`. So `Runtime<Threaded>: Send` is derived by the
 //! compiler from the field types, with no `unsafe impl`, and a materializer
 //! that forgets an `Accepts` bound fails to compile inside the engine.
 //!
@@ -47,7 +49,9 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::engine::{CellValue, Memo};
+use crate::build::Build;
+use crate::context::{AllOps, Portable};
+use crate::engine::{CellValue, Memo, NodeOps, Ops};
 #[cfg(target_has_atomic = "ptr")]
 use crate::io::NoIo;
 #[cfg(all(
@@ -84,6 +88,16 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     /// but it can prove `Stream<A>: Send`.
     #[doc(hidden)]
     fn erase_send<T: Send + 'static>(value: T) -> Self::Carrier;
+
+    /// This mode's functions for the node type `N`, which has functions
+    /// for every mode, so that code generic over the context can name it.
+    #[doc(hidden)]
+    fn ops_of<N: AllOps>() -> &'static Ops<Self>;
+
+    /// A [`Portable`] view of a builder of this mode, for a portable
+    /// core's `construct` closure.
+    #[doc(hidden)]
+    fn portable(build: &mut Build<Self>) -> Portable<'_>;
 
     /// Registers what a `RemoteIo` queued into a runtime of this mode, at
     /// the pump.
@@ -221,6 +235,12 @@ impl Mode for Local {
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
         Box::new(value)
     }
+    fn ops_of<N: AllOps>() -> &'static Ops<Local> {
+        &<N as NodeOps<Local>>::OPS
+    }
+    fn portable(build: &mut Build<Local>) -> Portable<'_> {
+        Portable::local(build)
+    }
     #[cfg(all(
         target_has_atomic = "ptr",
         any(feature = "std", feature = "critical-section")
@@ -257,6 +277,12 @@ impl Mode for Threaded {
     fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
         Box::new(value)
     }
+    fn ops_of<N: AllOps>() -> &'static Ops<Threaded> {
+        &<N as NodeOps<Threaded>>::OPS
+    }
+    fn portable(build: &mut Build<Threaded>) -> Portable<'_> {
+        Portable::threaded(build)
+    }
     #[cfg(any(feature = "std", feature = "critical-section"))]
     fn register(
         runtime: &mut Runtime<Threaded>,
@@ -275,4 +301,10 @@ impl<T: ?Sized + Send> Accepts<T> for Threaded {
     {
         erase_body!(what, T)
     }
+}
+
+/// The body of `Stores::erase` for a [`Portable`]: the engine's shapes of
+/// a `Send` type, in a `Send` box, which either mode's carrier takes.
+pub(crate) fn erase_send_shape<T: Send + 'static>(what: Erase<T>) -> Box<dyn Any + Send> {
+    erase_body!(what, T)
 }

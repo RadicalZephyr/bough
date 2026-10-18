@@ -108,6 +108,7 @@ extern crate std;
 mod build;
 mod capabilities;
 mod cell;
+mod context;
 mod engine;
 mod error;
 mod guard;
@@ -131,6 +132,7 @@ mod trace;
 pub use bough_derive::Trace;
 pub use build::{Build, CellLoop, StateLoop, StreamLoop};
 pub use cell::CellRef;
+pub use context::{Context, Portable, Stores};
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
 pub use error::{

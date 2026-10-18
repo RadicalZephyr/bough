@@ -6,11 +6,12 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cell::CellRef;
+use crate::context::{Context, Stores};
 use crate::engine::edge::Edge;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::engine::edge::{Connection, Drain};
 use crate::engine::nodes::cell::{ConstantNode, HoldNode};
-use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
+use crate::engine::nodes::stream::{ChainNode, CoalescingInput, SlotNode};
 use crate::engine::{COMMITS, Data, Kind, NodeOps, Ops, Sched, Store, Tx};
 use crate::guard::{Liveness, Released, Stamps};
 use crate::io::IoQueue;
@@ -535,8 +536,8 @@ impl<A: 'static> CellLoop<A> {
     /// forward and the definition become one cell, so a loop of linear
     /// streams panics too if each has a
     /// [`switch_stream`](Cell::switch_stream).
-    pub fn close<M: Mode>(self, build: &mut Build<M>, definition: Cell<A>) {
-        build.close_cell_loop(self.token, definition.token);
+    pub fn close<C: Context>(self, build: &mut C, definition: Cell<A>) {
+        build.close_cell(self.token, definition.token);
     }
 }
 
@@ -582,12 +583,12 @@ impl<A: 'static> StateLoop<A> {
     ///
     /// Panics if the loop was declared in another scope, and if the new
     /// dependency would close a cycle, naming the cycle's nodes.
-    pub fn close<M, C>(self, build: &mut Build<M>, definition: C)
+    pub fn close<X, C>(self, build: &mut X, definition: C)
     where
-        M: Mode,
+        X: Context,
         C: CellRef<Value = A>,
     {
-        build.close_cell_loop(self.token, definition.token());
+        build.close_cell(self.token, definition.token());
     }
 }
 
@@ -625,11 +626,14 @@ impl<A: 'static> StreamLoop<A> {
     ///
     /// Panics if the loop was declared in another scope, and if the chain's
     /// source is the forward or depends on it, naming the cycle's nodes.
-    pub fn close<M, S>(self, build: &mut Build<M>, definition: S)
+    pub fn close<C, S>(self, build: &mut C, definition: S)
     where
-        M: Mode + Accepts<S> + Accepts<A>,
+        C: Context + Stores<S> + Stores<A>,
         S: Source<Event = A>,
     {
-        build.close_stream_loop(self.token, definition);
+        let (dependency, cells) = build.reach_of(&definition);
+        let slot = <C as Stores<A>>::erase(Erase::Slot);
+        let chain = <C as Stores<S>>::erase(Erase::Value(definition));
+        build.close_stream::<ChainNode<S>>(self.token, dependency, cells, slot, chain);
     }
 }

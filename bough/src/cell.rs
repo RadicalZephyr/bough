@@ -2,11 +2,13 @@
 
 use alloc::boxed::Box;
 
-use crate::Build;
+use alloc::vec::Vec;
+
+use crate::context::{Context, Plane, Stores};
+use crate::engine::Kind;
 use crate::engine::nodes::read::{ReadFn, ReadNode};
 use crate::engine::nodes::stream::StepsNode;
-use crate::engine::{Data, Kind, NodeOps};
-use crate::mode::{Accepts, Erase, Mode};
+use crate::mode::Erase;
 use crate::source::Node;
 use crate::token::{Cell, State, Stream, Token, TokenRef};
 
@@ -111,20 +113,26 @@ impl CellKind for NoSteps {
 /// A read-through cell over the cells at `inputs`: `f` of their values,
 /// computed on read. Its function and its memo live in the node's data; it
 /// has no program.
-pub(crate) fn read_through<M, V, R, F>(build: &mut Build<M>, inputs: &[u32], f: F) -> Token
+pub(crate) fn read_through<C, V, R, F>(build: &mut C, inputs: &[u32], f: F) -> Token
 where
-    M: Mode + Accepts<F> + Accepts<R>,
+    C: Context + Stores<F> + Stores<R>,
     V: 'static,
     R: 'static,
     F: ReadFn<V, R>,
 {
-    let data = Data::ReadThrough {
-        f: <M as Accepts<F>>::erase(Erase::Value(f)),
-        memo: <M as Accepts<R>>::erase(Erase::Memo),
+    let data = Plane::ReadThrough {
+        f: <C as Stores<F>>::erase(Erase::Value(f)),
+        memo: <C as Stores<R>>::erase(Erase::Memo),
     };
-    let ops = &<ReadNode<V, R, F> as NodeOps<M>>::OPS;
-    let n = build.materialize(Kind::ReadThrough, data, Box::new([]), ops, inputs, 0);
-    build.token(n)
+    let n = build.make::<ReadNode<V, R, F>>(
+        Kind::ReadThrough,
+        data,
+        Box::new([]),
+        inputs,
+        0,
+        Vec::new(),
+    );
+    build.token_of(n)
 }
 
 impl<A: 'static> State<A> {
@@ -132,9 +140,8 @@ impl<A: 'static> State<A> {
     /// state between transactions. An in-place accumulator's function runs
     /// at commit, so every read during a transaction sees the state from
     /// before it, as [`Cell::sample`] does.
-    pub fn sample<M: Mode>(self, build: &Build<M>) -> &A {
-        let i = build.check(self.token);
-        build.value::<A>(i)
+    pub fn sample<C: Context>(self, build: &C) -> &A {
+        build.read::<A>(self.token)
     }
 
     /// A read-through cell over the state, as [`Cell::map_cell`]. It is a
@@ -152,14 +159,14 @@ impl<A: 'static> State<A> {
     /// });
     /// edge.keep();
     /// ```
-    pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> State<B>
+    pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> State<B>
     where
-        M: Mode + Accepts<F> + Accepts<B>,
+        C: Context + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
-        let input = build.check(self.token);
-        State::from_token(read_through::<M, (A,), B, F>(build, &[input], f))
+        let input = build.check_token(self.token);
+        State::from_token(read_through::<C, (A,), B, F>(build, &[input], f))
     }
 }
 
@@ -184,9 +191,8 @@ impl<A: 'static> Cell<A> {
     /// });
     /// edge.keep();
     /// ```
-    pub fn sample<M: Mode>(self, build: &Build<M>) -> &A {
-        let i = build.check(self.token);
-        build.value::<A>(i)
+    pub fn sample<C: Context>(self, build: &C) -> &A {
+        build.read::<A>(self.token)
     }
 
     /// A read-through cell: `f` of this cell's value, computed on read and
@@ -200,14 +206,14 @@ impl<A: 'static> Cell<A> {
     /// view computes the value after the instant during the instant, and
     /// that value becomes the memo at commit, so the view and the listeners
     /// share one call per step.
-    pub fn map_cell<M, B, F>(self, build: &mut Build<M>, f: F) -> Cell<B>
+    pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> Cell<B>
     where
-        M: Mode + Accepts<F> + Accepts<B>,
+        C: Context + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
-        let input = build.check(self.token);
-        Cell::from_token(read_through::<M, (A,), B, F>(build, &[input], f))
+        let input = build.check_token(self.token);
+        Cell::from_token(read_through::<C, (A,), B, F>(build, &[input], f))
     }
 }
 
@@ -229,11 +235,11 @@ impl<A: Clone + 'static> Cell<A> {
     /// after the instant and kept, and at commit it becomes the cell's
     /// memo, so the cell's function runs once per step, however many steps
     /// views and listeners the cell has.
-    pub fn steps<M>(self, build: &mut Build<M>) -> Stream<A>
+    pub fn steps<C>(self, build: &mut C) -> Stream<A>
     where
-        M: Mode + Accepts<A>,
+        C: Context + Stores<A>,
     {
-        Stream::from_token(steps_node::<M, A, false>(self, build))
+        Stream::from_token(steps_node::<C, A, false>(self, build))
     }
 
     /// Sodium's `value`: fires once at its creation instant with the
@@ -245,26 +251,32 @@ impl<A: Clone + 'static> Cell<A> {
     /// built there over it starts the graph at the cell's value. A creation
     /// and a step in one instant are one event, carrying the value after
     /// the step.
-    pub fn steps_with_current<M>(self, build: &mut Build<M>) -> Stream<A>
+    pub fn steps_with_current<C>(self, build: &mut C) -> Stream<A>
     where
-        M: Mode + Accepts<A>,
+        C: Context + Stores<A>,
     {
-        Stream::from_token(steps_node::<M, A, true>(self, build))
+        Stream::from_token(steps_node::<C, A, true>(self, build))
     }
 }
 
 /// The node of `steps` and `steps_with_current`: a stream node whose one
 /// dependency is the cell, and which has no program of its own.
-fn steps_node<M, A, const CURRENT: bool>(cell: Cell<A>, build: &mut Build<M>) -> Token
+fn steps_node<C, A, const CURRENT: bool>(cell: Cell<A>, build: &mut C) -> Token
 where
-    M: Mode + Accepts<A>,
+    C: Context + Stores<A>,
     A: Clone + 'static,
 {
-    let input = build.check(cell.token);
-    let data = Data::Slot(<M as Accepts<A>>::erase(Erase::Slot));
-    let ops = &<StepsNode<A, CURRENT> as NodeOps<M>>::OPS;
-    let n = build.materialize(Kind::Stream, data, Box::new([]), ops, &[input], 0);
-    build.token(n)
+    let input = build.check_token(cell.token);
+    let data = Plane::Slot(<C as Stores<A>>::erase(Erase::Slot));
+    let n = build.make::<StepsNode<A, CURRENT>>(
+        Kind::Stream,
+        data,
+        Box::new([]),
+        &[input],
+        0,
+        Vec::new(),
+    );
+    build.token_of(n)
 }
 
 impl<A: 'static> Cell<Cell<A>> {
@@ -325,8 +337,8 @@ impl<A: 'static> Cell<Cell<A>> {
     /// may be a loop that is not closed yet. Its first link and every move
     /// to another inner check that no cycle forms, and one that does is a
     /// panic that poisons the graph, naming the cycle's nodes.
-    pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> Cell<A> {
-        Cell::from_token(build.switch_cell_node::<Cell<A>>(self.token))
+    pub fn switch_cell<C: Context>(self, build: &mut C) -> Cell<A> {
+        Cell::from_token(build.make_switch_cell::<Cell<A>>(self.token))
     }
 }
 
@@ -359,8 +371,8 @@ impl<A: 'static> Cell<State<A>> {
     /// graph.send(pick_in, true);
     /// assert_eq!(*graph.sample(current), ["ada"]);
     /// ```
-    pub fn switch_cell<M: Mode>(self, build: &mut Build<M>) -> State<A> {
-        State::from_token(build.switch_cell_node::<State<A>>(self.token))
+    pub fn switch_cell<C: Context>(self, build: &mut C) -> State<A> {
+        State::from_token(build.make_switch_cell::<State<A>>(self.token))
     }
 }
 
@@ -461,11 +473,11 @@ where
     /// });
     /// edge.keep();
     /// ```
-    pub fn switch_stream<M>(self, build: &mut Build<M>) -> Stream<S::Event>
+    pub fn switch_stream<C>(self, build: &mut C) -> Stream<S::Event>
     where
-        M: Mode + Accepts<S::Event>,
+        C: Context + Stores<S::Event>,
     {
-        let slot = <M as Accepts<S::Event>>::erase(Erase::Slot);
-        Stream::from_token(build.switch_stream_node::<S>(self.token, slot))
+        let slot = <C as Stores<S::Event>>::erase(Erase::Slot);
+        Stream::from_token(build.make_switch_stream::<S>(self.token, slot))
     }
 }
