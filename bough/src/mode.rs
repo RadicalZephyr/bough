@@ -199,6 +199,19 @@ pub enum Erase<T> {
 ///     numbers.map(|n| n + 1).hold(b, 0) // error: M: Accepts<Map<Stream<u32>, {closure}>>
 /// }
 /// ```
+///
+/// A core written against [`Portable`](crate::Portable) can, since its
+/// builder has no type parameter: the bound names `Portable`, and the
+/// compiler checks the closure's real type for `Send` at the materializer.
+/// Either mode's builder lends one:
+///
+/// ```
+/// use bough::{Cell, Portable, Source, Stream};
+///
+/// fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
+///     numbers.map(|n| n + 1).hold(b, 0)
+/// }
+/// ```
 pub trait Accepts<T: ?Sized>: Mode {
     /// Erases `T` in one of the engine's shapes.
     #[doc(hidden)]
