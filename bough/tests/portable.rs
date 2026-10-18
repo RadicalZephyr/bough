@@ -5,7 +5,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use bough::{Cell, Input, Lift, Portable, Runtime, Source, Stream, Trace, Tracer};
+use bough::{
+    Cell, CollectionPolicy, Input, Lift, Portable, Runtime, Shared, Source, Stream, Trace, Tracer,
+};
 
 // ----------------------------------------------------------- the smallest core
 
@@ -355,4 +357,97 @@ fn the_petrol_pump_core_gives_the_same_answers_in_both_modes() {
     // The stop and the step that reached the preset are one instant, and
     // the sale snapshots the litres from before it.
     assert!((sales[1].0 - 8.0).abs() < 1e-9 && (sales[1].1 - 24.0).abs() < 1e-9);
+}
+
+// ----------------------------------------------------------- collection
+
+/// What a screen shows at a click: the screen, the click, and how many
+/// clicks the screen has counted.
+type Screen = (u32, u32, u32);
+
+/// A screen: a counter over the clicks, and a stream of what it shows, two
+/// nodes.
+fn screen(b: &mut Portable<'_>, clicks: Shared<u32>, n: u32) -> Stream<Screen> {
+    let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
+    clicks
+        .snapshot(count, move |click, k| (n, click, k + 1))
+        .node(b)
+}
+
+/// RFD 4's navigation loop as a portable core: every click of 0 constructs
+/// the next screen, a hold keeps the current one, and a switch takes its
+/// events.
+fn navigation(b: &mut Portable<'_>, clicks: Stream<u32>) -> Shared<Screen> {
+    let clicks = clicks.share(b);
+    let (navigate, navigate_loop) = b.stream_loop::<u32>();
+    let first = screen(b, clicks, 0);
+    let screens = navigate.construct(b, move |b, n| screen(b, clicks, n));
+    b.depends(&screens, &[&clicks]);
+    let current = screens.hold(b, first);
+    let events = current.switch_stream(b).share(b);
+    let next = events.filter_map(|(n, click, _)| (click == 0).then_some(n + 1));
+    navigate_loop.close(b, next);
+    events
+}
+
+/// Navigates `times` times with manual collection and returns the live
+/// nodes once settled, before collecting, and after, and the last event.
+macro_rules! navigate {
+    ($graph:expr, $clicks_in:expr, $heard:expr, $times:expr) => {{
+        $graph.set_collection_policy(CollectionPolicy::Manual);
+        $graph.collect_garbage();
+        let settled = $graph.live_nodes();
+        for _ in 0..$times {
+            $graph.send($clicks_in, 0);
+            $graph.send($clicks_in, 7);
+        }
+        let grown = $graph.live_nodes();
+        $graph.collect_garbage();
+        let collected = $graph.live_nodes();
+        let last = *$heard.lock().unwrap().last().unwrap();
+        (settled, grown, collected, last)
+    }};
+}
+
+/// The screens a portable core's `construct` builds are freed once the
+/// switch moves off them, in both modes: the live nodes come back to what
+/// they were before the navigations.
+#[test]
+fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
+    let (mut local, edge) = Runtime::build(|b| {
+        let (clicks, clicks_in) = b.input::<u32>();
+        (clicks_in, navigation(&mut b.portable(), clicks))
+    });
+    let (local_in, local_events) = edge.keep();
+    let local_heard = Arc::new(Mutex::new(Vec::new()));
+    let log = local_heard.clone();
+    local
+        .listen(local_events, move |e| log.lock().unwrap().push(e))
+        .keep();
+    let local_counts = navigate!(local, local_in, local_heard, 10);
+
+    let (mut threaded, edge) = Runtime::build_threaded(|b| {
+        let (clicks, clicks_in) = b.input::<u32>();
+        (clicks_in, navigation(&mut b.portable(), clicks))
+    });
+    let (threaded_in, threaded_events) = edge.keep();
+    let threaded_heard = Arc::new(Mutex::new(Vec::new()));
+    let log = threaded_heard.clone();
+    threaded
+        .listen(threaded_events, move |e| log.lock().unwrap().push(e))
+        .keep();
+    let threaded_counts = navigate!(threaded, threaded_in, threaded_heard, 10);
+
+    let (settled, grown, collected, last) = local_counts;
+    // Ten screens of two nodes each were built; nine of them, and the
+    // first, have been left.
+    assert_eq!(grown, settled + 20);
+    assert_eq!(collected, settled);
+    // A screen built at the click of 0 counts that click too.
+    assert_eq!(last, (10, 7, 2));
+    assert_eq!(threaded_counts, local_counts);
+    assert_eq!(
+        *threaded_heard.lock().unwrap(),
+        *local_heard.lock().unwrap()
+    );
 }
