@@ -11,7 +11,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::thread;
 
-use bough::{Input, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, Source};
+use bough::prelude::*;
+use bough::{IoError, IoTransactionError, PumpError, RemoteIo};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {

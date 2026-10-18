@@ -8,9 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc;
 
-use bough::{
-    Cell, CollectionPolicy, Input, Runtime, Shared, Source, State, Stream, TokenError, Trace,
-};
+use bough::prelude::*;
+use bough::{CollectionPolicy, TokenError};
 
 /// A type with no `Trace`, which only a skipped field may have.
 struct Opaque(u64);

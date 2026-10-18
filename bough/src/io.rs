@@ -295,7 +295,7 @@ impl IoQueue<Threaded> for NoIo {
 /// registration.
 ///
 /// ```
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (clicks, clicks_in) = b.input::<()>();

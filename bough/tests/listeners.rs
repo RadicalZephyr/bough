@@ -6,10 +6,8 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{
-    IoError, Listener, PoisonedError, Runtime, SendError, Source, TokenError, Trace, Tracer,
-    TransactionListenError,
-};
+use bough::prelude::*;
+use bough::{IoError, PoisonedError, SendError, TokenError, Tracer, TransactionListenError};
 
 /// A shared log and a closure that appends to it.
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {

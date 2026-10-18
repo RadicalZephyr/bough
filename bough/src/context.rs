@@ -341,7 +341,7 @@ impl<M: Mode> Context for Build<M> {
 /// `Send` at each materializer, against the closure's real type.
 ///
 /// ```
-/// use bough::{Cell, Portable, Runtime, Source, Stream};
+/// use bough::prelude::*;
 ///
 /// fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 ///     numbers.map(|n| n + 1).hold(b, 0)
@@ -370,7 +370,7 @@ impl<M: Mode> Context for Build<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::{Cell, Portable, Runtime, Source, Stream};
+/// use bough::prelude::*;
 ///
 /// fn offset(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 ///     let by = Rc::new(5u32);
@@ -390,7 +390,7 @@ impl<M: Mode> Context for Build<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::{Cell, Portable, Runtime, Source, Stream};
+/// use bough::prelude::*;
 ///
 /// fn spawner(b: &mut Portable<'_>, numbers: Stream<u32>) -> Stream<Cell<u32>> {
 ///     let by = Rc::new(5u32);

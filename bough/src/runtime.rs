@@ -521,7 +521,7 @@ impl<M: Mode> Runtime<M> {
     /// A chain cannot be listened to:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
     /// let events = edge.keep();
@@ -531,7 +531,7 @@ impl<M: Mode> Runtime<M> {
     /// A linear stream cannot be listened to twice:
     ///
     /// ```compile_fail,E0382
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
     /// let events = edge.keep();
@@ -962,7 +962,8 @@ impl<M: Mode> Runtime<M> {
     /// the rest, anchor the part to keep, then drop the edge:
     ///
     /// ```
-    /// use bough::{Runtime, Source, TokenError};
+    /// use bough::prelude::*;
+    /// use bough::TokenError;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (n, n_in) = b.input::<u32>();
@@ -1028,7 +1029,7 @@ impl<M: Mode> Runtime<M> {
     /// a send:
     ///
     /// ```compile_fail,E0502
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (numbers, numbers_in) = b.input::<u32>();
@@ -1746,7 +1747,7 @@ impl Drop for Anchor {
 /// the edge, but a hold of one doesn't compile:
 ///
 /// ```compile_fail,E0277
-/// use bough::{Anchored, Input, Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
@@ -1857,7 +1858,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// use std::rc::Rc;
 /// use std::thread;
 ///
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
@@ -1885,7 +1886,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::Runtime;
+/// use bough::prelude::*;
 ///
 /// let (graph, edge) = Runtime::build(|b| b.input::<Rc<u32>>().1);
 /// let shared_in = edge.keep();
@@ -2270,7 +2271,7 @@ impl<M: Mode> Driver for Runtime<M> {
 /// tied to it must be `Send`:
 ///
 /// ```compile_fail,E0277
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 /// use std::rc::Rc;
 ///
 /// let (graph, edge) = Runtime::build(|b| {

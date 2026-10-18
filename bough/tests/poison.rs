@@ -10,7 +10,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::thread;
 
-use bough::{Anchor, Input, Io, IoError, RemoteIo, Runtime, Source, Trace, Tracer};
+use bough::prelude::*;
+use bough::{Anchor, Io, IoError, RemoteIo, Tracer};
 
 /// A value whose `Drop` panics once it's armed.
 struct Bomb(Rc<Cell<bool>>);

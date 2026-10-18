@@ -11,10 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::{
-    Cell, Input, Io, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, SendError, Source,
-    Stream, TokenError,
-};
+use bough::prelude::*;
+use bough::{Io, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {

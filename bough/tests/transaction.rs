@@ -4,7 +4,8 @@
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use bough::{PoisonedError, Runtime, SendError, TransactionSendError};
+use bough::prelude::*;
+use bough::{PoisonedError, SendError, TransactionSendError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {

@@ -19,7 +19,8 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{InputSlot, PumpError, Runtime, Source, Stream};
+use bough::prelude::*;
+use bough::{InputSlot, PumpError};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {

@@ -25,10 +25,8 @@ use std::fmt::Debug;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{
-    Build, Cell, Input, Lift, Local, PoisonedError, Runtime, SendError, Shared, Source, State,
-    Stream, TokenError, Trace, Transaction,
-};
+use bough::prelude::*;
+use bough::{PoisonedError, SendError, TokenError, Transaction};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

@@ -80,7 +80,7 @@ pub struct Cell<A> {
 /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) work on a `State`.
 ///
 /// ```compile_fail,E0599
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (names, _names_in) = b.input::<String>();

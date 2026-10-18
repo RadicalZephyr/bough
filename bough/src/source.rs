@@ -8,7 +8,7 @@
 //! materializer, and using it twice is a compile error.
 //!
 //! ```
-//! use bough::{Runtime, Source};
+//! use bough::prelude::*;
 //!
 //! let (graph, edge) = Runtime::build(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
@@ -25,7 +25,7 @@
 //! A chain used twice does not compile:
 //!
 //! ```compile_fail,E0382
-//! use bough::{Runtime, Source};
+//! use bough::prelude::*;
 //!
 //! let (graph, edge) = Runtime::build(|b| {
 //!     let (numbers, _in) = b.input::<u32>();
@@ -40,7 +40,7 @@
 //! a context graph code cannot name or construct:
 //!
 //! ```compile_fail,E0433
-//! use bough::{Runtime, Source};
+//! use bough::prelude::*;
 //!
 //! let (graph, edge) = Runtime::build(|b| {
 //!     let (mut numbers, _in) = b.input::<u32>();
@@ -141,7 +141,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// [`Leaf`](crate::Leaf); one that is not `Trace` does not compile:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// #[derive(Clone)]
     /// struct Label(&'static str);
@@ -256,7 +256,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Rc` event here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -305,7 +305,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// type; a `Threaded` graph refuses an `Rc` output here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -358,7 +358,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// stream of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -391,7 +391,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Rc`:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -465,7 +465,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (words, words_in) = b.input::<Vec<char>>();
@@ -502,7 +502,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// must accept both types; a `Threaded` graph refuses `Rc` elements:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -552,7 +552,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (counts, counts_loop) = b.stream_loop::<u32>();
@@ -585,7 +585,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Threaded` graph refuses `Rc` events:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {
@@ -637,7 +637,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// // Each event opens a counter of its own: an input and a hold over it.
     /// let (mut graph, edge) = Runtime::build(|b| {
@@ -682,7 +682,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// accept its type; a `Threaded` graph refuses a construct of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {

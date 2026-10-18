@@ -6,7 +6,8 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::{Runtime, Source, Trace, Tracer};
+use bough::Tracer;
+use bough::prelude::*;
 
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
     let log = Rc::new(RefCell::new(Vec::new()));

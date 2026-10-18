@@ -21,7 +21,8 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use bough::{Build, Cell, CellRef, Input, Lift, Runtime, Shared, Source, Trace, Tracer};
+use bough::Tracer;
+use bough::prelude::*;
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

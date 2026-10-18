@@ -72,7 +72,7 @@
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
 //!
-//! use bough::{Runtime, Source};
+//! use bough::prelude::*;
 //!
 //! struct Click;
 //!

@@ -13,7 +13,7 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{Runtime, Source, Trace};
+use bough::prelude::*;
 
 type User = String;
 

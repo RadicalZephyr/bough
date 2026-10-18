@@ -17,7 +17,7 @@ mod sealed {
 /// `(cf, ca).lift(b, |f, a| f(a))` with the cell holding `Fn(&A) -> B`.
 ///
 /// ```
-/// use bough::{Cell, Runtime, Lift, Source};
+/// use bough::prelude::*;
 ///
 /// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (price, price_in) = b.input_cell(3u32);
@@ -40,7 +40,7 @@ mod sealed {
 /// stepped does not exist until commit, so it has no stream view.
 ///
 /// ```compile_fail,E0599
-/// use bough::{Runtime, Lift, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (names, _names_in) = b.input::<String>();

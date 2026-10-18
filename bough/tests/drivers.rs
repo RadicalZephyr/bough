@@ -25,7 +25,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bough::{InputSlot, IoError, Mode, RemoteIo, Runtime, Source, Threaded};
+use bough::prelude::*;
+use bough::{InputSlot, IoError, RemoteIo};
 
 // ---- begin thread driver
 

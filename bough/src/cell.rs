@@ -28,7 +28,7 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 /// types are the only [`TokenRef`]s.
 ///
 /// ```
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (mut graph, edge) = Runtime::build(|b| {
 ///     let (joins, joins_in) = b.input::<String>();
@@ -149,7 +149,7 @@ impl<A: 'static> State<A> {
     /// does not exist until commit either, so it has no stream view.
     ///
     /// ```compile_fail,E0599
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (_graph, edge) = Runtime::build(|b| {
     ///     let (names, _names_in) = b.input::<String>();
@@ -178,7 +178,7 @@ impl<A: 'static> Cell<A> {
     /// expression, and a caller that wants to keep a value clones it:
     ///
     /// ```
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (graph, edge) = Runtime::build(|b| {
     ///     let (a, _a_in) = b.input_cell(1u32);
@@ -298,7 +298,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (english, english_in) = b.input_cell("hello".to_string());
@@ -350,7 +350,7 @@ impl<A: 'static> Cell<State<A>> {
     /// step, and every cell reader accepts it.
     ///
     /// ```
-    /// use bough::{Runtime, Source, State};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (names, names_in) = b.input::<String>();
@@ -394,7 +394,7 @@ where
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (keys, keys_in) = b.input::<char>();
@@ -447,7 +447,7 @@ where
     /// stream from several places, [`share`](crate::Source::share) it.
     ///
     /// ```should_panic
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (_graph, edge) = Runtime::build(|b| {
     ///     let (clicks, _clicks_in) = b.input::<u32>();
@@ -463,7 +463,7 @@ where
     /// graph refuses a switch between streams of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::Runtime;
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {

@@ -14,10 +14,8 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::{
-    Cell, Input, InputSlot, IoError, IoTransactionError, PumpError, RemoteIo, Runtime, SendError,
-    Source, Stream, TokenError,
-};
+use bough::prelude::*;
+use bough::{InputSlot, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {

@@ -5,9 +5,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use bough::{
-    Cell, CollectionPolicy, Input, Lift, Portable, Runtime, Shared, Source, Stream, Trace, Tracer,
-};
+use bough::prelude::*;
+use bough::{CollectionPolicy, Tracer};
 
 // ----------------------------------------------------------- the smallest core
 

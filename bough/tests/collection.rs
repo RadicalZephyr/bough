@@ -15,10 +15,8 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::{
-    Build, Cell, CollectionPolicy, Input, Lift, Listener, PoisonedError, Runtime, SendError,
-    Shared, Source, State, Stream, TokenError, Trace, Tracer, TransactionSendError,
-};
+use bough::prelude::*;
+use bough::{CollectionPolicy, PoisonedError, SendError, TokenError, Tracer, TransactionSendError};
 
 // ----------------------------------------------------------- helpers
 

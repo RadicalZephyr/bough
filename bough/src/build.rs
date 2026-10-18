@@ -106,7 +106,7 @@ impl<M: Mode> Build<M> {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
@@ -243,7 +243,7 @@ impl<M: Mode> Build<M> {
     /// when the definition steps.
     ///
     /// ```
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
@@ -300,7 +300,7 @@ impl<M: Mode> Build<M> {
     /// may also close with a [`Cell`], giving a forward that only reads.
     ///
     /// ```
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
@@ -339,7 +339,7 @@ impl<M: Mode> Build<M> {
     /// forward's own node, so a stream loop adds no node to its definition.
     ///
     /// ```
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
     /// let (mut graph, edge) = Runtime::build(|b| {
@@ -393,7 +393,7 @@ impl<M: Mode> Build<M> {
     /// stale-token error. Here the map emits a cell nothing else names:
     ///
     /// ```
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     ///
     /// let (mut graph, edge) = Runtime::build(|b| {
     ///     let english = b.constant("hello".to_string());
@@ -493,7 +493,7 @@ impl<M: Mode> Build<M> {
 /// Consumed by `close`, so a loop cannot close twice:
 ///
 /// ```compile_fail,E0382
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
@@ -508,7 +508,7 @@ impl<M: Mode> Build<M> {
 /// It cannot be used from inside a `construct` closure either:
 ///
 /// ```compile_fail,E0507
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (graph, edge) = Runtime::build(|b| {
 ///     let (events, _in) = b.input::<u32>();
@@ -548,7 +548,7 @@ impl<A: 'static> CellLoop<A> {
 /// Its forward is a [`State`], which has no stream view:
 ///
 /// ```compile_fail,E0599
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
@@ -561,7 +561,7 @@ impl<A: 'static> CellLoop<A> {
 /// only with a `Cell`:
 ///
 /// ```compile_fail,E0308
-/// use bough::{Runtime, Source};
+/// use bough::prelude::*;
 ///
 /// let (_graph, edge) = Runtime::build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
@@ -613,7 +613,7 @@ impl<A: 'static> StreamLoop<A> {
     /// `Threaded` graph refuses a loop of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::{Runtime, Source};
+    /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let (_graph, edge) = Runtime::build_threaded(|b| {

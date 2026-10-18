@@ -35,7 +35,8 @@ use crate::engine::edge::{Drain, Lock};
 /// [`connect`](crate::Build::connect).
 ///
 /// ```
-/// use bough::{Runtime, InputSlot, Source};
+/// use bough::prelude::*;
+/// use bough::InputSlot;
 ///
 /// static PRESSES: InputSlot<u32> = InputSlot::new(|a, b| a + b);
 ///
