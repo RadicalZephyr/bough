@@ -267,6 +267,7 @@ impl<M: Mode> Build<M> {
 #[cfg(test)]
 mod tests {
     use crate::build::Build;
+    use crate::context::Context;
     use crate::mode::Local;
 
     /// The re-entry stamp, alone. Graph code closes a cycle through reads

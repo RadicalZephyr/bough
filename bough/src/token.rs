@@ -27,7 +27,7 @@ pub(crate) mod sealed {
 
 /// Anything that names a node: the five token types.
 ///
-/// Used by [`Build::depends`](crate::Build::depends), which takes a slice of
+/// Used by [`Context::depends`](crate::Context::depends), which takes a slice of
 /// any tokens. Every token type is also [`Trace`](crate::Trace), visiting
 /// itself, so [`Runtime::anchor`](crate::Runtime::anchor), which takes any
 /// value that holds tokens, takes a single token too.

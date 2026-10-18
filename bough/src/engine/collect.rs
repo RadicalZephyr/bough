@@ -220,6 +220,7 @@ impl<M: Mode> Build<M> {
 
 #[cfg(test)]
 mod tests {
+    use crate::context::Context;
     use alloc::vec::Vec;
 
     use crate::build::Build;

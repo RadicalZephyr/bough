@@ -15,7 +15,7 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bough::{Cell, CellRef, Input, Io, IoError, Runtime, Source};
+use bough::{Cell, CellRef, Context, Input, Io, IoError, Runtime, Source};
 use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;

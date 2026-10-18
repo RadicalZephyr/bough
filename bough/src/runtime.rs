@@ -17,6 +17,7 @@ use core::task::Waker;
 
 use crate::Build;
 use crate::cell::CellRef;
+use crate::context::Context;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
 #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -84,12 +85,12 @@ use crate::trace::{Trace, Tracer};
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
 /// the cells a chain snapshots or gates on, and what
-/// [`Build::depends`](crate::Build::depends) declares. Collection frees
+/// [`Context::depends`](crate::Context::depends) declares. Collection frees
 /// every node no root reaches, and a token naming a freed node is stale:
 /// its next use is an error, never a read of another node. So a token that
 /// leaves a transaction as data lives only while the graph reaches it or it
 /// left anchored: a construct that sends a row out anchors it with
-/// [`Build::anchor`](crate::Build::anchor). Collection is automatic by
+/// [`Context::anchor`](crate::Context::anchor). Collection is automatic by
 /// default, runs after each whole unit, and never inside a transaction; see
 /// [`CollectionPolicy`].
 pub struct Runtime<M: Mode = Local> {
@@ -1089,7 +1090,7 @@ impl<M: Mode> Runtime<M> {
 
     /// With `true`, collects after every unit, whatever the policy, so that
     /// a closure capture that should have been declared with
-    /// [`depends`](crate::Build::depends), or a token that left a transaction
+    /// [`depends`](crate::Context::depends), or a token that left a transaction
     /// without an anchor, is a stale-token error the first time the code
     /// runs rather than whenever the automatic policy happens to collect. A
     /// test setting: a unit then costs a collection.
@@ -2361,6 +2362,7 @@ impl RemoteTransaction<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::context::Context;
     use crate::engine::slot;
     use crate::{Local, Runtime, Source};
 

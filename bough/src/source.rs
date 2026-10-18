@@ -87,7 +87,7 @@ pub(crate) mod sealed {
 /// traces the chain once, when it builds the node: what the trace finds
 /// besides the dependency is the node's reach (RFD 3), since the chain never
 /// changes after it is built. A closure is opaque to the trace, so a token a
-/// closure captures is declared with [`Build::depends`].
+/// closure captures is declared with [`Context::depends`](crate::Context::depends).
 pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// The type of each event.
     type Event;
@@ -493,7 +493,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The output does not depend on the input, since it fires in a later
     /// instant, so a loop through a split is legal (the rule is
-    /// [`Build::cell_loop`]'s), and each round of it runs one level of
+    /// [`Context::cell_loop`](crate::Context::cell_loop)'s), and each round of it runs one level of
     /// child transactions deeper.
     ///
     /// A split is two nodes: one takes the event, the other emits the
@@ -545,7 +545,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The output does not depend on the input, since it fires in a later
     /// instant, so a loop through a defer is legal (the rule is
-    /// [`Build::cell_loop`]'s), and each round of it runs one child
+    /// [`Context::cell_loop`](crate::Context::cell_loop)'s), and each round of it runs one child
     /// transaction deeper. A countdown:
     ///
     /// ```
@@ -629,7 +629,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// Tokens created inside `f` flow out as data. An input built there
     /// reaches I/O code as an event, and a collection runs after each unit,
     /// so `f` anchors what it sends out with
-    /// [`Build::anchor`](crate::Build::anchor). Since a listener has no graph
+    /// [`Context::anchor`](crate::Context::anchor). Since a listener has no graph
     /// access, I/O code attaches listeners and sends to the input after
     /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the edge.
     ///
@@ -660,7 +660,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     ///
     /// Each run of `f` is a scope, as the build closure is: a loop declared
-    /// in it must close in it, under the rule [`Build::cell_loop`] states,
+    /// in it must close in it, under the rule [`Context::cell_loop`](crate::Context::cell_loop) states,
     /// and a loop left open is a panic when `f` returns. So are a close,
     /// and a switch's first link, that would make a same-instant cycle, the
     /// switch's at the end of the transaction's new nodes. Each of these
@@ -672,7 +672,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// a switch reads keeps the screen it holds, and a screen the switch
     /// has left, which nothing names any more, is collected (RFD 3). A
     /// token the closure captures that this construct's stream does not
-    /// depend on is declared with [`Build::depends`], or it may be
+    /// depend on is declared with [`Context::depends`](crate::Context::depends), or it may be
     /// collected before the closure's next run uses it; a token the
     /// closure hands I/O code as data is anchored there. A construct whose
     /// chain does not fire costs what a chain node costs.

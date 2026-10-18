@@ -22,6 +22,10 @@
 
 #[cfg(target_has_atomic = "ptr")]
 pub use crate::Threaded;
+
+// The builder's methods stay in scope where an explicit import of another
+// `Context`, such as `std::task::Context`, shadows the name above.
+pub use crate::Context as _;
 pub use crate::{
     Accepts, Anchored, Build, Cell, CellRef, Context, Input, Lift, Listener, Local, Mode, Portable,
     Runtime, Shared, Source, State, Stores, Stream, TokenRef, Trace,

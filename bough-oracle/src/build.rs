@@ -204,8 +204,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
-    Build, Cell, CellLoop, CellRef, InputSlot, Lift, Listener, Local, Node, Runtime, Shared,
-    Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
+    Build, Cell, CellLoop, CellRef, Context, InputSlot, Lift, Listener, Local, Node, Runtime,
+    Shared, Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
 
 use crate::program::{

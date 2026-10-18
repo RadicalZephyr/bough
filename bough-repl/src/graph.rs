@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bough::{Anchored, Build, Cell, Input, Runtime, Source};
+use bough::{Anchored, Build, Cell, Context, Input, Runtime, Source};
 
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};

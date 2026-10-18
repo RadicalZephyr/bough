@@ -36,7 +36,7 @@
 //! [`Anchor`], or a registration waiting in a handle's queue, and
 //! [`Runtime::build`] anchors what its closure returns; what it reaches is
 //! its dependencies, the tokens [`Trace`] finds in a stateful cell's
-//! value, and what [`Build::depends`] declares; and collection, automatic
+//! value, and what [`Context::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and

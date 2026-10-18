@@ -263,6 +263,7 @@ impl<M: Mode> Build<M> {
 mod tests {
     use super::Walk;
     use crate::build::Build;
+    use crate::context::Context;
     use crate::mode::Local;
     use crate::source::Source;
 

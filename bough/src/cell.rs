@@ -326,7 +326,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// alive with the switch, and the outer's value names the inner it
     /// selects. An inner not selected is alive only if something else names
     /// it: a closure that selects among cells it captured declares them
-    /// with [`depends`](Build::depends), as above, or a deselected inner is
+    /// with [`depends`](crate::Context::depends), as above, or a deselected inner is
     /// collected and selecting it again is a stale-token error.
     ///
     /// A loop closed through the outer or the current inner at the same
@@ -425,7 +425,7 @@ where
     ///
     /// The selection is not a dependency, since the switch reads the cell's
     /// value from before the instant, so a loop through it is legal (the
-    /// rule is [`Build::cell_loop`]'s): the switch may select, through a
+    /// rule is [`Context::cell_loop`](crate::Context::cell_loop)'s): the switch may select, through a
     /// hold, a stream built from its own events. Its only dependency is the
     /// stream it currently follows, which may not depend on the switch. The
     /// switch links that stream at its first evaluation, in the transaction

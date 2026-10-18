@@ -21,16 +21,21 @@ use core::any::Any;
 
 use crate::build::{Build, CellLoop, StateLoop, StreamLoop};
 use crate::cell::CellRef;
+use crate::engine::COMMITS;
+use crate::engine::nodes::DefaultNode;
+use crate::engine::nodes::cell::{ConstantNode, HoldNode};
 use crate::engine::nodes::construct::{ConstructNode, Direct, ThroughPortable};
+use crate::engine::nodes::stream::{CoalescingInput, SlotNode};
 use crate::engine::{Data, Kind, NodeOps};
+use crate::guard::Liveness;
 #[cfg(target_has_atomic = "ptr")]
 use crate::mode::Threaded;
 use crate::mode::{Accepts, Erase, Local, Mode};
-use crate::runtime::Anchored;
+use crate::runtime::{Anchor, Anchored};
 use crate::source::{Node, Source};
 use crate::token::Token;
 use crate::token::{Cell, Input, State, Stream, TokenRef};
-use crate::trace::Trace;
+use crate::trace::{Trace, Tracer};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -98,8 +103,13 @@ impl<E> Plane<E> {
 }
 
 /// What every node-creating operation takes: a [`Build`] of either mode,
-/// or a [`Portable`] view of one. Sealed; its items are hidden.
-pub trait Context: sealed::Sealed {
+/// or a [`Portable`] view of one. Sealed.
+///
+/// Its public methods are the builder's own operations, `input`,
+/// `constant`, the loops, `depends` and `anchor`, defined once here for
+/// every context; the rest are hidden. [`prelude`](crate::prelude) brings
+/// it into scope.
+pub trait Context: sealed::Sealed + Sized {
     /// What [`Stores::erase`] makes: the mode's carrier for a `Build`, a
     /// `Send` box for a `Portable`.
     #[doc(hidden)]
@@ -191,6 +201,331 @@ pub trait Context: sealed::Sealed {
     /// A cell's value before the instant.
     #[doc(hidden)]
     fn read<A: 'static>(&self, t: Token) -> &A;
+
+    /// A loop's forward node, open in the current scope: a cell loop's,
+    /// or with `stream` a stream loop's.
+    #[doc(hidden)]
+    fn open_forward(&mut self, stream: bool) -> Token;
+
+    /// Adds to what node `n` reaches beyond its dependencies.
+    #[doc(hidden)]
+    fn extend_reach(&mut self, n: u32, reach: Vec<u32>);
+
+    /// Roots the nodes until the anchor this returns drops.
+    #[doc(hidden)]
+    fn root(&mut self, nodes: Vec<u32>) -> Anchor;
+
+    // ----- the builder's own operations, one definition for every context
+
+    /// Anchors what a build closure or a
+    /// [`construct`](crate::Source::construct) closure sends out to I/O
+    /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
+    /// [`Anchored`] it returns carries the value, and roots every token its
+    /// [`Trace`] finds until the last of its clones drops. A construct that
+    /// returns one sends its row to the edge already rooted, so the I/O code
+    /// that receives it needn't anchor it.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use bough::prelude::*;
+    ///
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         b.anchor((bumps_in, count))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// let (open_in, opened) = edge.keep();
+    /// graph.set_collect_after_every_unit(true); // a test setting
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
+    /// graph.send(bumps_in, 5);
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        // Every token is checked before any is rooted.
+        let nodes: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .map(|t| self.check_token(t))
+            .collect();
+        Anchored::new(value, self.root(nodes))
+    }
+
+    /// A stream driven from I/O code, and the token that drives it.
+    ///
+    /// The input's slot is created here and keeps an event nobody consumed
+    /// until the next send, so the mode must accept the event type.
+    fn input<A: 'static>(&mut self) -> (Stream<A>, Input<A>)
+    where
+        Self: Stores<A>,
+    {
+        let data = Plane::Slot(<Self as Stores<A>>::erase(Erase::Slot));
+        let n = self.make::<SlotNode<A>>(Kind::Input, data, Box::new([]), &[], 0, Vec::new());
+        let t = self.token_of(n);
+        (Stream::from_token(t), Input::from_token(t))
+    }
+
+    /// An input that may be sent more than once in a transaction; `f`
+    /// combines the values, first send on the left.
+    fn input_coalescing<A, F>(&mut self, f: F) -> (Stream<A>, Input<A>)
+    where
+        A: 'static,
+        F: Fn(A, A) -> A + 'static,
+        Self: Stores<A> + Stores<F>,
+    {
+        let data = Plane::Slot(<Self as Stores<A>>::erase(Erase::Slot));
+        let parts: Box<[Self::Erased]> = Box::new([<Self as Stores<F>>::erase(Erase::Value(f))]);
+        let n = self.make::<CoalescingInput<A, F>>(Kind::Input, data, parts, &[], 0, Vec::new());
+        let t = self.token_of(n);
+        (Stream::from_token(t), Input::from_token(t))
+    }
+
+    /// A cell driven from I/O code: a hold over an input, two nodes.
+    fn input_cell<A>(&mut self, initial: A) -> (Cell<A>, Input<A>)
+    where
+        A: Trace + 'static,
+        Self: Stores<A>,
+    {
+        let (stream, input) = self.input::<A>();
+        (hold_input(self, stream, initial), input)
+    }
+
+    /// A cell driven from I/O code whose input coalesces.
+    fn input_cell_coalescing<A, F>(&mut self, initial: A, f: F) -> (Cell<A>, Input<A>)
+    where
+        A: Trace + 'static,
+        F: Fn(A, A) -> A + 'static,
+        Self: Stores<A> + Stores<F>,
+    {
+        let (stream, input) = self.input_coalescing::<A, F>(f);
+        (hold_input(self, stream, initial), input)
+    }
+
+    /// A cell that never changes.
+    fn constant<A>(&mut self, value: A) -> Cell<A>
+    where
+        A: Trace + 'static,
+        Self: Stores<A>,
+    {
+        let data = Plane::Cell(<Self as Stores<A>>::erase(Erase::Cell(value)));
+        let n =
+            self.make::<ConstantNode<A>>(Kind::Constant, data, Box::new([]), &[], 0, Vec::new());
+        Cell::from_token(self.token_of(n))
+    }
+
+    /// A stream that never fires.
+    ///
+    /// Its node stores nothing: a reader checks the stamp before the slot,
+    /// and this node's stamp never matches.
+    fn never<A: 'static>(&mut self) -> Stream<A> {
+        let n =
+            self.make::<DefaultNode>(Kind::Never, Plane::Empty, Box::new([]), &[], 0, Vec::new());
+        Stream::from_token(self.token_of(n))
+    }
+
+    /// Declares a cell loop: a forward token usable anywhere, and the closer
+    /// that later defines it. Once closed, the forward token is its
+    /// definition: it reads through to the definition's value and steps
+    /// when the definition steps.
+    ///
+    /// ```
+    /// use bough::prelude::*;
+    ///
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
+    ///     let (ticks, ticks_in) = b.input::<()>();
+    ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
+    ///     count_loop.close(b, next);                             // close
+    ///     (ticks_in, count)
+    /// });
+    /// let (ticks_in, count) = edge.keep();
+    /// graph.send(ticks_in, ());
+    /// graph.send(ticks_in, ());
+    /// assert_eq!(*graph.sample(count), 2);
+    /// ```
+    ///
+    /// A loop is legal when the dependency graph stays acyclic, which
+    /// [`close`](CellLoop::close) checks. Reading a cell's value with
+    /// `snapshot`, `gate` or `sample` is not a dependency, since the read
+    /// sees the value from before the instant. Neither is a
+    /// `switch_stream`'s selection, nor [`depends`](Context::depends); and
+    /// the output of a `split` or a `defer` fires in a later child instant,
+    /// so it does not depend on the input. Every other use of a cell is a
+    /// dependency: `map_cell`, `lift`, the stream views `steps` and
+    /// `steps_with_current`, and a `switch_cell`'s outer and the inner it
+    /// selects. So a definition
+    /// may reach its own forward token only through those reads, as `next`
+    /// does above through a snapshot. A hold does not delay its stream
+    /// views, so closing with `hold(merge(ticks, forward.steps(b).map(f)))`
+    /// is refused, and so is closing with `forward.map_cell(f)` or with a
+    /// `lift` over the forward: each defines the cell's value at an instant
+    /// in terms of itself at that instant. The panic names the nodes of the
+    /// cycle.
+    ///
+    /// A loop must close in the scope that declared it: the build closure,
+    /// or one run of a `construct` closure. A loop still open when that
+    /// scope ends is a panic there, and so is sampling the forward token
+    /// before the loop is closed, since there is no value to return. A
+    /// definition that is a [`State`] closes a
+    /// [`state_loop`](Context::state_loop) instead.
+    fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
+        let token = self.open_forward(false);
+        (Cell::from_token(token), CellLoop::new(token))
+    }
+
+    /// Declares a loop whose definition is a [`State`]: the state of an
+    /// in-place accumulator, or a read-through cell over one. The forward
+    /// token is a `State` too, so no stream view of it can exist, which
+    /// such a definition could not give a value after the instant to. It
+    /// may also close with a [`Cell`], giving a forward that only reads.
+    ///
+    /// ```
+    /// use bough::prelude::*;
+    ///
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
+    ///     let (names, names_in) = b.input::<String>();
+    ///     // A name joins once: the snapshot reads the members before the instant.
+    ///     let joined = names
+    ///         .snapshot(members, |name, m| (!m.contains(&name)).then_some(name))
+    ///         .filter_map(|name| name)
+    ///         .accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
+    ///     members_loop.close(b, joined);
+    ///     (names_in, members)
+    /// });
+    /// let (names_in, members) = edge.keep();
+    /// graph.send(names_in, "ada".to_string());
+    /// graph.send(names_in, "ada".to_string());
+    /// graph.send(names_in, "grace".to_string());
+    /// assert_eq!(*graph.sample(members), ["ada", "grace"]);
+    /// ```
+    ///
+    /// The rule is the one [`cell_loop`](Context::cell_loop) states: the
+    /// dependency graph stays acyclic, and a read of a cell's value from
+    /// before the instant is not a dependency.
+    fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
+        let token = self.open_forward(false);
+        (State::from_token(token), StateLoop::new(token))
+    }
+
+    /// Declares a stream loop: a linear forward stream, and the closer that
+    /// later defines it with any chain. Close fuses the chain into the
+    /// forward's own node, so a stream loop adds no node to its definition.
+    ///
+    /// ```
+    /// use bough::prelude::*;
+    ///
+    /// // A running total, fed back through a hold that a snapshot reads.
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let (sums, sums_loop) = b.stream_loop::<u32>();
+    ///     let total = sums.hold(b, 0u32);
+    ///     let (numbers, numbers_in) = b.input::<u32>();
+    ///     sums_loop.close(b, numbers.snapshot(total, |n, t| n + t));
+    ///     (numbers_in, total)
+    /// });
+    /// let (numbers_in, total) = edge.keep();
+    /// graph.send(numbers_in, 2);
+    /// graph.send(numbers_in, 3);
+    /// assert_eq!(*graph.sample(total), 5);
+    /// ```
+    ///
+    /// The rule is the one [`cell_loop`](Context::cell_loop) states: the
+    /// dependency graph stays acyclic, and a read of a cell's value from
+    /// before the instant is not a dependency. So the definition above may
+    /// snapshot a hold of the forward, and a loop through such a read needs
+    /// no `split` or `defer`. A loop through a `split` or a `defer` is legal
+    /// too, since their output fires in a later child instant. A chain
+    /// whose events come from the forward itself, or from anything that
+    /// depends on it, a hold's `steps` included, is refused at close.
+    fn stream_loop<A: 'static>(&mut self) -> (Stream<A>, StreamLoop<A>) {
+        let token = self.open_forward(true);
+        (Stream::from_token(token), StreamLoop::new(token))
+    }
+
+    /// Declares that `node` keeps alive every token the values in `on`
+    /// hold, for a closure that captures them (RFD 3). Each value is traced,
+    /// so a token counts wherever it sits: bare, or in a struct, a tuple or a
+    /// collection at any depth. One declaration per closure; the slice is
+    /// heterogeneous, and takes references, so a linear stream is not
+    /// consumed.
+    ///
+    /// A node is alive while a root reaches it: the build closure's return
+    /// value, a live listener, or a live [`Anchor`](crate::Anchor). What a
+    /// node reaches is what it depends on, the tokens in a stateful cell's
+    /// committed value and in its chain, and what this declares. A closure
+    /// is the one thing the collector cannot look inside, so every value a
+    /// `move` closure captures that holds a token is declared here, on the
+    /// node the closure belongs to, which for an adapter is the node its
+    /// chain becomes. Otherwise a node the closure names is collected when
+    /// nothing else reaches it, and the closure's next use of its token is a
+    /// stale-token error. Here the map emits a cell nothing else names:
+    ///
+    /// ```
+    /// use bough::prelude::*;
+    ///
+    /// let (mut graph, edge) = Runtime::build(|b| {
+    ///     let english = b.constant("hello".to_string());
+    ///     let french = b.constant("bonjour".to_string());
+    ///     let (pick, pick_in) = b.input::<bool>();
+    ///     let language = pick
+    ///         .map(move |fr| if fr { french } else { english })
+    ///         .hold(b, english);
+    ///     // The hold names `english` in its value, but `french` only in
+    ///     // its closure until the first pick.
+    ///     b.depends(&language, &[&french, &english]);
+    ///     (pick_in, language.switch_cell(b))
+    /// });
+    /// let (pick_in, shown) = edge.keep();
+    /// graph.set_collect_after_every_unit(true); // a test setting
+    /// graph.send(pick_in, true);
+    /// assert_eq!(graph.sample(shown), "bonjour");
+    /// ```
+    ///
+    /// Declaring a token the node reaches anyway costs one entry. A
+    /// declaration is reach, not a dependency: it orders no evaluation and
+    /// can close no cycle. Every token is checked before any is recorded,
+    /// and a stale or foreign one panics, as every build-time use of one
+    /// does.
+    fn depends(&mut self, node: &impl TokenRef, on: &[&dyn Trace]) {
+        let n = self.check_token(node.token());
+        let mut tracer = Tracer::new();
+        for value in on {
+            value.trace(&mut tracer);
+        }
+        let reach: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .map(|token| self.check_token(token))
+            .collect();
+        self.extend_reach(n, reach);
+    }
+}
+
+/// The hold of an input cell. Its chain is the input's own stream token,
+/// which is `Send` whatever `A` is, so it is erased through `erase_send`
+/// and needs no `Stores<Stream<A>>` bound.
+fn hold_input<C, A>(build: &mut C, stream: Stream<A>, initial: A) -> Cell<A>
+where
+    C: Context + Stores<A>,
+    A: Trace + 'static,
+{
+    let input = build.check_token(stream.token);
+    let data = Plane::Cell(<C as Stores<A>>::erase(Erase::Cell(initial)));
+    let parts: Box<[C::Erased]> = Box::new([C::erase_send(stream)]);
+    let n =
+        build.make::<HoldNode<Stream<A>>>(Kind::Hold, data, parts, &[input], COMMITS, Vec::new());
+    Cell::from_token(build.token_of(n))
 }
 
 /// Whether a context may store a `T`: a `Build<M>` when `M:`
@@ -330,6 +665,26 @@ impl<M: Mode> Context for Build<M> {
     fn read<A: 'static>(&self, t: Token) -> &A {
         let i = Build::check(self, t);
         Build::value::<A>(self, i)
+    }
+
+    fn open_forward(&mut self, stream: bool) -> Token {
+        if stream {
+            Build::stream_loop_node(self)
+        } else {
+            Build::loop_node(self)
+        }
+    }
+
+    fn extend_reach(&mut self, n: u32, reach: Vec<u32>) {
+        self.store.cold[n as usize].reach.extend(reach);
+    }
+
+    fn root(&mut self, nodes: Vec<u32>) -> Anchor {
+        let flag = Liveness::new(&self.released);
+        for i in nodes {
+            self.anchors.push((i, flag.clone()));
+        }
+        Anchor::new(Some(flag))
     }
 }
 
@@ -490,55 +845,6 @@ impl<'a> Portable<'a> {
     }
 }
 
-/// The builder's own operations, for what is `Send`: each matches on the
-/// builder and calls its method of the same name.
-impl Portable<'_> {
-    /// [`Build::input`], for a `Send` event.
-    pub fn input<A: Send + 'static>(&mut self) -> (Stream<A>, Input<A>) {
-        dispatch!(&mut self.arm, |b, _into| b.input::<A>())
-    }
-
-    /// [`Build::input_cell`], for a `Send` value.
-    pub fn input_cell<A: Trace + Send + 'static>(&mut self, initial: A) -> (Cell<A>, Input<A>) {
-        dispatch!(&mut self.arm, |b, _into| b.input_cell(initial))
-    }
-
-    /// [`Build::constant`], for a `Send` value.
-    pub fn constant<A: Trace + Send + 'static>(&mut self, value: A) -> Cell<A> {
-        dispatch!(&mut self.arm, |b, _into| b.constant(value))
-    }
-
-    /// [`Build::never`].
-    pub fn never<A: 'static>(&mut self) -> Stream<A> {
-        dispatch!(&mut self.arm, |b, _into| b.never::<A>())
-    }
-
-    /// [`Build::cell_loop`].
-    pub fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
-        dispatch!(&mut self.arm, |b, _into| b.cell_loop::<A>())
-    }
-
-    /// [`Build::state_loop`].
-    pub fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
-        dispatch!(&mut self.arm, |b, _into| b.state_loop::<A>())
-    }
-
-    /// [`Build::stream_loop`].
-    pub fn stream_loop<A: 'static>(&mut self) -> (Stream<A>, StreamLoop<A>) {
-        dispatch!(&mut self.arm, |b, _into| b.stream_loop::<A>())
-    }
-
-    /// [`Build::depends`].
-    pub fn depends(&mut self, node: &impl TokenRef, on: &[&dyn Trace]) {
-        dispatch!(&mut self.arm, |b, _into| b.depends(node, on))
-    }
-
-    /// [`Build::anchor`].
-    pub fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
-        dispatch!(&mut self.arm, |b, _into| b.anchor(value))
-    }
-}
-
 impl sealed::Sealed for Portable<'_> {}
 
 impl<T: Send> Stores<T> for Portable<'_> {
@@ -662,5 +968,17 @@ impl<'a> Context for Portable<'a> {
 
     fn read<A: 'static>(&self, t: Token) -> &A {
         dispatch!(&self.arm, |b, _into| b.read::<A>(t))
+    }
+
+    fn open_forward(&mut self, stream: bool) -> Token {
+        dispatch!(&mut self.arm, |b, _into| b.open_forward(stream))
+    }
+
+    fn extend_reach(&mut self, n: u32, reach: Vec<u32>) {
+        dispatch!(&mut self.arm, |b, _into| b.extend_reach(n, reach))
+    }
+
+    fn root(&mut self, nodes: Vec<u32>) -> Anchor {
+        dispatch!(&mut self.arm, |b, _into| b.root(nodes))
     }
 }

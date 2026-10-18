@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use bough::{Build, Cell, Input, Runtime, Trace};
+use bough::{Build, Cell, Context, Input, Runtime, Trace};
 
 /// The static description of a binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
