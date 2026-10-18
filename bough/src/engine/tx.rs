@@ -11,7 +11,7 @@
 use core::mem;
 
 use super::{COMMITS, Entry, Kind, LISTENERS, ON_STACK, START, Tx, WATCHED, slot, slot_mut};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::mode::Mode;
 
 /// A second send to a non-coalescing input in one transaction.
@@ -36,7 +36,7 @@ fn rotation(seed: u64, tx: Tx, n: u32, len: usize) -> usize {
     (z % len as u64) as usize
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     // ----------------------------------------------------------- slots
 
     /// A linear read: the event, moved out of the slot, if the node fired
@@ -220,7 +220,7 @@ impl<M: Mode> Build<M> {
     /// with one dependent costs one push and one pop.
     fn mark_walk<const SHUFFLE: bool>(&mut self, seed: u64) {
         let tx = self.tx;
-        let Build { store, s, .. } = self;
+        let BuildContext { store, s, .. } = self;
         let starts = s.starts.len();
         let first = if SHUFFLE && starts > 1 {
             rotation(seed, tx, u32::MAX, starts)
@@ -350,7 +350,7 @@ impl<M: Mode> Build<M> {
     /// value or clear their memo; switches relink.
     fn commit(&mut self) {
         {
-            let Build { store, s, .. } = self;
+            let BuildContext { store, s, .. } = self;
             count!(s, commits, s.commits.len());
             for &n in &s.commits {
                 let parts = store.parts[n as usize]

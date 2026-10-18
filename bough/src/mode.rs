@@ -49,8 +49,8 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::build::Build;
-use crate::context::{AllOps, Portable};
+use crate::build::BuildContext;
+use crate::builder::{AllOps, Portable};
 use crate::engine::{CellValue, Memo, NodeOps, Ops};
 #[cfg(target_has_atomic = "ptr")]
 use crate::io::NoIo;
@@ -90,14 +90,14 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     fn erase_send<T: Send + 'static>(value: T) -> Self::Carrier;
 
     /// This mode's functions for the node type `N`, which has functions
-    /// for every mode, so that code generic over the context can name it.
+    /// for every mode, so that code generic over the builder can name it.
     #[doc(hidden)]
     fn ops_of<N: AllOps>() -> &'static Ops<Self>;
 
     /// A [`Portable`] view of a builder of this mode, for a portable
     /// core's `construct` closure.
     #[doc(hidden)]
-    fn portable(build: &mut Build<Self>) -> Portable<'_>;
+    fn portable(build: &mut BuildContext<Self>) -> Portable<'_>;
 
     /// Registers what a `RemoteIo` queued into a runtime of this mode, at
     /// the pump.
@@ -181,7 +181,7 @@ pub enum Erase<T> {
 /// use bough::prelude::*;
 /// use bough::Map;
 ///
-/// fn plus<M, F>(b: &mut Build<M>, numbers: Stream<u32>, f: F) -> Cell<u32>
+/// fn plus<M, F>(b: &mut BuildContext<M>, numbers: Stream<u32>, f: F) -> Cell<u32>
 /// where
 ///     M: Mode + Accepts<u32> + Accepts<Map<Stream<u32>, F>>,
 ///     F: Fn(u32) -> u32 + 'static,
@@ -196,7 +196,7 @@ pub enum Erase<T> {
 /// ```compile_fail,E0277
 /// use bough::prelude::*;
 ///
-/// fn plus_one<M: Mode + Accepts<u32>>(b: &mut Build<M>, numbers: Stream<u32>) -> Cell<u32> {
+/// fn plus_one<M: Mode + Accepts<u32>>(b: &mut BuildContext<M>, numbers: Stream<u32>) -> Cell<u32> {
 ///     numbers.map(|n| n + 1).hold(b, 0) // error: M: Accepts<Map<Stream<u32>, {closure}>>
 /// }
 /// ```
@@ -252,7 +252,7 @@ impl Mode for Local {
     fn ops_of<N: AllOps>() -> &'static Ops<Local> {
         &<N as NodeOps<Local>>::OPS
     }
-    fn portable(build: &mut Build<Local>) -> Portable<'_> {
+    fn portable(build: &mut BuildContext<Local>) -> Portable<'_> {
         Portable::local(build)
     }
     #[cfg(all(
@@ -294,7 +294,7 @@ impl Mode for Threaded {
     fn ops_of<N: AllOps>() -> &'static Ops<Threaded> {
         &<N as NodeOps<Threaded>>::OPS
     }
-    fn portable(build: &mut Build<Threaded>) -> Portable<'_> {
+    fn portable(build: &mut BuildContext<Threaded>) -> Portable<'_> {
         Portable::threaded(build)
     }
     #[cfg(any(feature = "std", feature = "critical-section"))]

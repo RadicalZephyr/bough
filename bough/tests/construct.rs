@@ -81,13 +81,13 @@ fn run(graph: &mut Runtime, sends: &[Send], reversed: bool) {
 
 /// A cell holding every step of `cell`, built beside it, so that it
 /// records the step at the instant it is built too.
-fn log_steps<A: Clone + Trace + 'static>(b: &mut Build, cell: Cell<A>) -> Cell<Vec<A>> {
+fn log_steps<A: Clone + Trace + 'static>(b: &mut BuildContext, cell: Cell<A>) -> Cell<Vec<A>> {
     let steps = cell.steps(b);
     log_events(b, steps)
 }
 
 /// A cell holding every event of `stream`.
-fn log_events<S>(b: &mut Build, stream: S) -> Cell<Vec<S::Event>>
+fn log_events<S>(b: &mut BuildContext, stream: S) -> Cell<Vec<S::Event>>
 where
     S: Source,
     S::Event: Clone + Trace + 'static,
@@ -1015,7 +1015,7 @@ struct Event {
 
 /// A screen built at the instant n is navigated to: the clicks it sees,
 /// each numbered by a counter built with it, as a linear stream.
-fn screen(b: &mut Build, clicks: Shared<u32>, n: u32) -> Stream<Event> {
+fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Event> {
     let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
     clicks
         .snapshot(count, move |click, k| Event {
@@ -1320,7 +1320,7 @@ fn a_construct_closure_that_swaps_its_build_context_panics_and_poisons() {
 fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
     const MESSAGE: &str = "a same-instant cycle through a switch_cell read before its first link";
     for through_a_map_cell in [false, true] {
-        let cycle = move |b: &mut Build| {
+        let cycle = move |b: &mut BuildContext| {
             let (forward, closer) = b.cell_loop::<u32>();
             let selected = if through_a_map_cell {
                 forward.map_cell(b, |v| v + 1)
@@ -1393,7 +1393,7 @@ fn a_node_pulled_before_a_switch_s_first_link_that_reads_around_a_cycle_panics()
 /// second, fourth and eighth passed, and meets none of them again.
 #[test]
 fn a_read_through_unlinked_switches_without_a_cycle_reads_the_selection() {
-    fn chain(b: &mut Build, n: u32) -> u32 {
+    fn chain(b: &mut BuildContext, n: u32) -> u32 {
         let mut selected = b.constant(n);
         for _ in 0..8 {
             selected = b.constant(selected).switch_cell(b);

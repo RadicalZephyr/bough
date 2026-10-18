@@ -4,7 +4,7 @@
 //! and the evaluation loop settles it without user code: it steps iff one
 //! of its inputs stepped. Its function runs when the cell is read, into
 //! the memo, a `OnceCell` holding the value before the instant, so that a
-//! read through `&Build` can fill it; and when a steps view asks for the
+//! read through `&BuildContext` can fill it; and when a steps view asks for the
 //! value after the instant, into the post-instant value, from its inputs'
 //! values after the instant. At commit a cell that stepped promotes that
 //! value into the memo, since the value after instant t is the value
@@ -16,7 +16,7 @@ use core::any::Any;
 use core::cell::OnceCell;
 
 use super::Marker;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::engine::{Data, Memo, NodeOps, Ops, Passed, memo_mut};
 use crate::mode::{Carrier, Mode};
 
@@ -26,11 +26,11 @@ use crate::mode::{Carrier, Mode};
 pub(crate) trait ReadFn<V, R>: 'static {
     /// The function of the inputs' values before the instant, read as
     /// steps of a read that has passed what `passed` says.
-    fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32], passed: Passed) -> R;
+    fn values<M: Mode>(&self, b: &BuildContext<M>, inputs: &[u32], passed: Passed) -> R;
 
     /// The function of the inputs' values after the instant. Every input
     /// has been prepared.
-    fn posts<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R;
+    fn posts<M: Mode>(&self, b: &BuildContext<M>, inputs: &[u32]) -> R;
 }
 
 macro_rules! read_fn {
@@ -39,11 +39,11 @@ macro_rules! read_fn {
         where
             F: Fn($(&$v),+) -> R + 'static,
         {
-            fn values<M: Mode>(&self, b: &Build<M>, inputs: &[u32], passed: Passed) -> R {
+            fn values<M: Mode>(&self, b: &BuildContext<M>, inputs: &[u32], passed: Passed) -> R {
                 self($(b.value_through::<$v>(inputs[$i], passed)),+)
             }
 
-            fn posts<M: Mode>(&self, b: &Build<M>, inputs: &[u32]) -> R {
+            fn posts<M: Mode>(&self, b: &BuildContext<M>, inputs: &[u32]) -> R {
                 self($(b.post::<$v>(inputs[$i])),+)
             }
         }
@@ -67,7 +67,7 @@ pub(crate) struct ReadNode<V, R, F>(Marker<(V, R, F)>);
 /// back to this cell while it fills the memo would fill it again for ever,
 /// since the `OnceCell` panics on re-entry only once an inner fill
 /// returns; what the read has passed stops it (`Passed`).
-fn value_read<M, V, R, F>(b: &Build<M>, me: u32, passed: Passed) -> &dyn Any
+fn value_read<M, V, R, F>(b: &BuildContext<M>, me: u32, passed: Passed) -> &dyn Any
 where
     M: Mode,
     V: 'static,
@@ -94,7 +94,7 @@ where
 /// inputs' values after the instant for a steps view, and kept beside the
 /// memo until commit. The memo itself still holds the value before the
 /// instant, which a snapshot in the same instant may read.
-fn post_read<M, V, R, F>(b: &mut Build<M>, me: u32)
+fn post_read<M, V, R, F>(b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     V: 'static,
@@ -102,7 +102,7 @@ where
     F: ReadFn<V, R>,
 {
     let v = {
-        let b: &Build<M> = b;
+        let b: &BuildContext<M> = b;
         let Data::ReadThrough { f, .. } = &b.store.data[me as usize] else {
             unreachable!("bough engine: node {me} is not a read-through cell")
         };

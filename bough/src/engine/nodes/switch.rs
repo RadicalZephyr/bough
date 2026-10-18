@@ -47,7 +47,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::Marker;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::cell::CellRef;
 use crate::engine::{
     Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_LINEAR, WATCHED, clear_slot,
@@ -63,7 +63,12 @@ pub(crate) struct SwitchCellNode<C>(Marker<C>);
 /// The caller has prepared the outer before asking for the value after. A
 /// read before it is a step of the read that asked, which has passed what
 /// `passed` says.
-fn inner_cell<M: Mode, C: CellRef>(b: &Build<M>, outer: u32, post: bool, passed: Passed) -> Token {
+fn inner_cell<M: Mode, C: CellRef>(
+    b: &BuildContext<M>,
+    outer: u32,
+    post: bool,
+    passed: Passed,
+) -> Token {
     let inner = if post {
         b.post::<C>(outer)
     } else {
@@ -89,7 +94,7 @@ pub(crate) struct SwitchStreamNode<S>(Marker<S>);
 /// dependencies were made sure of, and queues a relink, since the outer
 /// may step at this instant too, which nothing else would notice. Then, at
 /// every instant, it forwards its current inner's event.
-fn eval_switch_stream<M: Mode, S: Node>(_: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_switch_stream<M: Mode, S: Node>(_: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     S::Event: 'static,
 {
@@ -107,7 +112,12 @@ where
 
 /// The token of the stream the outer holds before the instant, or after
 /// it.
-fn inner_stream<M: Mode, S: Node>(b: &Build<M>, outer: u32, post: bool, passed: Passed) -> Token {
+fn inner_stream<M: Mode, S: Node>(
+    b: &BuildContext<M>,
+    outer: u32,
+    post: bool,
+    passed: Passed,
+) -> Token {
     let inner = if post {
         b.post::<S>(outer)
     } else {
@@ -139,7 +149,7 @@ fn inner_at(kind: Kind) -> usize {
     }
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// A switch_cell over `outer`, a cell holding `C` tokens. Its one
     /// dependency until its first evaluation is the outer.
     pub(crate) fn switch_cell_node<C: CellRef>(&mut self, outer: Token) -> Token {

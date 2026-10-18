@@ -15,9 +15,9 @@ use core::any::Any;
 use core::ops::Deref;
 use core::task::Waker;
 
-use crate::Build;
+use crate::BuildContext;
+use crate::builder::Builder;
 use crate::cell::CellRef;
-use crate::context::Context;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
 #[cfg(any(feature = "std", feature = "critical-section"))]
@@ -85,16 +85,16 @@ use crate::trace::{Trace, Tracer};
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
 /// the cells a chain snapshots or gates on, and what
-/// [`Context::depends`](crate::Context::depends) declares. Collection frees
+/// [`Builder::depends`](crate::Builder::depends) declares. Collection frees
 /// every node no root reaches, and a token naming a freed node is stale:
 /// its next use is an error, never a read of another node. So a token that
 /// leaves a transaction as data lives only while the graph reaches it or it
 /// left anchored: a construct that sends a row out anchors it with
-/// [`Context::anchor`](crate::Context::anchor). Collection is automatic by
+/// [`Builder::anchor`](crate::Builder::anchor). Collection is automatic by
 /// default, runs after each whole unit, and never inside a transaction; see
 /// [`CollectionPolicy`].
 pub struct Runtime<M: Mode = Local> {
-    build: Build<M>,
+    build: BuildContext<M>,
     /// The build context's count of released guards as the last
     /// collection found it.
     released_before: usize,
@@ -112,8 +112,10 @@ pub struct Runtime<M: Mode = Local> {
 
 /// Transaction zero: nothing is started, so the new-node phase runs every
 /// node the closure built, dependencies first.
-fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtime<M>, Anchored<R>) {
-    let mut build = Build::<M>::new();
+fn build_graph<M: Mode, R: Trace>(
+    f: impl FnOnce(&mut BuildContext<M>) -> R,
+) -> (Runtime<M>, Anchored<R>) {
+    let mut build = BuildContext::<M>::new();
     let id = build.graph_id;
     build.begin();
     build.push_scope();
@@ -144,7 +146,7 @@ fn build_graph<M: Mode, R: Trace>(f: impl FnOnce(&mut Build<M>) -> R) -> (Runtim
 }
 
 impl Runtime<Local> {
-    /// Builds a `Local` graph. The closure gets the only [`Build`] context;
+    /// Builds a `Local` graph. The closure gets the only [`BuildContext`];
     /// whatever it returns is the edge of the graph, which comes back
     /// [`Anchored`], so `R: Trace`. [`keep`](Anchored::keep) it to hold the
     /// edge for the graph's life, or drop it to let collection free what
@@ -157,7 +159,7 @@ impl Runtime<Local> {
     /// after any unit: what the build made that nothing reaches is gone
     /// before I/O code sees the runtime.
     pub fn build<R: Trace>(
-        f: impl FnOnce(&mut Build<Local>) -> R,
+        f: impl FnOnce(&mut BuildContext<Local>) -> R,
     ) -> (Runtime<Local>, Anchored<R>) {
         build_graph(f)
     }
@@ -205,7 +207,7 @@ impl Runtime<Threaded> {
     /// a defaulted type parameter takes no part in inferring an associated
     /// function.
     pub fn build_threaded<R: Trace + Send>(
-        f: impl FnOnce(&mut Build<Threaded>) -> R,
+        f: impl FnOnce(&mut BuildContext<Threaded>) -> R,
     ) -> (Runtime<Threaded>, Anchored<R>) {
         build_graph(f)
     }
@@ -231,7 +233,7 @@ const SILENT: &str = "bough: a listener tied to a transaction heard nothing: its
 
 /// A stream listener's call: take the event from a linear stream, clone it
 /// from a shared one.
-fn call_stream<M, S, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
+fn call_stream<M, S, F>(e: &mut Entry<M>, b: &mut BuildContext<M>, n: u32)
 where
     M: Mode,
     S: Node,
@@ -246,7 +248,7 @@ where
 /// closure out of its slot, and spends the entry before the closure runs,
 /// so that a closure that drops its own guard doesn't count a second
 /// release.
-fn call_stream_once<M, S, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
+fn call_stream_once<M, S, F>(e: &mut Entry<M>, b: &mut BuildContext<M>, n: u32)
 where
     M: Mode,
     S: Node,
@@ -264,7 +266,7 @@ where
 
 /// A cell listener's call: the committed value, which after commit is the
 /// value the step produced.
-fn call_cell<M, A, F>(e: &mut Entry<M>, b: &mut Build<M>, n: u32)
+fn call_cell<M, A, F>(e: &mut Entry<M>, b: &mut BuildContext<M>, n: u32)
 where
     M: Mode,
     A: 'static,
@@ -1090,7 +1092,7 @@ impl<M: Mode> Runtime<M> {
 
     /// With `true`, collects after every unit, whatever the policy, so that
     /// a closure capture that should have been declared with
-    /// [`depends`](crate::Context::depends), or a token that left a transaction
+    /// [`depends`](crate::Builder::depends), or a token that left a transaction
     /// without an anchor, is a stale-token error the first time the code
     /// runs rather than whenever the automatic policy happens to collect. A
     /// test setting: a unit then costs a collection.
@@ -1415,7 +1417,7 @@ impl<M: Mode> Runtime<M> {
     /// on the interrupt itself gives `Waker::noop()`. A waker that would
     /// wake the same task as the one registered changes nothing.
     pub fn set_waker(&mut self, waker: Waker) {
-        let Build { edge, io, .. } = &mut self.build;
+        let BuildContext { edge, io, .. } = &mut self.build;
         if edge.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
             return;
         }
@@ -1496,7 +1498,7 @@ struct Tied<M: Mode> {
 
 /// A cell once-listener's call, tied to the end of a unit, which reads the
 /// cell's value then.
-type TiedCall<M> = Box<dyn FnOnce(&Build<M>)>;
+type TiedCall<M> = Box<dyn FnOnce(&BuildContext<M>)>;
 
 impl<M: Mode> Tied<M> {
     fn new() -> Self {
@@ -1520,7 +1522,7 @@ impl<M: Mode> Tied<M> {
     /// Ties a call with cell `i`'s value to the end of the unit.
     fn cell_once<A: 'static>(&mut self, i: u32, f: impl FnOnce(&A) + 'static) {
         self.cells
-            .push(Box::new(move |b: &Build<M>| f(b.value::<A>(i))));
+            .push(Box::new(move |b: &BuildContext<M>| f(b.value::<A>(i))));
     }
 }
 
@@ -2362,7 +2364,7 @@ impl RemoteTransaction<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::context::Context;
+    use crate::builder::Builder;
     use crate::engine::slot;
     use crate::{Local, Runtime, Source};
 

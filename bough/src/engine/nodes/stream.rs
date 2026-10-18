@@ -4,7 +4,7 @@
 use core::any::Any;
 
 use super::Marker;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::engine::edge::fire_input;
 use crate::engine::{Cx, Data, NodeOps, Ops, clear_slot, part, slot_mut};
 use crate::mode::Mode;
@@ -68,7 +68,7 @@ where
 /// still open. Close replaces the program with the definition's chain.
 pub(crate) struct OpenLoopNode;
 
-fn eval_open_loop<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, me: u32) {
+fn eval_open_loop<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, me: u32) {
     panic!("bough engine: stream loop {me} ran before it was closed")
 }
 
@@ -84,7 +84,7 @@ impl<M: Mode> NodeOps<M> for OpenLoopNode {
 /// monomorphized `pull`.
 pub(crate) struct ChainNode<S>(Marker<S>);
 
-fn eval_chain<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_chain<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     S::Event: 'static,
 {
@@ -109,7 +109,7 @@ where
 /// halves, for the two half nodes to take apart.
 pub(crate) struct UnzipNode<S, A, B>(Marker<(S, A, B)>);
 
-fn eval_unzip<M, S, A, B>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_unzip<M, S, A, B>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source<Event = (A, B)>,
@@ -142,7 +142,7 @@ pub(crate) struct FirstHalf<A, B>(Marker<(A, B)>);
 
 fn eval_first_half<M: Mode, A: 'static, B: 'static>(
     _: &mut [M::Carrier],
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     me: u32,
 ) {
     if let Some(first) = b.take_half::<A, B, A>(me, |pair| pair.0.take()) {
@@ -163,7 +163,7 @@ pub(crate) struct SecondHalf<A, B>(Marker<(A, B)>);
 
 fn eval_second_half<M: Mode, A: 'static, B: 'static>(
     _: &mut [M::Carrier],
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     me: u32,
 ) {
     if let Some(second) = b.take_half::<A, B, B>(me, |pair| pair.1.take()) {
@@ -184,7 +184,7 @@ impl<M: Mode, A: 'static, B: 'static> NodeOps<M> for SecondHalf<A, B> {
 /// function pointer keeping the left event.
 pub(crate) struct MergeNode<S, T, F>(Marker<(S, T, F)>);
 
-fn eval_merge<M, S, T, F>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_merge<M, S, T, F>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,
@@ -230,7 +230,7 @@ where
 /// const)` in `Value`, because the node runs once.
 pub(crate) struct StepsNode<A, const CURRENT: bool>(Marker<A>);
 
-fn eval_steps<M, A, const CURRENT: bool>(_: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_steps<M, A, const CURRENT: bool>(_: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     A: Clone + 'static,

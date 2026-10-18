@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bough::{Anchored, Build, Cell, Context, Input, Runtime, Source};
+use bough::{Anchored, BuildContext, Builder, Cell, Input, Runtime, Source};
 
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};
@@ -46,12 +46,12 @@ impl Def {
     /// literal in it, and none for a binding it names. The cells under the
     /// top one are plain, with no binding's switch: nothing names them, so
     /// nothing redefines them.
-    pub fn build(self, b: &mut Build) -> Node {
+    pub fn build(self, b: &mut BuildContext) -> Node {
         self.build_with(b, &[])
     }
 
     /// [`build`](Def::build), inside a call whose arguments are `params`.
-    fn build_with(self, b: &mut Build, params: &[Node]) -> Node {
+    fn build_with(self, b: &mut BuildContext, params: &[Node]) -> Node {
         match self {
             Def::Apply(wire, args) => {
                 let args = build_all(b, args, params);
@@ -68,7 +68,7 @@ impl Def {
     }
 }
 
-fn build_all(b: &mut Build, defs: Vec<Def>, params: &[Node]) -> Vec<Node> {
+fn build_all(b: &mut BuildContext, defs: Vec<Def>, params: &[Node]) -> Vec<Node> {
     defs.into_iter()
         .map(|def| def.build_with(b, params))
         .collect()
@@ -149,7 +149,7 @@ impl Default for Graph {
 }
 
 /// The root construct's closure.
-fn make(b: &mut Build, command: Command) -> Made {
+fn make(b: &mut BuildContext, command: Command) -> Made {
     match command {
         Command::Input(literal) => {
             let made = literal.input(b);
@@ -165,7 +165,7 @@ fn make(b: &mut Build, command: Command) -> Made {
 
 /// A rebindable binding over its first definition: [`bind`] for the cell
 /// type of the definition's arm.
-fn bind_node(b: &mut Build, first: Node) -> (Node, Input<Def>) {
+fn bind_node(b: &mut BuildContext, first: Node) -> (Node, Input<Def>) {
     match first {
         Node::IntCell(cell) => {
             let (cell, redefine) = bind(b, cell, Node::int);
@@ -188,7 +188,7 @@ fn bind_node(b: &mut Build, first: Node) -> (Node, Input<Def>) {
 /// concrete cell from a definition's [`Node`]: the hold is typed, so every
 /// definition the construct builds must be of the binding's type.
 fn bind<A: 'static>(
-    b: &mut Build,
+    b: &mut BuildContext,
     first: Cell<A>,
     cell: fn(Node) -> Cell<A>,
 ) -> (Cell<A>, Input<Def>) {

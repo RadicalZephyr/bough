@@ -1,7 +1,7 @@
 //! `lift` over a tuple of cells (RFD 4).
 
+use crate::builder::{Builder, Stores};
 use crate::cell::{CellKind, CellRef, read_through};
-use crate::context::{Context, Stores};
 
 mod sealed {
     pub trait Sealed {}
@@ -61,7 +61,7 @@ pub trait Lift<F, R>: sealed::Sealed + Sized {
     /// instant are one step of the result.
     fn lift<X>(self, build: &mut X, f: F) -> Self::Output
     where
-        X: Context + Stores<F> + Stores<R>;
+        X: Builder + Stores<F> + Stores<R>;
 }
 
 /// The kind of a lifted cell: the join of its inputs' kinds, a `State` if
@@ -87,7 +87,7 @@ macro_rules! lift_tuple {
 
             fn lift<X>(self, build: &mut X, f: F) -> Self::Output
             where
-                X: Context + Stores<F> + Stores<R>,
+                X: Builder + Stores<F> + Stores<R>,
             {
                 let inputs = [$(build.check_token(self.$i.token()),)+];
                 let token = read_through::<X, ($($cell::Value,)+), R, F>(build, &inputs, f);

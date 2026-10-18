@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::mem;
 
 use super::{Data, LISTENERS, LIVE, NOOP, WATCHED, cell, in_place, slot_mut};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::io::IoQueue;
 use crate::mode::Mode;
 use crate::trace::{Trace, Tracer};
@@ -64,7 +64,7 @@ pub(crate) fn trace_in_place<M: Mode, S: Trace + 'static>(
     in_place::<M, S>(d).trace(tracer);
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Collects every node that no root reaches, and returns how many it
     /// freed. The released anchors are taken out of `anchors` here.
     pub(crate) fn collect(&mut self) -> usize {
@@ -220,10 +220,10 @@ impl<M: Mode> Build<M> {
 
 #[cfg(test)]
 mod tests {
-    use crate::context::Context;
+    use crate::builder::Builder;
     use alloc::vec::Vec;
 
-    use crate::build::Build;
+    use crate::build::BuildContext;
     use crate::engine::TokenFault;
     use crate::guard::Liveness;
     use crate::mode::Local;
@@ -231,7 +231,7 @@ mod tests {
 
     /// Builds `n` constants in a transaction of their own and returns their
     /// tokens.
-    fn constants(b: &mut Build<Local>, n: u32) -> Vec<Token> {
+    fn constants(b: &mut BuildContext<Local>, n: u32) -> Vec<Token> {
         b.begin();
         b.push_scope();
         let tokens = (0..n).map(|k| b.constant(k).token).collect();
@@ -241,7 +241,7 @@ mod tests {
     }
 
     /// Collects with `roots` anchored for this collection alone.
-    fn collect_with(b: &mut Build<Local>, roots: &[Token]) -> usize {
+    fn collect_with(b: &mut BuildContext<Local>, roots: &[Token]) -> usize {
         let flag = Liveness::new(&b.released);
         for &token in roots {
             let i = b.lookup(token).expect("a live root");
@@ -264,7 +264,7 @@ mod tests {
     /// next generation, so the old token is stale.
     #[test]
     fn freed_slots_are_reused_oldest_first_under_a_new_generation() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         let first = constants(&mut b, 3);
         assert_eq!(indices(&first), [1, 2, 3]);
         assert_eq!(collect_with(&mut b, &first[..2]), 1);
@@ -284,7 +284,7 @@ mod tests {
     /// setting its generation directly.
     #[test]
     fn a_slot_freed_at_the_maximum_generation_is_retired() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         let first = constants(&mut b, 2);
         let slot = first[0].index;
         b.store.cold[slot as usize].generation = u32::MAX - 1;

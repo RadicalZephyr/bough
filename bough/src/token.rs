@@ -1,7 +1,7 @@
 //! Tokens: the names I/O code and graph code hold for nodes.
 //!
 //! A token is an index, a generation and a graph id. It has no method that
-//! creates a node without a [`Build`](crate::Build) context. `Cell`, `State`,
+//! creates a node without a [`BuildContext`](crate::BuildContext). `Cell`, `State`,
 //! `Input` and `Shared` are `Copy` for every event type; `Stream` is
 //! move-only because it is linear (RFD 4).
 
@@ -27,7 +27,7 @@ pub(crate) mod sealed {
 
 /// Anything that names a node: the five token types.
 ///
-/// Used by [`Context::depends`](crate::Context::depends), which takes a slice of
+/// Used by [`Builder::depends`](crate::Builder::depends), which takes a slice of
 /// any tokens. Every token type is also [`Trace`](crate::Trace), visiting
 /// itself, so [`Runtime::anchor`](crate::Runtime::anchor), which takes any
 /// value that holds tokens, takes a single token too.

@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{CollectionPolicy, Context, Lift, Runtime, Source};
+use crate::{Builder, CollectionPolicy, Lift, Runtime, Source};
 
 /// Builds and drives the smoke graph with one of the two graph
 /// constructors. A macro rather than a function generic over the mode: the

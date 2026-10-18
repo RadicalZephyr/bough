@@ -10,7 +10,7 @@
 //! committed value or memo that other nodes read), its program (`parts`: its
 //! fused chain and closures, which only its own evaluation touches), its
 //! static functions (`ops`) and its listeners. Evaluating node N takes N's
-//! parts out of the arena, calls N's `eval` with `&mut Build`, the whole
+//! parts out of the arena, calls N's `eval` with `&mut BuildContext`, the whole
 //! arena, and puts them back. N's data stays in the arena, so N can read
 //! itself while it runs. A linear dependency takes the event out of the
 //! dependency's slot through `&mut`, a shared one clones it through `&`.
@@ -48,7 +48,7 @@ use core::cell::OnceCell;
 
 use alloc::vec::Vec;
 
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::guard::Liveness;
 use crate::mode::{Carrier, Mode};
 use crate::token::Token;
@@ -259,13 +259,13 @@ pub enum Data<M: Mode> {
 }
 
 /// A node's program runs with the whole build context.
-pub(crate) type EvalFn<M> = fn(&mut [<M as Mode>::Carrier], &mut Build<M>, u32);
+pub(crate) type EvalFn<M> = fn(&mut [<M as Mode>::Carrier], &mut BuildContext<M>, u32);
 /// A coalescing input folds a second send into its slot.
 pub(crate) type CoalesceFn<M> = fn(&mut [<M as Mode>::Carrier], &mut Data<M>, &mut dyn Any);
 /// Collection visits the tokens a committed value holds.
 pub(crate) type TraceFn<M> = fn(&Data<M>, &[<M as Mode>::Carrier], &mut Tracer);
 /// An input starts with an event whose type its caller does not know.
-pub(crate) type FireFn<M> = fn(&mut Build<M>, u32, &mut dyn Any) -> Result<(), DoubleSend>;
+pub(crate) type FireFn<M> = fn(&mut BuildContext<M>, u32, &mut dyn Any) -> Result<(), DoubleSend>;
 
 /// A node type's static functions, monomorphized at materialization and
 /// promoted to `'static`. Entries a kind does not use are no-ops.
@@ -277,19 +277,19 @@ pub struct Ops<M: Mode> {
     pub(crate) commit: fn(&mut [M::Carrier], &mut Data<M>),
     /// A read-through cell's value before the instant, computing the memo,
     /// as a step of a read that has passed what `Passed` says.
-    pub(crate) value: for<'a> fn(&'a Build<M>, u32, Passed) -> &'a dyn Any,
+    pub(crate) value: for<'a> fn(&'a BuildContext<M>, u32, Passed) -> &'a dyn Any,
     /// A read-through cell's post-instant value, computed by `prepare`.
-    pub(crate) compute_post: fn(&mut Build<M>, u32),
+    pub(crate) compute_post: fn(&mut BuildContext<M>, u32),
     /// A stepped read-through cell at commit: promote the post-instant
     /// value into the memo, or clear the memo.
     pub(crate) settle_memo: fn(&mut Data<M>),
     /// A switch: the token inside the outer's value, before (`false`) or
     /// after (`true`) the instant; a read before it is a step of a read
     /// that has passed what `Passed` says.
-    pub(crate) inner: fn(&Build<M>, u32, bool, Passed) -> Token,
+    pub(crate) inner: fn(&BuildContext<M>, u32, bool, Passed) -> Token,
     /// A split or defer capture: starts its output with the next element
     /// of its top entry, and says whether there was one.
-    pub(crate) emit_child: fn(&mut [M::Carrier], &mut Build<M>, u32) -> bool,
+    pub(crate) emit_child: fn(&mut [M::Carrier], &mut BuildContext<M>, u32) -> bool,
     /// A split or defer capture: the level that pushed its top entry is
     /// done, so it pops it.
     pub(crate) end_children: fn(&mut [M::Carrier]),
@@ -313,24 +313,24 @@ pub struct Ops<M: Mode> {
     pub(crate) fire: FireFn<M>,
 }
 
-fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) {}
+fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, _: u32) {}
 fn no_commit<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>) {}
-fn no_value<M: Mode>(_: &Build<M>, n: u32, _: Passed) -> &dyn Any {
+fn no_value<M: Mode>(_: &BuildContext<M>, n: u32, _: Passed) -> &dyn Any {
     unreachable!("bough engine: node {n} is not a read-through cell")
 }
-fn no_compute_post<M: Mode>(_: &mut Build<M>, _: u32) {}
+fn no_compute_post<M: Mode>(_: &mut BuildContext<M>, _: u32) {}
 fn no_settle_memo<M: Mode>(_: &mut Data<M>) {}
-fn no_inner<M: Mode>(_: &Build<M>, n: u32, _: bool, _: Passed) -> Token {
+fn no_inner<M: Mode>(_: &BuildContext<M>, n: u32, _: bool, _: Passed) -> Token {
     unreachable!("bough engine: node {n} is not a switch")
 }
-fn no_emit_child<M: Mode>(_: &mut [M::Carrier], _: &mut Build<M>, _: u32) -> bool {
+fn no_emit_child<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, _: u32) -> bool {
     false
 }
 fn no_end_children<M: Mode>(_: &mut [M::Carrier]) {}
 fn no_coalesce<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>, _: &mut dyn Any) {}
 fn no_trace<M: Mode>(_: &Data<M>, _: &[M::Carrier], _: &mut Tracer) {}
 fn no_clear_slot<M: Mode>(_: &mut Data<M>) {}
-fn no_fire<M: Mode>(_: &mut Build<M>, n: u32, _: &mut dyn Any) -> Result<(), DoubleSend> {
+fn no_fire<M: Mode>(_: &mut BuildContext<M>, n: u32, _: &mut dyn Any) -> Result<(), DoubleSend> {
     unreachable!("bough engine: node {n} is not an input")
 }
 
@@ -359,7 +359,7 @@ pub trait NodeOps<M: Mode> {
 }
 
 /// A listener's monomorphized call on node `n`.
-pub(crate) type ListenerCall<M> = fn(&mut Entry<M>, &mut Build<M>, u32);
+pub(crate) type ListenerCall<M> = fn(&mut Entry<M>, &mut BuildContext<M>, u32);
 
 /// One listener: the liveness its guard shares, its erased closure, and
 /// its call.
@@ -378,7 +378,7 @@ pub(crate) struct Entry<M: Mode> {
 /// the crate and constructible only by the engine, so graph code cannot
 /// call `pull`.
 pub struct Cx<'a, M: Mode> {
-    pub(crate) b: &'a mut Build<M>,
+    pub(crate) b: &'a mut BuildContext<M>,
 }
 
 impl<M: Mode> Cx<'_, M> {

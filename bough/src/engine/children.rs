@@ -28,10 +28,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::{Data, Kind, Ops};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::mode::Mode;
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Creates a capture and its output, whose slot `slot` is and whose
     /// functions `output_ops` are. The capture depends on its chain's
     /// dependency and reads the cells the chain reads. The output has no
@@ -150,7 +150,7 @@ impl<M: Mode> Build<M> {
 
     /// Every capture of a finished level pops the entry it pushed there.
     fn end_level(&mut self, level: usize) {
-        let Build { store, s, .. } = self;
+        let BuildContext { store, s, .. } = self;
         for &capture in &s.levels[level] {
             let n = capture as usize;
             let parts = store.parts[n]
@@ -164,17 +164,17 @@ impl<M: Mode> Build<M> {
 
 #[cfg(test)]
 mod tests {
-    use crate::context::Context;
+    use crate::builder::Builder;
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use crate::build::Build;
+    use crate::build::BuildContext;
     use crate::engine::part;
     use crate::mode::Local;
     use crate::source::Source;
 
     /// The entries a capture has not popped.
-    fn entries<T: 'static>(b: &mut Build<Local>, output: u32) -> usize {
+    fn entries<T: 'static>(b: &mut BuildContext<Local>, output: u32) -> usize {
         let capture = b.store.cold[output as usize].partner as usize;
         let parts = b.store.parts[capture].as_mut().expect("parts in place");
         part::<Local, Vec<Option<T>>>(&mut parts[1]).len()
@@ -188,7 +188,7 @@ mod tests {
     fn levels_and_capture_stacks_are_empty_between_transactions() {
         type Rows = vec::IntoIter<Vec<u32>>;
         type Items = vec::IntoIter<u32>;
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         b.push_scope();
         let (lists, lists_in) = b.input::<Vec<Vec<u32>>>();

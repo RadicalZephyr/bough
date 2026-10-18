@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use bough::{Cell, Context, Input, Io, IoError, Runtime, Shared, Source, Trace};
+use bough::{Builder, Cell, Input, Io, IoError, Runtime, Shared, Source, Trace};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 

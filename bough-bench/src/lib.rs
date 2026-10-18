@@ -10,7 +10,7 @@ use std::cell::Cell as StdCell;
 use std::hint::black_box;
 use std::rc::Rc;
 
-use bough::{Cell, Context, Input, Listener, Runtime, Shared, Source};
+use bough::{Builder, Cell, Input, Listener, Runtime, Shared, Source};
 
 /// Rounds of [`payload`]: about 55 ns of the user's own work on the machine
 /// the stage 1 bar was measured on.

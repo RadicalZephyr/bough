@@ -90,7 +90,7 @@ fn clamp(d: i64, cur: u32, max: u32) -> u32 {
 
 /// The health-and-shield slice (bevy-sodium 0003 stage 2). With
 /// `Drive::Full` it is the sodium-rust#52 reproduction.
-fn slice(b: &mut Build, drive: Drive, lifts: Lifts, reads: Reads) -> Slice {
+fn slice(b: &mut BuildContext, drive: Drive, lifts: Lifts, reads: Reads) -> Slice {
     let (heal_s, heal) = b.input::<u32>();
     let (damage_s, damage) = b.input::<u32>();
     let (level_up_s, level_up) = b.input::<u32>();

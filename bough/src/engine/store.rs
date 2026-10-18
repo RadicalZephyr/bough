@@ -16,7 +16,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use super::{Cold, Data, Entry, Hot, Kind, LIVE, NOOP, Ops, Relations, Tx};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::mode::Mode;
 use crate::token::Token;
 
@@ -156,7 +156,7 @@ pub(crate) enum TokenFault {
     Stale,
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Validates a token: graph id, liveness, generation.
     pub(crate) fn lookup(&self, t: Token) -> Result<u32, TokenFault> {
         if t.graph != self.graph_id {

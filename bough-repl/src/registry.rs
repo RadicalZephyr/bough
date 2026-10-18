@@ -8,12 +8,12 @@
 //! cell's function poisons the runtime: arithmetic wraps, and `div 0` and
 //! `mod 0` are 0.
 
-use bough::{Build, Lift};
+use bough::{BuildContext, Lift};
 
 use crate::ty::{Node, Type};
 
 /// Builds a function's cell from its argument cells, inside a `construct`.
-pub type Wire = fn(&mut Build, &[Node]) -> Node;
+pub type Wire = fn(&mut BuildContext, &[Node]) -> Node;
 
 /// A registry entry.
 pub struct Function {
@@ -292,6 +292,6 @@ const FUNCTIONS: &[Function] = &[
 ];
 
 /// An `Int, Int -> Int` function: a lift of `f` over both cells.
-fn int2(b: &mut Build, args: &[Node], f: fn(&i64, &i64) -> i64) -> Node {
+fn int2(b: &mut BuildContext, args: &[Node], f: fn(&i64, &i64) -> i64) -> Node {
     Node::IntCell((args[0].int(), args[1].int()).lift(b, f))
 }

@@ -2,7 +2,7 @@
 //!
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
-//! node-creating operation needs a [`Build`] context, which only exists
+//! node-creating operation needs a [`BuildContext`], which only exists
 //! inside [`Runtime::build`] and inside [`Source::construct`] closures; sending,
 //! listening and sampling from outside live on [`Runtime`], which only exists
 //! once the build closure has returned. The design is recorded in the RFDs
@@ -36,7 +36,7 @@
 //! [`Anchor`], or a registration waiting in a handle's queue, and
 //! [`Runtime::build`] anchors what its closure returns; what it reaches is
 //! its dependencies, the tokens [`Trace`] finds in a stateful cell's
-//! value, and what [`Context::depends`] declares; and collection, automatic
+//! value, and what [`Builder::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a
 //! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
@@ -106,9 +106,9 @@ extern crate alloc;
 extern crate std;
 
 mod build;
+mod builder;
 mod capabilities;
 mod cell;
-mod context;
 mod engine;
 mod error;
 mod guard;
@@ -131,9 +131,9 @@ mod trace;
 /// `#[trace(skip)]` for a field that cannot hold tokens.
 #[cfg(feature = "derive")]
 pub use bough_derive::Trace;
-pub use build::{Build, CellLoop, StateLoop, StreamLoop};
+pub use build::{BuildContext, CellLoop, StateLoop, StreamLoop};
+pub use builder::{Builder, Portable, Stores};
 pub use cell::CellRef;
-pub use context::{Context, Portable, Stores};
 #[cfg(feature = "statistics")]
 pub use engine::Statistics;
 pub use error::{

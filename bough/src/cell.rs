@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 
 use alloc::vec::Vec;
 
-use crate::context::{Context, Plane, Stores};
+use crate::builder::{Builder, Plane, Stores};
 use crate::engine::Kind;
 use crate::engine::nodes::read::{ReadFn, ReadNode};
 use crate::engine::nodes::stream::StepsNode;
@@ -115,7 +115,7 @@ impl CellKind for NoSteps {
 /// has no program.
 pub(crate) fn read_through<C, V, R, F>(build: &mut C, inputs: &[u32], f: F) -> Token
 where
-    C: Context + Stores<F> + Stores<R>,
+    C: Builder + Stores<F> + Stores<R>,
     V: 'static,
     R: 'static,
     F: ReadFn<V, R>,
@@ -140,7 +140,7 @@ impl<A: 'static> State<A> {
     /// state between transactions. An in-place accumulator's function runs
     /// at commit, so every read during a transaction sees the state from
     /// before it, as [`Cell::sample`] does.
-    pub fn sample<C: Context>(self, build: &C) -> &A {
+    pub fn sample<C: Builder>(self, build: &C) -> &A {
         build.read::<A>(self.token)
     }
 
@@ -161,7 +161,7 @@ impl<A: 'static> State<A> {
     /// ```
     pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> State<B>
     where
-        C: Context + Stores<F> + Stores<B>,
+        C: Builder + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
@@ -191,7 +191,7 @@ impl<A: 'static> Cell<A> {
     /// });
     /// edge.keep();
     /// ```
-    pub fn sample<C: Context>(self, build: &C) -> &A {
+    pub fn sample<C: Builder>(self, build: &C) -> &A {
         build.read::<A>(self.token)
     }
 
@@ -208,7 +208,7 @@ impl<A: 'static> Cell<A> {
     /// share one call per step.
     pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> Cell<B>
     where
-        C: Context + Stores<F> + Stores<B>,
+        C: Builder + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
@@ -237,7 +237,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// views and listeners the cell has.
     pub fn steps<C>(self, build: &mut C) -> Stream<A>
     where
-        C: Context + Stores<A>,
+        C: Builder + Stores<A>,
     {
         Stream::from_token(steps_node::<C, A, false>(self, build))
     }
@@ -253,7 +253,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// the step.
     pub fn steps_with_current<C>(self, build: &mut C) -> Stream<A>
     where
-        C: Context + Stores<A>,
+        C: Builder + Stores<A>,
     {
         Stream::from_token(steps_node::<C, A, true>(self, build))
     }
@@ -263,7 +263,7 @@ impl<A: Clone + 'static> Cell<A> {
 /// dependency is the cell, and which has no program of its own.
 fn steps_node<C, A, const CURRENT: bool>(cell: Cell<A>, build: &mut C) -> Token
 where
-    C: Context + Stores<A>,
+    C: Builder + Stores<A>,
     A: Clone + 'static,
 {
     let input = build.check_token(cell.token);
@@ -326,7 +326,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// alive with the switch, and the outer's value names the inner it
     /// selects. An inner not selected is alive only if something else names
     /// it: a closure that selects among cells it captured declares them
-    /// with [`depends`](crate::Context::depends), as above, or a deselected inner is
+    /// with [`depends`](crate::Builder::depends), as above, or a deselected inner is
     /// collected and selecting it again is a stale-token error.
     ///
     /// A loop closed through the outer or the current inner at the same
@@ -337,7 +337,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// may be a loop that is not closed yet. Its first link and every move
     /// to another inner check that no cycle forms, and one that does is a
     /// panic that poisons the graph, naming the cycle's nodes.
-    pub fn switch_cell<C: Context>(self, build: &mut C) -> Cell<A> {
+    pub fn switch_cell<C: Builder>(self, build: &mut C) -> Cell<A> {
         Cell::from_token(build.make_switch_cell::<Cell<A>>(self.token))
     }
 }
@@ -371,7 +371,7 @@ impl<A: 'static> Cell<State<A>> {
     /// graph.send(pick_in, true);
     /// assert_eq!(*graph.sample(current), ["ada"]);
     /// ```
-    pub fn switch_cell<C: Context>(self, build: &mut C) -> State<A> {
+    pub fn switch_cell<C: Builder>(self, build: &mut C) -> State<A> {
         State::from_token(build.make_switch_cell::<State<A>>(self.token))
     }
 }
@@ -425,7 +425,7 @@ where
     ///
     /// The selection is not a dependency, since the switch reads the cell's
     /// value from before the instant, so a loop through it is legal (the
-    /// rule is [`Context::cell_loop`](crate::Context::cell_loop)'s): the switch may select, through a
+    /// rule is [`Builder::cell_loop`](crate::Builder::cell_loop)'s): the switch may select, through a
     /// hold, a stream built from its own events. Its only dependency is the
     /// stream it currently follows, which may not depend on the switch. The
     /// switch links that stream at its first evaluation, in the transaction
@@ -475,7 +475,7 @@ where
     /// ```
     pub fn switch_stream<C>(self, build: &mut C) -> Stream<S::Event>
     where
-        C: Context + Stores<S::Event>,
+        C: Builder + Stores<S::Event>,
     {
         let slot = <C as Stores<S::Event>>::erase(Erase::Slot);
         Stream::from_token(build.make_switch_stream::<S>(self.token, slot))

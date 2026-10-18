@@ -47,7 +47,7 @@ fn text(payload: &(dyn Any + Send)) -> String {
 }
 
 /// A cell holding every event of `stream`.
-fn log_events<S>(b: &mut Build, stream: S) -> Cell<Vec<S::Event>>
+fn log_events<S>(b: &mut BuildContext, stream: S) -> Cell<Vec<S::Event>>
 where
     S: Source,
     S::Event: Clone + Trace + 'static,
@@ -112,7 +112,7 @@ struct Counts {
 /// drives the handles are dropped and a collection must leave exactly the
 /// inputs' nodes, and the tokens of what it freed stale.
 fn build_drive_drop<L: Trace + 'static>(
-    build: impl FnOnce(&mut Build) -> (Vec<Input<u32>>, L) + 'static,
+    build: impl FnOnce(&mut BuildContext) -> (Vec<Input<u32>>, L) + 'static,
     listen: impl FnOnce(&mut Runtime, &L) -> Vec<Listener>,
     drive: impl Fn(&mut Runtime, &[Input<u32>], u32),
     stale: impl FnOnce(&mut Runtime, &L) -> bool,
@@ -339,7 +339,7 @@ type Shown = (u32, u32, u32);
 
 /// A screen of stage 6's navigation: a counter over the clicks, built with
 /// it, and a linear stream of what the screen shows, two nodes.
-fn screen(b: &mut Build, clicks: Shared<u32>, n: u32) -> Stream<Shown> {
+fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Shown> {
     let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
     clicks
         .snapshot(count, move |click, k| (n, click, k + 1))
@@ -695,7 +695,7 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
             let clicks = clicks.share(b);
             let (timer, timer_in) = b.input::<u32>();
             // Odd pages consume the clicks; even pages are quiet.
-            let page = move |b: &mut Build, n: u32| -> Shared<(u32, u32)> {
+            let page = move |b: &mut BuildContext, n: u32| -> Shared<(u32, u32)> {
                 if n % 2 == 1 {
                     clicks.map(move |c| (n, c)).share(b)
                 } else {

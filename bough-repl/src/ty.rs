@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use bough::{Build, Cell, Context, Input, Runtime, Trace};
+use bough::{BuildContext, Builder, Cell, Input, Runtime, Trace};
 
 /// The static description of a binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,7 +97,7 @@ impl Literal {
     }
 
     /// A constant cell holding the literal.
-    pub fn constant(self, b: &mut Build) -> Node {
+    pub fn constant(self, b: &mut BuildContext) -> Node {
         match self {
             Literal::Int(n) => Node::IntCell(b.constant(n)),
             Literal::Bool(p) => Node::BoolCell(b.constant(p)),
@@ -106,7 +106,7 @@ impl Literal {
     }
 
     /// An input cell starting at the literal, and its token.
-    pub fn input(self, b: &mut Build) -> (Node, InputToken) {
+    pub fn input(self, b: &mut BuildContext) -> (Node, InputToken) {
         match self {
             Literal::Int(n) => {
                 let (cell, input) = b.input_cell(n);

@@ -32,7 +32,7 @@ use core::fmt;
 
 use super::nodes::stream::OpenLoopNode;
 use super::{Data, Kind, NodeOps, Ops};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::mode::Mode;
 use crate::token::Token;
 
@@ -62,7 +62,7 @@ impl fmt::Display for Cycle {
     }
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Opens a scope: the build closure, or one run of a construct closure.
     pub(crate) fn push_scope(&mut self) {
         self.s.scopes.push(self.s.open_loops.len());
@@ -136,7 +136,7 @@ impl<M: Mode> Build<M> {
 
     /// Closes a stream loop: the definition's chain is fused into the node
     /// the forward names, as `node` fuses a chain into a new one. The
-    /// caller erased the slot and the chain through its context's
+    /// caller erased the slot and the chain through its builder's
     /// `Stores`, since the slot keeps an event nobody consumed between
     /// transactions.
     #[allow(clippy::too_many_arguments)]
@@ -219,7 +219,7 @@ impl<M: Mode> Build<M> {
     pub(crate) fn path(&mut self, from: u32, target: u32, walk: Walk) -> Option<Vec<u32>> {
         self.s.visit_epoch += 1;
         let epoch = self.s.visit_epoch;
-        let Build { store, s, .. } = self;
+        let BuildContext { store, s, .. } = self;
         s.search.clear();
         s.search.push((from, 0));
         store.cold[from as usize].visit = epoch;
@@ -262,8 +262,8 @@ impl<M: Mode> Build<M> {
 #[cfg(test)]
 mod tests {
     use super::Walk;
-    use crate::build::Build;
-    use crate::context::Context;
+    use crate::build::BuildContext;
+    use crate::builder::Builder;
     use crate::mode::Local;
     use crate::source::Source;
 
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a loop must close in the scope that declared it")]
     fn a_loop_closes_only_in_the_scope_that_declared_it() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         b.push_scope();
         let (_count, closer) = b.cell_loop::<u32>();
@@ -285,7 +285,7 @@ mod tests {
     /// the outer scope's open loop may close after the inner scope ends.
     #[test]
     fn an_inner_scope_checks_only_its_own_loops() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         b.push_scope();
         let (_outer, outer_loop) = b.cell_loop::<u32>();
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a loop declared in this scope was never closed")]
     fn an_inner_scope_with_an_open_loop_panics_when_it_ends() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         b.push_scope();
         b.push_scope();
@@ -318,7 +318,7 @@ mod tests {
     /// second search in a row finds nothing stale from the first.
     #[test]
     fn a_path_is_found_over_either_relation_and_reads_no_stale_visits() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         let (numbers, _numbers_in) = b.input::<u32>();
         let input = numbers.token.index;

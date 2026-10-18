@@ -4,12 +4,12 @@
 //! reads.
 
 use super::{IN_PROGRESS, Kind, NOOP, cell, in_place, memo};
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::mode::Mode;
 
 /// What a read of a cell's value has passed on its way down, for Brent's
 /// cycle detection over the switch_cells it passes. It is an argument, on
-/// the call stack, since a read through `&Build` can mark nothing in the
+/// the call stack, since a read through `&BuildContext` can mark nothing in the
 /// arena.
 ///
 /// A read follows a switch_cell to the inner its outer selects, not to its
@@ -64,7 +64,7 @@ impl Passed {
     }
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Makes sure `x` has run at this instant, running its dependencies
     /// first. The fallback for the two dynamic cases, a read of a node the
     /// order has not reached yet (a switch_cell's new inner, read after the
@@ -266,8 +266,8 @@ impl<M: Mode> Build<M> {
 
 #[cfg(test)]
 mod tests {
-    use crate::build::Build;
-    use crate::context::Context;
+    use crate::build::BuildContext;
+    use crate::builder::Builder;
     use crate::mode::Local;
 
     /// The re-entry stamp, alone. Graph code closes a cycle through reads
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a same-instant cycle through a read after the instant")]
     fn preparing_a_cell_again_while_it_is_being_prepared_panics() {
-        let mut b = Build::<Local>::new();
+        let mut b = BuildContext::<Local>::new();
         b.begin();
         let (x, _x_in) = b.input_cell(1u32);
         let m1 = x.map_cell(&mut b, |n| n + 1);

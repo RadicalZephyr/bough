@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::builder::{Builder, Stores};
 use crate::cell::CellRef;
-use crate::context::{Context, Stores};
 use crate::engine::edge::Edge;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::engine::edge::{Connection, Drain};
@@ -48,7 +48,7 @@ fn next_graph_id() -> u32 {
 ///
 /// It is the engine's core itself: a `Runtime` owns one, and the build closure
 /// borrows it. So it has no lifetime parameter and no public constructor.
-pub struct Build<M: Mode = Local> {
+pub struct BuildContext<M: Mode = Local> {
     pub(crate) graph_id: u32,
     pub(crate) store: Store<M>,
     /// The serial of the running instant.
@@ -72,12 +72,12 @@ pub struct Build<M: Mode = Local> {
     pub(crate) ownerless: Liveness,
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     pub(crate) fn new() -> Self {
         let graph_id = next_graph_id();
         let released = Released::new();
         let stamps = Stamps::new();
-        Build {
+        BuildContext {
             graph_id,
             store: Store::new(),
             tx: 0,
@@ -93,7 +93,7 @@ impl<M: Mode> Build<M> {
     }
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Connects an [`InputSlot`] to an input at `priority`, so that
     /// [`pump`](crate::Runtime::pump) drains it (RFD 7).
     ///
@@ -147,7 +147,7 @@ impl<M: Mode> Build<M> {
     }
 }
 
-/// The closer of a cell loop, from [`Context::cell_loop`](crate::Context::cell_loop), which states the
+/// The closer of a cell loop, from [`Builder::cell_loop`](crate::Builder::cell_loop), which states the
 /// rule its [`close`](CellLoop::close) checks: the dependency graph stays
 /// acyclic, and a read of a cell's value from before the instant is not a
 /// dependency.
@@ -206,13 +206,13 @@ impl<A: 'static> CellLoop<A> {
     /// forward and the definition become one cell, so a loop of linear
     /// streams panics too if each has a
     /// [`switch_stream`](Cell::switch_stream).
-    pub fn close<C: Context>(self, build: &mut C, definition: Cell<A>) {
+    pub fn close<C: Builder>(self, build: &mut C, definition: Cell<A>) {
         build.close_cell(self.token, definition.token);
     }
 }
 
-/// The closer of a state loop, from [`Context::state_loop`](crate::Context::state_loop), which checks
-/// the rule [`Context::cell_loop`](crate::Context::cell_loop) states. Consumed by
+/// The closer of a state loop, from [`Builder::state_loop`](crate::Builder::state_loop), which checks
+/// the rule [`Builder::cell_loop`](crate::Builder::cell_loop) states. Consumed by
 /// [`close`](StateLoop::close), so a loop cannot close twice.
 ///
 /// Its forward is a [`State`](crate::State), which has no stream view:
@@ -263,15 +263,15 @@ impl<A: 'static> StateLoop<A> {
     /// dependency would close a cycle, naming the cycle's nodes.
     pub fn close<X, C>(self, build: &mut X, definition: C)
     where
-        X: Context,
+        X: Builder,
         C: CellRef<Value = A>,
     {
         build.close_cell(self.token, definition.token());
     }
 }
 
-/// The closer of a stream loop, from [`Context::stream_loop`](crate::Context::stream_loop). Its
-/// [`close`](StreamLoop::close) checks the rule [`Context::cell_loop`](crate::Context::cell_loop)
+/// The closer of a stream loop, from [`Builder::stream_loop`](crate::Builder::stream_loop). Its
+/// [`close`](StreamLoop::close) checks the rule [`Builder::cell_loop`](crate::Builder::cell_loop)
 /// states: the dependency graph stays acyclic, and a read of a cell's
 /// value from before the instant is not a dependency. Consumed by `close`,
 /// so a loop cannot close twice.
@@ -314,7 +314,7 @@ impl<A: 'static> StreamLoop<A> {
     /// source is the forward or depends on it, naming the cycle's nodes.
     pub fn close<C, S>(self, build: &mut C, definition: S)
     where
-        C: Context + Stores<S> + Stores<A>,
+        C: Builder + Stores<S> + Stores<A>,
         S: Source<Event = A>,
     {
         let (dependency, cells) = build.reach_of(&definition);

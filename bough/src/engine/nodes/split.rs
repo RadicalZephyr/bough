@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use super::Marker;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::engine::{Cx, NodeOps, Ops, part};
 use crate::mode::Mode;
 use crate::source::Source;
@@ -29,7 +29,7 @@ type Iter<S> = <<S as Source>::Event as IntoIterator>::IntoIter;
 /// is not fused cannot add elements after its end.
 pub(crate) struct SplitNode<S>(Marker<S>);
 
-fn eval_split<M, S>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_split<M, S>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,
@@ -47,7 +47,7 @@ where
 
 /// One child instant: the next element of the top iterator starts the
 /// output. `false` once the iterator has ended.
-fn emit_split<M, S>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32) -> bool
+fn emit_split<M, S>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32) -> bool
 where
     M: Mode,
     S: Source,
@@ -103,7 +103,7 @@ where
 /// list left out.
 pub(crate) struct DeferNode<S>(Marker<S>);
 
-fn eval_defer<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_defer<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     S::Event: 'static,
 {
@@ -117,7 +117,11 @@ where
 }
 
 /// Child 0 takes the top event; any later child finds it gone.
-fn emit_defer<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32) -> bool
+fn emit_defer<M: Mode, S: Source>(
+    parts: &mut [M::Carrier],
+    b: &mut BuildContext<M>,
+    me: u32,
+) -> bool
 where
     S::Event: 'static,
 {

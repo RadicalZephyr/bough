@@ -5,7 +5,7 @@
 //! persist a value require it to be `Trace`.
 
 use super::Marker;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::engine::{
     Cx, Data, NodeOps, Ops, cell_mut, clear_slot, in_place_mut, part, trace_cell, trace_in_place,
 };
@@ -29,7 +29,7 @@ impl<M: Mode, A: Trace + 'static> NodeOps<M> for ConstantNode<A> {
 /// through without `Clone`.
 pub(crate) struct HoldNode<S>(Marker<S>);
 
-fn eval_hold<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_hold<M: Mode, S: Source>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     S::Event: 'static,
 {
@@ -67,7 +67,7 @@ where
 /// of itself reads. The rest is a hold.
 pub(crate) struct AccumulateNode<S, St, F>(Marker<(S, St, F)>);
 
-fn eval_accumulate<M, S, St, F>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_accumulate<M, S, St, F>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,
@@ -106,7 +106,7 @@ where
 /// after the instant, which does not exist until commit.
 pub(crate) struct InPlaceNode<S, St, F>(Marker<(S, St, F)>);
 
-fn eval_in_place<M, S, St>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_in_place<M, S, St>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,
@@ -158,7 +158,7 @@ where
 /// always reads the state from before the instant.
 pub(crate) struct ScanNode<S, St, B, F>(Marker<(S, St, B, F)>);
 
-fn eval_scan<M, S, St, B, F>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_scan<M, S, St, B, F>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,

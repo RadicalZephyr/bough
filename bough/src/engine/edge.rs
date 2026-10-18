@@ -41,7 +41,7 @@ use core::task::Waker;
 
 use super::DoubleSend;
 use super::TokenFault;
-use crate::build::Build;
+use crate::build::BuildContext;
 use crate::guard::{Released, Stamps};
 use crate::io::IoQueue;
 #[cfg(all(
@@ -136,7 +136,7 @@ pub(crate) struct Connection {
 }
 
 /// The graph's side of the edge. It lives in the build context, since
-/// [`connect`](crate::Build::connect) takes one.
+/// [`connect`](crate::BuildContext::connect) takes one.
 pub(crate) struct Edge {
     /// The waker the driver registered; a slot connected later gets it too.
     pub(crate) waker: Option<Waker>,
@@ -157,7 +157,7 @@ pub(crate) struct Edge {
 }
 
 impl Edge {
-    /// The remote's half of [`Build::arm`]: a remote send from this
+    /// The remote's half of [`BuildContext::arm`]: a remote send from this
     /// thread is refused until [`disarm`](Edge::disarm) (RFD 6).
     #[inline]
     pub(crate) fn arm(&self) {
@@ -165,7 +165,7 @@ impl Edge {
         self.inbox.running.store(thread_token(), Ordering::Relaxed);
     }
 
-    /// The remote's half of [`Build::disarm`].
+    /// The remote's half of [`BuildContext::disarm`].
     #[inline]
     pub(crate) fn disarm(&self) {
         #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
@@ -436,10 +436,10 @@ impl From<TokenFault> for Fault {
     }
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Graph code starts running: evaluation, commit, a construct closure,
     /// a split's iterator. A remote send from this thread, and a call
-    /// through an `Io`, are refused until [`disarm`](Build::disarm)
+    /// through an `Io`, are refused until [`disarm`](BuildContext::disarm)
     /// (RFD 6).
     #[inline]
     pub(crate) fn arm(&self) {
@@ -460,7 +460,7 @@ impl<M: Mode> Build<M> {
     /// without running it. Nothing ran, so there is nothing to undo, and
     /// the graph is not poisoned; the serial goes unused.
     pub(crate) fn cancel(&mut self) {
-        let Build { store, s, .. } = self;
+        let BuildContext { store, s, .. } = self;
         for &n in &s.starts {
             (store.ops[n as usize].clear_slot)(&mut store.data[n as usize]);
         }
@@ -472,9 +472,9 @@ impl<M: Mode> Build<M> {
 /// `ops.fire` of an input whose events are `A`s: takes the event out of
 /// `event`, an `Option<A>`, and starts the input with it. How a value whose
 /// type the caller does not know, a slot's or a remote unit's, reaches the
-/// typed [`fire_start`](Build::fire_start).
+/// typed [`fire_start`](BuildContext::fire_start).
 pub(crate) fn fire_input<M: Mode, A: 'static>(
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     input: u32,
     event: &mut dyn Any,
 ) -> Result<(), DoubleSend> {

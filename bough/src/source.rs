@@ -52,9 +52,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::Build;
+use crate::BuildContext;
+use crate::builder::{AllOps, Builder, Plane, Stores};
 use crate::cell::CellRef;
-use crate::context::{AllOps, Context, Plane, Stores};
 use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
 use crate::engine::nodes::split::{DeferNode, SplitNode};
 use crate::engine::nodes::stream::{
@@ -87,7 +87,7 @@ pub(crate) mod sealed {
 /// traces the chain once, when it builds the node: what the trace finds
 /// besides the dependency is the node's reach (RFD 3), since the chain never
 /// changes after it is built. A closure is opaque to the trace, so a token a
-/// closure captures is declared with [`Context::depends`](crate::Context::depends).
+/// closure captures is declared with [`Builder::depends`](crate::Builder::depends).
 pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// The type of each event.
     type Event;
@@ -205,7 +205,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// committed value at commit, so no `Clone` is needed.
     fn hold<C>(self, build: &mut C, initial: Self::Event) -> Cell<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<Self::Event>,
         Self::Event: Trace + 'static,
     {
         let (dependency, cells) = build.reach_of(&self);
@@ -224,7 +224,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// transaction does.
     fn accumulate<C, S, F>(self, build: &mut C, initial: S, f: F) -> Cell<S>
     where
-        C: Context + Stores<Self> + Stores<S> + Stores<F>,
+        C: Builder + Stores<Self> + Stores<S> + Stores<F>,
         S: Trace + 'static,
         F: Fn(Self::Event, &S) -> S + 'static,
     {
@@ -269,7 +269,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn accumulate_mut<C, S, F>(self, build: &mut C, initial: S, f: F) -> State<S>
     where
-        C: Context + Stores<Self> + Stores<S> + Stores<F> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<Self::Event>,
         S: Trace + 'static,
         F: FnMut(Self::Event, &mut S) + 'static,
         Self::Event: 'static,
@@ -316,7 +316,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn scan<C, S, B, F>(self, build: &mut C, initial: S, f: F) -> Stream<B>
     where
-        C: Context + Stores<Self> + Stores<S> + Stores<F> + Stores<B>,
+        C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<B>,
         S: Trace + 'static,
         B: 'static,
         F: Fn(Self::Event, &S) -> (B, S) + 'static,
@@ -344,7 +344,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// required of a stream's events.
     fn share<C>(self, build: &mut C) -> Shared<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<Self::Event>,
         Self::Event: Clone + 'static,
     {
         Shared::from_token(chain_node(self, build))
@@ -369,7 +369,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn node<C>(self, build: &mut C) -> Stream<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<Self::Event>,
         Self::Event: 'static,
     {
         Stream::from_token(chain_node(self, build))
@@ -403,7 +403,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     fn unzip<C, A, B>(self, build: &mut C) -> (Stream<A>, Stream<B>)
     where
         Self: Source<Event = (A, B)>,
-        C: Context + Stores<Self> + Stores<(Option<A>, Option<B>)> + Stores<A> + Stores<B>,
+        C: Builder + Stores<Self> + Stores<(Option<A>, Option<B>)> + Stores<A> + Stores<B>,
         A: 'static,
         B: 'static,
     {
@@ -421,7 +421,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// stream's event on the left. Both inputs move through.
     fn merge<C, T, F>(self, build: &mut C, other: T, f: F) -> Stream<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<T> + Stores<F> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<T> + Stores<F> + Stores<Self::Event>,
         T: Source<Event = Self::Event>,
         F: Fn(Self::Event, Self::Event) -> Self::Event + 'static,
         Self::Event: 'static,
@@ -433,7 +433,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// Merges two streams, this stream winning when both fire.
     fn or_else<C, T>(self, build: &mut C, other: T) -> Stream<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<T> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<T> + Stores<Self::Event>,
         T: Source<Event = Self::Event>,
         Self::Event: 'static,
     {
@@ -493,7 +493,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The output does not depend on the input, since it fires in a later
     /// instant, so a loop through a split is legal (the rule is
-    /// [`Context::cell_loop`](crate::Context::cell_loop)'s), and each round of it runs one level of
+    /// [`Builder::cell_loop`](crate::Builder::cell_loop)'s), and each round of it runs one level of
     /// child transactions deeper.
     ///
     /// A split is two nodes: one takes the event, the other emits the
@@ -513,7 +513,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn split<C>(self, build: &mut C) -> Stream<<Self::Event as IntoIterator>::Item>
     where
-        C: Context
+        C: Builder
             + Stores<Self>
             + Stores<<Self::Event as IntoIterator>::IntoIter>
             + Stores<<Self::Event as IntoIterator>::Item>,
@@ -545,7 +545,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The output does not depend on the input, since it fires in a later
     /// instant, so a loop through a defer is legal (the rule is
-    /// [`Context::cell_loop`](crate::Context::cell_loop)'s), and each round of it runs one child
+    /// [`Builder::cell_loop`](crate::Builder::cell_loop)'s), and each round of it runs one child
     /// transaction deeper. A countdown:
     ///
     /// ```
@@ -596,7 +596,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn defer<C>(self, build: &mut C) -> Stream<Self::Event>
     where
-        C: Context + Stores<Self> + Stores<Self::Event>,
+        C: Builder + Stores<Self> + Stores<Self::Event>,
         Self::Event: 'static,
     {
         let (dependency, cells) = build.reach_of(&self);
@@ -629,7 +629,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// Tokens created inside `f` flow out as data. An input built there
     /// reaches I/O code as an event, and a collection runs after each unit,
     /// so `f` anchors what it sends out with
-    /// [`Context::anchor`](crate::Context::anchor). Since a listener has no graph
+    /// [`Builder::anchor`](crate::Builder::anchor). Since a listener has no graph
     /// access, I/O code attaches listeners and sends to the input after
     /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the edge.
     ///
@@ -660,7 +660,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     ///
     /// Each run of `f` is a scope, as the build closure is: a loop declared
-    /// in it must close in it, under the rule [`Context::cell_loop`](crate::Context::cell_loop) states,
+    /// in it must close in it, under the rule [`Builder::cell_loop`](crate::Builder::cell_loop) states,
     /// and a loop left open is a panic when `f` returns. So are a close,
     /// and a switch's first link, that would make a same-instant cycle, the
     /// switch's at the end of the transaction's new nodes. Each of these
@@ -672,7 +672,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// a switch reads keeps the screen it holds, and a screen the switch
     /// has left, which nothing names any more, is collected (RFD 3). A
     /// token the closure captures that this construct's stream does not
-    /// depend on is declared with [`Context::depends`](crate::Context::depends), or it may be
+    /// depend on is declared with [`Builder::depends`](crate::Builder::depends), or it may be
     /// collected before the closure's next run uses it; a token the
     /// closure hands I/O code as data is anchored there. A construct whose
     /// chain does not fire costs what a chain node costs.
@@ -693,7 +693,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// ```
     fn construct<C, B, F>(self, build: &mut C, f: F) -> Stream<B>
     where
-        C: Context + Stores<Self> + Stores<F> + Stores<B>,
+        C: Builder + Stores<Self> + Stores<F> + Stores<B>,
         B: 'static,
         F: for<'p> FnMut(&mut C::Inner<'p>, Self::Event) -> B + 'static,
     {
@@ -712,7 +712,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
 fn chain_node<S, C>(chain: S, build: &mut C) -> Token
 where
     S: Source,
-    C: Context + Stores<S> + Stores<S::Event>,
+    C: Builder + Stores<S> + Stores<S::Event>,
     S::Event: 'static,
 {
     let (dependency, cells) = build.reach_of(&chain);
@@ -727,7 +727,7 @@ where
 /// half from there.
 fn half_node<C, H, N>(build: &mut C, pairs: u32) -> Token
 where
-    C: Context + Stores<H>,
+    C: Builder + Stores<H>,
     H: 'static,
     N: AllOps,
 {
@@ -739,7 +739,7 @@ where
 /// The node of `merge` and `or_else`: two chains and an erased function.
 fn merge_node<C, S, T, F>(left: S, build: &mut C, right: T, f: C::Erased) -> Stream<S::Event>
 where
-    C: Context + Stores<S> + Stores<T> + Stores<S::Event>,
+    C: Builder + Stores<S> + Stores<T> + Stores<S::Event>,
     S: Source,
     T: Source<Event = S::Event>,
     F: Fn(S::Event, S::Event) -> S::Event + 'static,
@@ -758,7 +758,7 @@ where
     Stream::from_token(build.token_of(n))
 }
 
-impl<M: Mode> Build<M> {
+impl<M: Mode> BuildContext<M> {
     /// Checks a chain's dependency and the tokens its trace visits, and
     /// returns their indices: the dependency, and the reach, which is every
     /// token besides the dependency. A foreign or stale token is a

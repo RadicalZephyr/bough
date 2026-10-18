@@ -3,7 +3,7 @@
 //! what the closure returns.
 //!
 //! The program leaves the arena while it runs, as every program does, so the
-//! closure can be handed `&mut Build`. What it creates is appended to the
+//! closure can be handed `&mut BuildContext`. What it creates is appended to the
 //! arena, which may reallocate; nothing holds a reference into it across the
 //! call, and the node's own event goes in its slot by index afterwards. A
 //! node the closure creates exists from this instant: it is linked to its
@@ -18,8 +18,8 @@
 //! panics before touching the arena, which poisons the graph.
 
 use super::Marker;
-use crate::build::Build;
-use crate::context::Portable;
+use crate::build::BuildContext;
+use crate::builder::Portable;
 use crate::engine::{Cx, NodeOps, Ops, clear_slot, part};
 use crate::mode::Mode;
 use crate::source::Source;
@@ -33,10 +33,10 @@ pub(crate) struct ConstructNode<S, F, B, V>(Marker<(S, F, B, V)>);
 /// How a construct node hands its builder to its closure.
 pub trait Via<M: Mode, F, E, B> {
     /// Runs the closure with the builder.
-    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B;
+    fn call(f: &mut F, b: &mut BuildContext<M>, event: E) -> B;
 }
 
-/// A closure that takes `&mut Build<M>`: a `construct` built on a `Build`.
+/// A closure that takes `&mut BuildContext<M>`: a `construct` built on a `BuildContext`.
 pub struct Direct;
 
 /// A closure that takes `&mut Portable`: a `construct` built in a portable
@@ -45,9 +45,9 @@ pub struct ThroughPortable;
 
 impl<M: Mode, F, E, B> Via<M, F, E, B> for Direct
 where
-    F: FnMut(&mut Build<M>, E) -> B,
+    F: FnMut(&mut BuildContext<M>, E) -> B,
 {
-    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B {
+    fn call(f: &mut F, b: &mut BuildContext<M>, event: E) -> B {
         f(b, event)
     }
 }
@@ -56,12 +56,12 @@ impl<M: Mode, F, E, B> Via<M, F, E, B> for ThroughPortable
 where
     F: for<'p> FnMut(&mut Portable<'p>, E) -> B,
 {
-    fn call(f: &mut F, b: &mut Build<M>, event: E) -> B {
+    fn call(f: &mut F, b: &mut BuildContext<M>, event: E) -> B {
         f(&mut M::portable(b), event)
     }
 }
 
-fn eval_construct<M, S, F, B, V>(parts: &mut [M::Carrier], b: &mut Build<M>, me: u32)
+fn eval_construct<M, S, F, B, V>(parts: &mut [M::Carrier], b: &mut BuildContext<M>, me: u32)
 where
     M: Mode,
     S: Source,

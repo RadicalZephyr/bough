@@ -87,7 +87,7 @@
 //! value reaches the token it holds, and a switch its current inner, but a
 //! token no selection has reached yet is reached by nothing else, and
 //! would be collected before the pick selects it, which is then a stale
-//! token. So the builder declares, with `Build::depends`, that a pick's
+//! token. So the builder declares, with `bough::Builder::depends`, that a pick's
 //! node and a `MapPickCell` keep every token they list.
 //!
 //! # Constructs
@@ -117,7 +117,7 @@
 //! closure's captures (RFD 3). A capture the construct's stream does not
 //! depend on, and that no other root reaches, would be collected before
 //! the closure's next run uses it: the stale token of finding F62. So the
-//! builder declares, with `Build::depends`, that the construct's node keeps
+//! builder declares, with `bough::Builder::depends`, that the construct's node keeps
 //! every token its closure captured, as a user must. Each kind of capture
 //! needs it: without the declarations of shared streams, of cells, or of
 //! cells of tokens, the random programs fail on a stale token, the
@@ -204,9 +204,11 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bough::{
-    Build, Cell, CellLoop, CellRef, Context, InputSlot, Lift, Listener, Local, Node, Runtime,
-    Shared, Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
+    BuildContext, Cell, CellLoop, CellRef, InputSlot, Lift, Listener, Local, Node, Runtime, Shared,
+    Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
+// The oracle has a `Builder` of its own; bough's is wanted for its methods.
+use bough::Builder as _;
 
 use crate::program::{
     Body, BodyResult, Definition, Expression, Input, Program, Reference, Type, Value,
@@ -238,7 +240,7 @@ pub type ListFn = Box<dyn Fn(i64) -> Vec<i64> + Send>;
 pub type PickFn<T> = Box<dyn Fn(i64) -> T + Send>;
 /// A construct's closure: the body built at the event's instant, and what
 /// it emits.
-pub type ConstructFn<M, B> = Box<dyn FnMut(&mut Build<M>, i64) -> B + Send>;
+pub type ConstructFn<M, B> = Box<dyn FnMut(&mut BuildContext<M>, i64) -> B + Send>;
 /// A stream listener.
 pub type StreamSink = Box<dyn FnMut(i64) + Send>;
 /// A cell listener.
@@ -258,102 +260,119 @@ impl<S: Source<Event = i64> + Send> Chain for S {}
 /// same builder: see the module documentation.
 pub trait EngineMode: bough::Mode {
     /// `Runtime::build` or `Runtime::build_threaded`.
-    fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Runtime<Self>, R);
+    fn build<R: Trace + Send>(f: impl FnOnce(&mut BuildContext<Self>) -> R) -> (Runtime<Self>, R);
     /// `b.input()`.
-    fn input(b: &mut Build<Self>) -> (Stream<i64>, bough::Input<i64>);
+    fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>);
     /// `b.input_coalescing(f)`.
-    fn input_coalescing(b: &mut Build<Self>, f: FoldFn<i64>) -> (Stream<i64>, bough::Input<i64>);
+    fn input_coalescing(
+        b: &mut BuildContext<Self>,
+        f: FoldFn<i64>,
+    ) -> (Stream<i64>, bough::Input<i64>);
     /// `b.input_cell(initial)`.
     fn input_cell<A: Trace + Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         initial: A,
     ) -> (Cell<A>, bough::Input<A>);
     /// `b.input_cell_coalescing(initial, f)`.
     fn input_cell_coalescing<A: Trace + Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         initial: A,
         f: FoldFn<A>,
     ) -> (Cell<A>, bough::Input<A>);
     /// `b.constant(value)`.
-    fn constant(b: &mut Build<Self>, value: i64) -> Cell<i64>;
+    fn constant(b: &mut BuildContext<Self>, value: i64) -> Cell<i64>;
     /// `chain.hold(b, initial)`.
-    fn hold<S: Chain>(b: &mut Build<Self>, chain: S, initial: i64) -> Cell<i64>;
+    fn hold<S: Chain>(b: &mut BuildContext<Self>, chain: S, initial: i64) -> Cell<i64>;
     /// `chain.map(|x| x != 0).hold(b, initial)`: a boolean stream's hold.
-    fn hold_boolean<S: Chain>(b: &mut Build<Self>, chain: S, initial: bool) -> Cell<bool>;
+    fn hold_boolean<S: Chain>(b: &mut BuildContext<Self>, chain: S, initial: bool) -> Cell<bool>;
     /// `chain.accumulate(b, initial, f)`.
-    fn accumulate<S: Chain>(b: &mut Build<Self>, chain: S, initial: i64, f: BinaryFn) -> Cell<i64>;
+    fn accumulate<S: Chain>(
+        b: &mut BuildContext<Self>,
+        chain: S,
+        initial: i64,
+        f: BinaryFn,
+    ) -> Cell<i64>;
     /// `chain.accumulate_mut(b, initial, f)`.
     fn accumulate_mut<S: Chain>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         chain: S,
         initial: i64,
         f: InPlaceFn,
     ) -> State<i64>;
     /// `chain.scan(b, initial, f)`.
-    fn scan<S: Chain>(b: &mut Build<Self>, chain: S, initial: i64, f: ScanFn) -> Stream<i64>;
+    fn scan<S: Chain>(b: &mut BuildContext<Self>, chain: S, initial: i64, f: ScanFn)
+    -> Stream<i64>;
     /// `chain.node(b)`.
-    fn node<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64>;
+    fn node<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Stream<i64>;
     /// `chain.share(b)`.
-    fn share<S: Chain>(b: &mut Build<Self>, chain: S) -> Shared<i64>;
+    fn share<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Shared<i64>;
     /// `left.merge(b, right, f)`.
     fn merge<S: Chain, T: Chain>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         left: S,
         right: T,
         f: CombineFn,
     ) -> Stream<i64>;
     /// `left.or_else(b, right)`.
-    fn or_else<S: Chain, T: Chain>(b: &mut Build<Self>, left: S, right: T) -> Stream<i64>;
+    fn or_else<S: Chain, T: Chain>(b: &mut BuildContext<Self>, left: S, right: T) -> Stream<i64>;
     /// `chain.defer(b)`.
-    fn defer<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64>;
+    fn defer<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Stream<i64>;
     /// `chain.map(f).node(b)`: a stream of lists, for a split to read.
-    fn map_list<S: Chain>(b: &mut Build<Self>, chain: S, f: ListFn) -> Stream<Vec<i64>>;
+    fn map_list<S: Chain>(b: &mut BuildContext<Self>, chain: S, f: ListFn) -> Stream<Vec<i64>>;
     /// `lists.split(b)`.
-    fn split(b: &mut Build<Self>, lists: Stream<Vec<i64>>) -> Stream<i64>;
+    fn split(b: &mut BuildContext<Self>, lists: Stream<Vec<i64>>) -> Stream<i64>;
     /// `closer.close(b, chain)`: the chain fused into the forward's node.
-    fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>);
+    fn close_stream_loop<S: Chain>(b: &mut BuildContext<Self>, chain: S, closer: StreamLoop<i64>);
     /// `node.map(f).node(b)`: a stream of tokens, for a hold of them to read.
-    fn pick<S: Chain, T: Send + 'static>(b: &mut Build<Self>, node: S, f: PickFn<T>) -> Stream<T>;
+    fn pick<S: Chain, T: Send + 'static>(
+        b: &mut BuildContext<Self>,
+        node: S,
+        f: PickFn<T>,
+    ) -> Stream<T>;
     /// `tokens.hold(b, initial)`: a cell of tokens.
     fn hold_tokens<T: Trace + Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         tokens: Stream<T>,
         initial: T,
     ) -> Cell<T>;
     /// `b.constant(token)`: a cell of tokens that never steps.
-    fn constant_token<T: Trace + Send + 'static>(b: &mut Build<Self>, token: T) -> Cell<T>;
+    fn constant_token<T: Trace + Send + 'static>(b: &mut BuildContext<Self>, token: T) -> Cell<T>;
     /// `outer.switch_stream(b)` over shared streams.
-    fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64>;
+    fn switch_stream(b: &mut BuildContext<Self>, outer: Cell<Shared<i64>>) -> Stream<i64>;
     /// `outer.switch_stream(b)` over linear streams: the cell's one switch.
-    fn switch_linear(b: &mut Build<Self>, outer: Cell<Stream<i64>>) -> Stream<i64>;
+    fn switch_linear(b: &mut BuildContext<Self>, outer: Cell<Stream<i64>>) -> Stream<i64>;
     /// `node.construct(b, f)`: a node, so that a construct is compiled once
     /// per node type and result type, not once per chain type.
     fn construct<S: Chain, B: Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         node: S,
         f: ConstructFn<Self, B>,
     ) -> Stream<B>;
     /// `b.connect(input, slot, 0)`.
-    fn connect(b: &mut Build<Self>, input: bough::Input<i64>, slot: &'static InputSlot<i64>);
+    fn connect(b: &mut BuildContext<Self>, input: bough::Input<i64>, slot: &'static InputSlot<i64>);
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         cell: Cell<A>,
         f: CellFn<A, B>,
     ) -> Cell<B>;
     /// `state.map_cell(b, f)`.
     fn map_state<A: 'static, B: Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         state: State<A>,
         f: CellFn<A, B>,
     ) -> State<B>;
     /// `cells.lift(b, f)`.
-    fn lift<L: Lift<F, i64>, F: Send + 'static>(b: &mut Build<Self>, cells: L, f: F) -> L::Output;
+    fn lift<L: Lift<F, i64>, F: Send + 'static>(
+        b: &mut BuildContext<Self>,
+        cells: L,
+        f: F,
+    ) -> L::Output;
     /// `cell.steps(b)`.
-    fn steps<A: Clone + Send + 'static>(b: &mut Build<Self>, cell: Cell<A>) -> Stream<A>;
+    fn steps<A: Clone + Send + 'static>(b: &mut BuildContext<Self>, cell: Cell<A>) -> Stream<A>;
     /// `cell.steps_with_current(b)`.
     fn steps_with_current<A: Clone + Send + 'static>(
-        b: &mut Build<Self>,
+        b: &mut BuildContext<Self>,
         cell: Cell<A>,
     ) -> Stream<A>;
     /// `graph.listen(node, f)`.
@@ -386,43 +405,49 @@ macro_rules! engine_mode {
         impl EngineMode for $mode {
             const FUSED: usize = $fused;
 
-            fn build<R: Trace + Send>(f: impl FnOnce(&mut Build<Self>) -> R) -> (Runtime<Self>, R) {
+            fn build<R: Trace + Send>(
+                f: impl FnOnce(&mut BuildContext<Self>) -> R,
+            ) -> (Runtime<Self>, R) {
                 let (runtime, edge) = Runtime::$build(f);
                 (runtime, edge.keep())
             }
-            fn input(b: &mut Build<Self>) -> (Stream<i64>, bough::Input<i64>) {
+            fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>) {
                 b.input()
             }
             fn input_coalescing(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 f: FoldFn<i64>,
             ) -> (Stream<i64>, bough::Input<i64>) {
                 b.input_coalescing(f)
             }
             fn input_cell<A: Trace + Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 initial: A,
             ) -> (Cell<A>, bough::Input<A>) {
                 b.input_cell(initial)
             }
             fn input_cell_coalescing<A: Trace + Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 initial: A,
                 f: FoldFn<A>,
             ) -> (Cell<A>, bough::Input<A>) {
                 b.input_cell_coalescing(initial, f)
             }
-            fn constant(b: &mut Build<Self>, value: i64) -> Cell<i64> {
+            fn constant(b: &mut BuildContext<Self>, value: i64) -> Cell<i64> {
                 b.constant(value)
             }
-            fn hold<S: Chain>(b: &mut Build<Self>, chain: S, initial: i64) -> Cell<i64> {
+            fn hold<S: Chain>(b: &mut BuildContext<Self>, chain: S, initial: i64) -> Cell<i64> {
                 chain.hold(b, initial)
             }
-            fn hold_boolean<S: Chain>(b: &mut Build<Self>, chain: S, initial: bool) -> Cell<bool> {
+            fn hold_boolean<S: Chain>(
+                b: &mut BuildContext<Self>,
+                chain: S,
+                initial: bool,
+            ) -> Cell<bool> {
                 chain.map(truthy as fn(i64) -> bool).hold(b, initial)
             }
             fn accumulate<S: Chain>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 chain: S,
                 initial: i64,
                 f: BinaryFn,
@@ -430,7 +455,7 @@ macro_rules! engine_mode {
                 chain.accumulate(b, initial, f)
             }
             fn accumulate_mut<S: Chain>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 chain: S,
                 initial: i64,
                 f: InPlaceFn,
@@ -438,105 +463,123 @@ macro_rules! engine_mode {
                 chain.accumulate_mut(b, initial, f)
             }
             fn scan<S: Chain>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 chain: S,
                 initial: i64,
                 f: ScanFn,
             ) -> Stream<i64> {
                 chain.scan(b, initial, f)
             }
-            fn node<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64> {
+            fn node<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Stream<i64> {
                 chain.node(b)
             }
-            fn share<S: Chain>(b: &mut Build<Self>, chain: S) -> Shared<i64> {
+            fn share<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Shared<i64> {
                 chain.share(b)
             }
             fn merge<S: Chain, T: Chain>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 left: S,
                 right: T,
                 f: CombineFn,
             ) -> Stream<i64> {
                 left.merge(b, right, f)
             }
-            fn or_else<S: Chain, T: Chain>(b: &mut Build<Self>, left: S, right: T) -> Stream<i64> {
+            fn or_else<S: Chain, T: Chain>(
+                b: &mut BuildContext<Self>,
+                left: S,
+                right: T,
+            ) -> Stream<i64> {
                 left.or_else(b, right)
             }
-            fn defer<S: Chain>(b: &mut Build<Self>, chain: S) -> Stream<i64> {
+            fn defer<S: Chain>(b: &mut BuildContext<Self>, chain: S) -> Stream<i64> {
                 chain.defer(b)
             }
-            fn map_list<S: Chain>(b: &mut Build<Self>, chain: S, f: ListFn) -> Stream<Vec<i64>> {
+            fn map_list<S: Chain>(
+                b: &mut BuildContext<Self>,
+                chain: S,
+                f: ListFn,
+            ) -> Stream<Vec<i64>> {
                 chain.map(f).node(b)
             }
-            fn split(b: &mut Build<Self>, lists: Stream<Vec<i64>>) -> Stream<i64> {
+            fn split(b: &mut BuildContext<Self>, lists: Stream<Vec<i64>>) -> Stream<i64> {
                 lists.split(b)
             }
-            fn close_stream_loop<S: Chain>(b: &mut Build<Self>, chain: S, closer: StreamLoop<i64>) {
+            fn close_stream_loop<S: Chain>(
+                b: &mut BuildContext<Self>,
+                chain: S,
+                closer: StreamLoop<i64>,
+            ) {
                 closer.close(b, chain)
             }
             fn pick<S: Chain, T: Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 node: S,
                 f: PickFn<T>,
             ) -> Stream<T> {
                 node.map(f).node(b)
             }
             fn hold_tokens<T: Trace + Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 tokens: Stream<T>,
                 initial: T,
             ) -> Cell<T> {
                 tokens.hold(b, initial)
             }
-            fn constant_token<T: Trace + Send + 'static>(b: &mut Build<Self>, token: T) -> Cell<T> {
+            fn constant_token<T: Trace + Send + 'static>(
+                b: &mut BuildContext<Self>,
+                token: T,
+            ) -> Cell<T> {
                 b.constant(token)
             }
-            fn switch_stream(b: &mut Build<Self>, outer: Cell<Shared<i64>>) -> Stream<i64> {
+            fn switch_stream(b: &mut BuildContext<Self>, outer: Cell<Shared<i64>>) -> Stream<i64> {
                 outer.switch_stream(b)
             }
-            fn switch_linear(b: &mut Build<Self>, outer: Cell<Stream<i64>>) -> Stream<i64> {
+            fn switch_linear(b: &mut BuildContext<Self>, outer: Cell<Stream<i64>>) -> Stream<i64> {
                 outer.switch_stream(b)
             }
             fn construct<S: Chain, B: Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 node: S,
                 f: ConstructFn<Self, B>,
             ) -> Stream<B> {
                 node.construct(b, f)
             }
             fn connect(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 input: bough::Input<i64>,
                 slot: &'static InputSlot<i64>,
             ) {
                 b.connect(input, slot, 0)
             }
             fn map_cell<A: 'static, B: Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 cell: Cell<A>,
                 f: CellFn<A, B>,
             ) -> Cell<B> {
                 cell.map_cell(b, f)
             }
             fn map_state<A: 'static, B: Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 state: State<A>,
                 f: CellFn<A, B>,
             ) -> State<B> {
                 state.map_cell(b, f)
             }
             fn lift<L: Lift<F, i64>, F: Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 cells: L,
                 f: F,
             ) -> L::Output {
                 cells.lift(b, f)
             }
-            fn steps<A: Clone + Send + 'static>(b: &mut Build<Self>, cell: Cell<A>) -> Stream<A> {
+            fn steps<A: Clone + Send + 'static>(
+                b: &mut BuildContext<Self>,
+                cell: Cell<A>,
+            ) -> Stream<A> {
                 cell.steps(b)
             }
             fn steps_with_current<A: Clone + Send + 'static>(
-                b: &mut Build<Self>,
+                b: &mut BuildContext<Self>,
                 cell: Cell<A>,
             ) -> Stream<A> {
                 cell.steps_with_current(b)
@@ -2166,7 +2209,7 @@ enum Side {
 
 /// A merge (`Some` function) or an `or_else` (`None`).
 fn join_pair<M: EngineMode, L: Chain, R: Chain>(
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     left: L,
     right: R,
     f: Option<CombineFn>,
@@ -2179,20 +2222,26 @@ fn join_pair<M: EngineMode, L: Chain, R: Chain>(
 
 /// What a materializer does with a chain held as a trait object.
 trait Materialize<M: EngineMode> {
-    fn hold(self: Box<Self>, b: &mut Build<M>, initial: i64) -> Cell<i64>;
-    fn hold_boolean(self: Box<Self>, b: &mut Build<M>, initial: bool) -> Cell<bool>;
-    fn accumulate(self: Box<Self>, b: &mut Build<M>, initial: i64, f: BinaryFn) -> Cell<i64>;
-    fn accumulate_mut(self: Box<Self>, b: &mut Build<M>, initial: i64, f: InPlaceFn) -> State<i64>;
-    fn scan(self: Box<Self>, b: &mut Build<M>, initial: i64, f: ScanFn) -> Stream<i64>;
-    fn node(self: Box<Self>, b: &mut Build<M>) -> Stream<i64>;
-    fn share(self: Box<Self>, b: &mut Build<M>) -> Shared<i64>;
-    fn defer(self: Box<Self>, b: &mut Build<M>) -> Stream<i64>;
-    fn map_list(self: Box<Self>, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>>;
-    fn close_stream_loop(self: Box<Self>, b: &mut Build<M>, closer: StreamLoop<i64>);
+    fn hold(self: Box<Self>, b: &mut BuildContext<M>, initial: i64) -> Cell<i64>;
+    fn hold_boolean(self: Box<Self>, b: &mut BuildContext<M>, initial: bool) -> Cell<bool>;
+    fn accumulate(self: Box<Self>, b: &mut BuildContext<M>, initial: i64, f: BinaryFn)
+    -> Cell<i64>;
+    fn accumulate_mut(
+        self: Box<Self>,
+        b: &mut BuildContext<M>,
+        initial: i64,
+        f: InPlaceFn,
+    ) -> State<i64>;
+    fn scan(self: Box<Self>, b: &mut BuildContext<M>, initial: i64, f: ScanFn) -> Stream<i64>;
+    fn node(self: Box<Self>, b: &mut BuildContext<M>) -> Stream<i64>;
+    fn share(self: Box<Self>, b: &mut BuildContext<M>) -> Shared<i64>;
+    fn defer(self: Box<Self>, b: &mut BuildContext<M>) -> Stream<i64>;
+    fn map_list(self: Box<Self>, b: &mut BuildContext<M>, f: ListFn) -> Stream<Vec<i64>>;
+    fn close_stream_loop(self: Box<Self>, b: &mut BuildContext<M>, closer: StreamLoop<i64>);
     /// A merge or an `or_else` with a materialized stream on the other side.
     fn join(
         self: Box<Self>,
-        b: &mut Build<M>,
+        b: &mut BuildContext<M>,
         other: Base,
         side: Side,
         f: Option<CombineFn>,
@@ -2200,39 +2249,49 @@ trait Materialize<M: EngineMode> {
 }
 
 impl<M: EngineMode, S: Chain> Materialize<M> for S {
-    fn hold(self: Box<Self>, b: &mut Build<M>, initial: i64) -> Cell<i64> {
+    fn hold(self: Box<Self>, b: &mut BuildContext<M>, initial: i64) -> Cell<i64> {
         M::hold(b, *self, initial)
     }
-    fn hold_boolean(self: Box<Self>, b: &mut Build<M>, initial: bool) -> Cell<bool> {
+    fn hold_boolean(self: Box<Self>, b: &mut BuildContext<M>, initial: bool) -> Cell<bool> {
         M::hold_boolean(b, *self, initial)
     }
-    fn accumulate(self: Box<Self>, b: &mut Build<M>, initial: i64, f: BinaryFn) -> Cell<i64> {
+    fn accumulate(
+        self: Box<Self>,
+        b: &mut BuildContext<M>,
+        initial: i64,
+        f: BinaryFn,
+    ) -> Cell<i64> {
         M::accumulate(b, *self, initial, f)
     }
-    fn accumulate_mut(self: Box<Self>, b: &mut Build<M>, initial: i64, f: InPlaceFn) -> State<i64> {
+    fn accumulate_mut(
+        self: Box<Self>,
+        b: &mut BuildContext<M>,
+        initial: i64,
+        f: InPlaceFn,
+    ) -> State<i64> {
         M::accumulate_mut(b, *self, initial, f)
     }
-    fn scan(self: Box<Self>, b: &mut Build<M>, initial: i64, f: ScanFn) -> Stream<i64> {
+    fn scan(self: Box<Self>, b: &mut BuildContext<M>, initial: i64, f: ScanFn) -> Stream<i64> {
         M::scan(b, *self, initial, f)
     }
-    fn node(self: Box<Self>, b: &mut Build<M>) -> Stream<i64> {
+    fn node(self: Box<Self>, b: &mut BuildContext<M>) -> Stream<i64> {
         M::node(b, *self)
     }
-    fn share(self: Box<Self>, b: &mut Build<M>) -> Shared<i64> {
+    fn share(self: Box<Self>, b: &mut BuildContext<M>) -> Shared<i64> {
         M::share(b, *self)
     }
-    fn defer(self: Box<Self>, b: &mut Build<M>) -> Stream<i64> {
+    fn defer(self: Box<Self>, b: &mut BuildContext<M>) -> Stream<i64> {
         M::defer(b, *self)
     }
-    fn map_list(self: Box<Self>, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>> {
+    fn map_list(self: Box<Self>, b: &mut BuildContext<M>, f: ListFn) -> Stream<Vec<i64>> {
         M::map_list(b, *self, f)
     }
-    fn close_stream_loop(self: Box<Self>, b: &mut Build<M>, closer: StreamLoop<i64>) {
+    fn close_stream_loop(self: Box<Self>, b: &mut BuildContext<M>, closer: StreamLoop<i64>) {
         M::close_stream_loop(b, *self, closer)
     }
     fn join(
         self: Box<Self>,
-        b: &mut Build<M>,
+        b: &mut BuildContext<M>,
         other: Base,
         side: Side,
         f: Option<CombineFn>,
@@ -2249,14 +2308,14 @@ impl<M: EngineMode, S: Chain> Materialize<M> for S {
 /// A chain of one adapter, which a second extends, or, in a mode that
 /// fuses one, a `node` of it.
 trait OneAdapter<M: EngineMode>: Materialize<M> {
-    fn adapt(self: Box<Self>, b: &mut Build<M>, adapter: Adapter) -> Chained<M>;
+    fn adapt(self: Box<Self>, b: &mut BuildContext<M>, adapter: Adapter) -> Chained<M>;
 }
 
 /// A chain of two adapters: a third needs a node first.
 trait TwoAdapters<M: EngineMode>: Materialize<M> {}
 
 impl<M: EngineMode, S: Chain> OneAdapter<M> for S {
-    fn adapt(self: Box<Self>, b: &mut Build<M>, adapter: Adapter) -> Chained<M> {
+    fn adapt(self: Box<Self>, b: &mut BuildContext<M>, adapter: Adapter) -> Chained<M> {
         if M::FUSED >= 2 {
             Chained::Two(adapt!((*self), adapter, Box<dyn TwoAdapters<M>>))
         } else {
@@ -2292,7 +2351,7 @@ macro_rules! materialize {
 impl<M: EngineMode> Chained<M> {
     /// Extends the chain by one adapter, materializing it with `node` first
     /// when it already has as many as the mode fuses.
-    fn adapt(self, b: &mut Build<M>, adapter: Adapter) -> Chained<M> {
+    fn adapt(self, b: &mut BuildContext<M>, adapter: Adapter) -> Chained<M> {
         match self {
             Chained::Stream(s) => Chained::One(adapt!(s, adapter, Box<dyn OneAdapter<M>>)),
             Chained::Shared(s) => Chained::One(adapt!(s, adapter, Box<dyn OneAdapter<M>>)),
@@ -2304,48 +2363,48 @@ impl<M: EngineMode> Chained<M> {
         }
     }
 
-    fn hold(self, b: &mut Build<M>, initial: i64) -> Cell<i64> {
+    fn hold(self, b: &mut BuildContext<M>, initial: i64) -> Cell<i64> {
         materialize!(self, M, b, hold(initial))
     }
 
-    fn hold_boolean(self, b: &mut Build<M>, initial: bool) -> Cell<bool> {
+    fn hold_boolean(self, b: &mut BuildContext<M>, initial: bool) -> Cell<bool> {
         materialize!(self, M, b, hold_boolean(initial))
     }
 
-    fn accumulate(self, b: &mut Build<M>, initial: i64, f: BinaryFn) -> Cell<i64> {
+    fn accumulate(self, b: &mut BuildContext<M>, initial: i64, f: BinaryFn) -> Cell<i64> {
         materialize!(self, M, b, accumulate(initial, f))
     }
 
-    fn accumulate_mut(self, b: &mut Build<M>, initial: i64, f: InPlaceFn) -> State<i64> {
+    fn accumulate_mut(self, b: &mut BuildContext<M>, initial: i64, f: InPlaceFn) -> State<i64> {
         materialize!(self, M, b, accumulate_mut(initial, f))
     }
 
-    fn scan(self, b: &mut Build<M>, initial: i64, f: ScanFn) -> Stream<i64> {
+    fn scan(self, b: &mut BuildContext<M>, initial: i64, f: ScanFn) -> Stream<i64> {
         materialize!(self, M, b, scan(initial, f))
     }
 
-    fn node(self, b: &mut Build<M>) -> Stream<i64> {
+    fn node(self, b: &mut BuildContext<M>) -> Stream<i64> {
         materialize!(self, M, b, node())
     }
 
-    fn share(self, b: &mut Build<M>) -> Shared<i64> {
+    fn share(self, b: &mut BuildContext<M>) -> Shared<i64> {
         materialize!(self, M, b, share())
     }
 
-    fn defer(self, b: &mut Build<M>) -> Stream<i64> {
+    fn defer(self, b: &mut BuildContext<M>) -> Stream<i64> {
         materialize!(self, M, b, defer())
     }
 
-    fn map_list(self, b: &mut Build<M>, f: ListFn) -> Stream<Vec<i64>> {
+    fn map_list(self, b: &mut BuildContext<M>, f: ListFn) -> Stream<Vec<i64>> {
         materialize!(self, M, b, map_list(f))
     }
 
-    fn close_stream_loop(self, b: &mut Build<M>, closer: StreamLoop<i64>) {
+    fn close_stream_loop(self, b: &mut BuildContext<M>, closer: StreamLoop<i64>) {
         materialize!(self, M, b, close_stream_loop(closer))
     }
 
     /// The materialized stream itself, or a node for a chain.
-    fn materialized(self, b: &mut Build<M>) -> Base {
+    fn materialized(self, b: &mut BuildContext<M>) -> Base {
         match self {
             Chained::Stream(s) => Base::Stream(s),
             Chained::Shared(s) => Base::Shared(s),
@@ -2356,7 +2415,7 @@ impl<M: EngineMode> Chained<M> {
     /// A merge or an `or_else`, fusing whichever side is a chain. When both
     /// are, the right one becomes a node first, since a node type over two
     /// chains would multiply the chain types.
-    fn join(b: &mut Build<M>, left: Self, right: Self, f: Option<CombineFn>) -> Stream<i64> {
+    fn join(b: &mut BuildContext<M>, left: Self, right: Self, f: Option<CombineFn>) -> Stream<i64> {
         match (left, right) {
             (Chained::One(left), right) => {
                 let right = right.materialized(b);
@@ -2431,7 +2490,7 @@ fn boolean_to_integer(value: bool) -> i64 {
 impl CellToken {
     /// The cell read as integers: itself, or `map_cell(i64::from)` of a
     /// boolean cell.
-    fn integers<M: EngineMode>(self, b: &mut Build<M>) -> IntegerCell {
+    fn integers<M: EngineMode>(self, b: &mut BuildContext<M>) -> IntegerCell {
         match self {
             CellToken::Integer(cell) => IntegerCell::Cell(cell),
             CellToken::IntegerState(state) => IntegerCell::State(state),
@@ -2445,7 +2504,7 @@ impl CellToken {
     }
 
     /// Its value before transaction zero, read in the build closure.
-    fn sample<M: EngineMode>(self, b: &Build<M>) -> i64 {
+    fn sample<M: EngineMode>(self, b: &BuildContext<M>) -> i64 {
         match self {
             CellToken::Integer(cell) => *cell.sample(b),
             CellToken::IntegerState(state) => *state.sample(b),
@@ -2505,7 +2564,11 @@ type Lift5 = Box<dyn Fn(&i64, &i64, &i64, &i64, &i64) -> i64 + Send>;
 type Lift6 = Box<dyn Fn(&i64, &i64, &i64, &i64, &i64, &i64) -> i64 + Send>;
 
 /// `lift` over the cells, with the function of their values.
-fn lift<M: EngineMode>(b: &mut Build<M>, cells: &[IntegerCell], e: Expression) -> IntegerCell {
+fn lift<M: EngineMode>(
+    b: &mut BuildContext<M>,
+    cells: &[IntegerCell],
+    e: Expression,
+) -> IntegerCell {
     match *cells {
         [c0, c1] => {
             let f: Lift2 = Box::new(move |a: &i64, c: &i64| evaluate(&e, &[*a, *c]));
@@ -2581,7 +2644,7 @@ enum Choices {
 impl Choices {
     /// Declares that `node`, whose function captures these cells, keeps
     /// them alive.
-    fn declare<M: EngineMode>(&self, b: &mut Build<M>, node: &impl TokenRef) {
+    fn declare<M: EngineMode>(&self, b: &mut BuildContext<M>, node: &impl TokenRef) {
         match self {
             Choices::Cells(cells) => declare(b, node, cells),
             Choices::States(states) => declare(b, node, states),
@@ -2625,13 +2688,17 @@ fn picker<T: Copy + Send + 'static>(index: Expression, choices: Vec<T>) -> PickF
 
 /// Declares that `node`, whose function captures `tokens`, keeps them
 /// alive: the collector cannot see a closure's captures (RFD 3).
-fn declare<M: EngineMode, T: Trace>(b: &mut Build<M>, node: &impl TokenRef, tokens: &[T]) {
+fn declare<M: EngineMode, T: Trace>(b: &mut BuildContext<M>, node: &impl TokenRef, tokens: &[T]) {
     let on: Vec<&dyn Trace> = tokens.iter().map(|token| token as &dyn Trace).collect();
     b.depends(node, &on);
 }
 
 /// `map(f).node(b)` over a materialized stream.
-fn pick<M: EngineMode, T: Send + 'static>(b: &mut Build<M>, node: Base, f: PickFn<T>) -> Stream<T> {
+fn pick<M: EngineMode, T: Send + 'static>(
+    b: &mut BuildContext<M>,
+    node: Base,
+    f: PickFn<T>,
+) -> Stream<T> {
     match node {
         Base::Stream(stream) => M::pick(b, stream, f),
         Base::Shared(shared) => M::pick(b, shared, f),
@@ -2810,7 +2877,7 @@ impl<M: EngineMode> Builder<'_, M> {
 
     /// A linear stream a hold or a constant of linear streams takes, as a
     /// node.
-    fn linear(&mut self, b: &mut Build<M>, reference: &Reference) -> Stream<i64> {
+    fn linear(&mut self, b: &mut BuildContext<M>, reference: &Reference) -> Stream<i64> {
         match self.take(reference).materialized(b) {
             Base::Stream(stream) => stream,
             Base::Shared(_) => {
@@ -2879,7 +2946,7 @@ impl<M: EngineMode> Builder<'_, M> {
     /// the cell's value before transaction zero, read in the build closure;
     /// in a body, its value before the construct's instant, read in the
     /// construct's closure.
-    fn resolve(&self, b: &Build<M>, expression: &Expression) -> Expression {
+    fn resolve(&self, b: &BuildContext<M>, expression: &Expression) -> Expression {
         let go = |e: &Expression| Box::new(self.resolve(b, e));
         match expression {
             Expression::Sample(reference) => Expression::Literal(self.cell(reference).sample(b)),
@@ -2902,16 +2969,16 @@ impl<M: EngineMode> Builder<'_, M> {
     }
 
     /// An expression of no arguments, evaluated in the build closure.
-    fn value(&self, b: &Build<M>, expression: &Expression) -> i64 {
+    fn value(&self, b: &BuildContext<M>, expression: &Expression) -> i64 {
         evaluate(&self.resolve(b, expression), &[])
     }
 
-    fn adapt(&mut self, b: &mut Build<M>, source: &Reference, adapter: Adapter) -> Built<M> {
+    fn adapt(&mut self, b: &mut BuildContext<M>, source: &Reference, adapter: Adapter) -> Built<M> {
         let chain = self.take(source);
         Built::Stream(chain.adapt(b, adapter))
     }
 
-    fn define(&mut self, b: &mut Build<M>, definition: &Definition) -> Built<M> {
+    fn define(&mut self, b: &mut BuildContext<M>, definition: &Definition) -> Built<M> {
         match definition {
             Definition::Input(k) => {
                 let input = &self.program_inputs[*k];
@@ -3403,7 +3470,7 @@ impl<M: EngineMode> Builder<'_, M> {
     }
 
     /// An observed node as I/O code listens to it; a chain gets a node.
-    fn observe(&mut self, b: &mut Build<M>, node: usize) -> Observed {
+    fn observe(&mut self, b: &mut BuildContext<M>, node: usize) -> Observed {
         match &self.nodes[node] {
             Built::Cell(cell) => Observed::Cell(*cell),
             Built::Stream(Chained::Shared(shared)) => Observed::Shared(*shared),
@@ -3442,7 +3509,7 @@ impl<M: EngineMode> Builder<'_, M> {
     /// `depends`.
     fn construct(
         &mut self,
-        b: &mut Build<M>,
+        b: &mut BuildContext<M>,
         body: &Body,
         types: BodyTypes,
         source: &Reference,
@@ -3507,7 +3574,7 @@ struct Run {
 
 /// What a construct emits for each event, from the builder that built the
 /// body: its value, or the token it names.
-type Emit<M, B> = for<'p> fn(&mut Builder<'p, M>, &mut Build<M>, &BodyResult) -> B;
+type Emit<M, B> = for<'p> fn(&mut Builder<'p, M>, &mut BuildContext<M>, &BodyResult) -> B;
 
 impl Run {
     /// Builds the body at the construct's instant, with the build context
@@ -3515,7 +3582,7 @@ impl Run {
     /// own, whose top-level nodes are the captured tokens and whose `Sample`
     /// reads, like every read during a transaction, the value before the
     /// instant.
-    fn build<M: EngineMode, B>(&self, b: &mut Build<M>, event: i64, emit: Emit<M, B>) -> B {
+    fn build<M: EngineMode, B>(&self, b: &mut BuildContext<M>, event: i64, emit: Emit<M, B>) -> B {
         let mut scope = Builder::<M> {
             program_inputs: &[],
             types: &self.types.types,
@@ -3553,7 +3620,7 @@ fn emitted(result: &BodyResult) -> &Reference {
 
 fn emit_value<M: EngineMode>(
     scope: &mut Builder<'_, M>,
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     result: &BodyResult,
 ) -> i64 {
     match result {
@@ -3566,7 +3633,7 @@ fn emit_value<M: EngineMode>(
 
 fn emit_shared<M: EngineMode>(
     scope: &mut Builder<'_, M>,
-    _: &mut Build<M>,
+    _: &mut BuildContext<M>,
     result: &BodyResult,
 ) -> Shared<i64> {
     scope.shared(emitted(result))
@@ -3574,7 +3641,7 @@ fn emit_shared<M: EngineMode>(
 
 fn emit_linear<M: EngineMode>(
     scope: &mut Builder<'_, M>,
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     result: &BodyResult,
 ) -> Stream<i64> {
     scope.linear(b, emitted(result))
@@ -3582,7 +3649,7 @@ fn emit_linear<M: EngineMode>(
 
 fn emit_cell<M: EngineMode>(
     scope: &mut Builder<'_, M>,
-    _: &mut Build<M>,
+    _: &mut BuildContext<M>,
     result: &BodyResult,
 ) -> Cell<i64> {
     match scope.cell(emitted(result)) {
@@ -3593,7 +3660,7 @@ fn emit_cell<M: EngineMode>(
 
 fn emit_state<M: EngineMode>(
     scope: &mut Builder<'_, M>,
-    _: &mut Build<M>,
+    _: &mut BuildContext<M>,
     result: &BodyResult,
 ) -> State<i64> {
     match scope.cell(emitted(result)) {
@@ -3605,13 +3672,13 @@ fn emit_state<M: EngineMode>(
 /// `node.construct(b, f)`, `f` building the body with `run` and emitting
 /// with `emit`.
 fn construct_node<M: EngineMode, B: Send + 'static>(
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     node: Base,
     run: Arc<Run>,
     emit: Emit<M, B>,
 ) -> Stream<B> {
     let f: ConstructFn<M, B> =
-        Box::new(move |b: &mut Build<M>, event: i64| run.build(b, event, emit));
+        Box::new(move |b: &mut BuildContext<M>, event: i64| run.build(b, event, emit));
     match node {
         Base::Stream(stream) => M::construct(b, stream, f),
         Base::Shared(shared) => M::construct(b, shared, f),
@@ -3623,7 +3690,7 @@ fn construct_node<M: EngineMode, B: Send + 'static>(
 /// reaches otherwise would be collected before the closure's next run uses
 /// it (findings F61 and F62).
 fn declare_captures<M: EngineMode>(
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     node: &impl TokenRef,
     captured: &[Option<Captured>],
 ) {
@@ -3634,7 +3701,7 @@ fn declare_captures<M: EngineMode>(
 /// The build closure's body. A slot, if given, feeds the one engine input
 /// of its program input.
 fn build_program<M: EngineMode>(
-    b: &mut Build<M>,
+    b: &mut BuildContext<M>,
     program: &Program,
     checked: &Checked,
     slot: Option<(usize, &'static InputSlot<i64>)>,

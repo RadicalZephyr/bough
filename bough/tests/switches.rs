@@ -75,13 +75,13 @@ fn run(graph: &mut Runtime, sends: &[Send], reversed: bool) {
 
 /// A cell holding every step of `cell`, built beside it, so that it
 /// records the step at `[0]` too.
-fn log_steps<A: Clone + Trace + 'static>(b: &mut Build, cell: Cell<A>) -> Cell<Vec<A>> {
+fn log_steps<A: Clone + Trace + 'static>(b: &mut BuildContext, cell: Cell<A>) -> Cell<Vec<A>> {
     let steps = cell.steps(b);
     log_events(b, steps)
 }
 
 /// A cell holding every event of `stream`.
-fn log_events<A: Clone + Trace + 'static>(b: &mut Build, stream: Stream<A>) -> Cell<Vec<A>> {
+fn log_events<A: Clone + Trace + 'static>(b: &mut BuildContext, stream: Stream<A>) -> Cell<Vec<A>> {
     stream.accumulate(b, Vec::new(), |v, log: &Vec<A>| {
         let mut log = log.clone();
         log.push(v);

@@ -31,8 +31,8 @@ use crate::engine::edge::{Drain, Lock};
 /// `static`; the fold is a `fn` pointer so that the type can be named there,
 /// and a closure that captures nothing converts to one. Dropping the older
 /// event is [`keep_latest`](InputSlot::keep_latest), declared rather than
-/// silent. Build connects the slot to an input with
-/// [`connect`](crate::Build::connect).
+/// silent. The build context connects the slot to an input with
+/// [`connect`](crate::BuildContext::connect).
 ///
 /// ```
 /// use bough::prelude::*;

@@ -1,16 +1,16 @@
-//! Build contexts: the one trait every materializer takes, and
-//! [`Portable`], the context a mode-agnostic core is written against.
+//! Builders: [`Builder`], the one trait every materializer takes, and
+//! [`Portable`], the builder a mode-agnostic core is written against.
 //!
-//! A materializer takes `&mut C` for any [`Context`] `C`, and asks
+//! A materializer takes `&mut C` for any [`Builder`] `C`, and asks
 //! [`Stores<T>`] of `C` for each value and closure it keeps. A
-//! [`Build<M>`](crate::Build) stores what its mode [`Accepts`]; a
+//! [`BuildContext<M>`](crate::BuildContext) stores what its mode [`Accepts`]; a
 //! [`Portable`] stores what is `Send`, whichever builder it borrows. So
 //! `stream.hold(b, x)` reads the same with all three, and a portable core
 //! can store a closure it writes itself, since the bound names `Portable`,
 //! not the closure.
 //!
 //! The hidden methods are the engine's primitives, each typed by the node
-//! it makes rather than by the mode: a `Build<M>` takes its mode's
+//! it makes rather than by the mode: a `BuildContext<M>` takes its mode's
 //! functions, and a `Portable` matches on the builder it borrows and takes
 //! that one's. A portable chain is monomorphized once per mode it may run
 //! in, because the node functions stay per mode.
@@ -19,7 +19,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::build::{Build, CellLoop, StateLoop, StreamLoop};
+use crate::build::{BuildContext, CellLoop, StateLoop, StreamLoop};
 use crate::cell::CellRef;
 use crate::engine::COMMITS;
 use crate::engine::nodes::DefaultNode;
@@ -41,8 +41,8 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-/// A node type with functions for every mode the target has, so a context
-/// that is not one mode can take whichever its builder needs.
+/// A node type with functions for every mode the target has, so a builder
+/// that is not one mode can take whichever the context it borrows needs.
 #[doc(hidden)]
 #[cfg(target_has_atomic = "ptr")]
 pub trait AllOps: NodeOps<Local> + NodeOps<Threaded> {}
@@ -58,7 +58,7 @@ pub trait AllOps: NodeOps<Local> {}
 impl<N: NodeOps<Local>> AllOps for N {}
 
 /// A node's data plane before it is in a mode's carrier: [`Data`] over a
-/// context's erased type.
+/// builder's erased type.
 #[doc(hidden)]
 pub enum Plane<E> {
     Empty,
@@ -102,22 +102,22 @@ impl<E> Plane<E> {
     }
 }
 
-/// What every node-creating operation takes: a [`Build`] of either mode,
+/// What every node-creating operation takes: a [`BuildContext`] of either mode,
 /// or a [`Portable`] view of one. Sealed.
 ///
-/// Its public methods are the builder's own operations, `input`,
+/// Its public methods are the build context's own operations, `input`,
 /// `constant`, the loops, `depends` and `anchor`, defined once here for
-/// every context; the rest are hidden. [`prelude`](crate::prelude) brings
+/// every builder; the rest are hidden. [`prelude`](crate::prelude) brings
 /// it into scope.
-pub trait Context: sealed::Sealed + Sized {
-    /// What [`Stores::erase`] makes: the mode's carrier for a `Build`, a
+pub trait Builder: sealed::Sealed + Sized {
+    /// What [`Stores::erase`] makes: the mode's carrier for a `BuildContext`, a
     /// `Send` box for a `Portable`.
     #[doc(hidden)]
     type Erased: 'static;
 
-    /// What a `construct` closure built in this context receives.
+    /// What a `construct` closure built with this builder receives.
     #[doc(hidden)]
-    type Inner<'p>: Context;
+    type Inner<'p>: Builder;
 
     /// Erases a value the engine makes that is `Send` whatever the user's
     /// types are.
@@ -215,7 +215,7 @@ pub trait Context: sealed::Sealed + Sized {
     #[doc(hidden)]
     fn root(&mut self, nodes: Vec<u32>) -> Anchor;
 
-    // ----- the builder's own operations, one definition for every context
+    // ----- the builder's own operations, one definition for every builder
 
     /// Anchors what a build closure or a
     /// [`construct`](crate::Source::construct) closure sends out to I/O
@@ -359,7 +359,7 @@ pub trait Context: sealed::Sealed + Sized {
     /// [`close`](CellLoop::close) checks. Reading a cell's value with
     /// `snapshot`, `gate` or `sample` is not a dependency, since the read
     /// sees the value from before the instant. Neither is a
-    /// `switch_stream`'s selection, nor [`depends`](Context::depends); and
+    /// `switch_stream`'s selection, nor [`depends`](Builder::depends); and
     /// the output of a `split` or a `defer` fires in a later child instant,
     /// so it does not depend on the input. Every other use of a cell is a
     /// dependency: `map_cell`, `lift`, the stream views `steps` and
@@ -378,7 +378,7 @@ pub trait Context: sealed::Sealed + Sized {
     /// scope ends is a panic there, and so is sampling the forward token
     /// before the loop is closed, since there is no value to return. A
     /// definition that is a [`State`] closes a
-    /// [`state_loop`](Context::state_loop) instead.
+    /// [`state_loop`](Builder::state_loop) instead.
     fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
         let token = self.open_forward(false);
         (Cell::from_token(token), CellLoop::new(token))
@@ -411,7 +411,7 @@ pub trait Context: sealed::Sealed + Sized {
     /// assert_eq!(*graph.sample(members), ["ada", "grace"]);
     /// ```
     ///
-    /// The rule is the one [`cell_loop`](Context::cell_loop) states: the
+    /// The rule is the one [`cell_loop`](Builder::cell_loop) states: the
     /// dependency graph stays acyclic, and a read of a cell's value from
     /// before the instant is not a dependency.
     fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
@@ -440,7 +440,7 @@ pub trait Context: sealed::Sealed + Sized {
     /// assert_eq!(*graph.sample(total), 5);
     /// ```
     ///
-    /// The rule is the one [`cell_loop`](Context::cell_loop) states: the
+    /// The rule is the one [`cell_loop`](Builder::cell_loop) states: the
     /// dependency graph stays acyclic, and a read of a cell's value from
     /// before the instant is not a dependency. So the definition above may
     /// snapshot a hold of the forward, and a loop through such a read needs
@@ -517,7 +517,7 @@ pub trait Context: sealed::Sealed + Sized {
 /// and needs no `Stores<Stream<A>>` bound.
 fn hold_input<C, A>(build: &mut C, stream: Stream<A>, initial: A) -> Cell<A>
 where
-    C: Context + Stores<A>,
+    C: Builder + Stores<A>,
     A: Trace + 'static,
 {
     let input = build.check_token(stream.token);
@@ -528,13 +528,13 @@ where
     Cell::from_token(build.token_of(n))
 }
 
-/// Whether a context may store a `T`: a `Build<M>` when `M:`
+/// Whether a builder may store a `T`: a `BuildContext<M>` when `M:`
 /// [`Accepts<T>`], a [`Portable`] when `T: Send`.
 ///
-/// Every materializer bounds its context on this for the values and
+/// Every materializer bounds its builder on this for the values and
 /// closures it keeps, which is where a non-`Send` capture in a portable
 /// core fails to compile.
-pub trait Stores<T>: Context {
+pub trait Stores<T>: Builder {
     /// Erases `T` in one of the engine's shapes.
     #[doc(hidden)]
     fn erase(what: Erase<T>) -> Self::Erased
@@ -542,9 +542,9 @@ pub trait Stores<T>: Context {
         T: Sized + 'static;
 }
 
-impl<M: Mode> sealed::Sealed for Build<M> {}
+impl<M: Mode> sealed::Sealed for BuildContext<M> {}
 
-impl<M: Mode, T> Stores<T> for Build<M>
+impl<M: Mode, T> Stores<T> for BuildContext<M>
 where
     M: Accepts<T>,
 {
@@ -556,24 +556,24 @@ where
     }
 }
 
-impl<M: Mode> Context for Build<M> {
+impl<M: Mode> Builder for BuildContext<M> {
     type Erased = M::Carrier;
-    type Inner<'p> = Build<M>;
+    type Inner<'p> = BuildContext<M>;
 
     fn erase_send<T: Send + 'static>(value: T) -> M::Carrier {
         M::erase_send(value)
     }
 
     fn check_token(&self, t: Token) -> u32 {
-        Build::check(self, t)
+        BuildContext::check(self, t)
     }
 
     fn token_of(&self, n: u32) -> Token {
-        Build::token(self, n)
+        BuildContext::token(self, n)
     }
 
     fn reach_of<S: Source>(&self, chain: &S) -> (u32, Vec<u32>) {
-        Build::chain_reach(self, chain)
+        BuildContext::chain_reach(self, chain)
     }
 
     fn make<N: AllOps>(
@@ -586,8 +586,8 @@ impl<M: Mode> Context for Build<M> {
         reach: Vec<u32>,
     ) -> u32 {
         let data = data.into_data::<M>(|e| e);
-        let n = Build::materialize(self, kind, data, parts, M::ops_of::<N>(), deps, flags);
-        Build::set_reach(self, n, reach);
+        let n = BuildContext::materialize(self, kind, data, parts, M::ops_of::<N>(), deps, flags);
+        BuildContext::set_reach(self, n, reach);
         n
     }
 
@@ -598,7 +598,7 @@ impl<M: Mode> Context for Build<M> {
         parts: Box<[M::Carrier]>,
         slot: M::Carrier,
     ) -> u32 {
-        Build::capture_pair(
+        BuildContext::capture_pair(
             self,
             dependency,
             reach,
@@ -610,18 +610,18 @@ impl<M: Mode> Context for Build<M> {
     }
 
     fn make_switch_cell<C: CellRef>(&mut self, outer: Token) -> Token {
-        Build::switch_cell_node::<C>(self, outer)
+        BuildContext::switch_cell_node::<C>(self, outer)
     }
 
     fn make_switch_stream<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
     where
         S::Event: 'static,
     {
-        Build::switch_stream_node::<S>(self, outer, slot)
+        BuildContext::switch_stream_node::<S>(self, outer, slot)
     }
 
     fn close_cell(&mut self, forward: Token, definition: Token) {
-        Build::close_cell_loop(self, forward, definition)
+        BuildContext::close_cell_loop(self, forward, definition)
     }
 
     fn close_stream<N: AllOps>(
@@ -632,7 +632,7 @@ impl<M: Mode> Context for Build<M> {
         slot: M::Carrier,
         chain: M::Carrier,
     ) {
-        Build::close_stream_loop(
+        BuildContext::close_stream_loop(
             self,
             forward,
             dependency,
@@ -657,21 +657,21 @@ impl<M: Mode> Context for Build<M> {
     {
         let ops = &<ConstructNode<S, F, B, Direct> as NodeOps<M>>::OPS;
         let data = Data::Slot(slot);
-        let n = Build::materialize(self, Kind::Stream, data, parts, ops, &[dependency], 0);
-        Build::set_reach(self, n, reach);
+        let n = BuildContext::materialize(self, Kind::Stream, data, parts, ops, &[dependency], 0);
+        BuildContext::set_reach(self, n, reach);
         n
     }
 
     fn read<A: 'static>(&self, t: Token) -> &A {
-        let i = Build::check(self, t);
-        Build::value::<A>(self, i)
+        let i = BuildContext::check(self, t);
+        BuildContext::value::<A>(self, i)
     }
 
     fn open_forward(&mut self, stream: bool) -> Token {
         if stream {
-            Build::stream_loop_node(self)
+            BuildContext::stream_loop_node(self)
         } else {
-            Build::loop_node(self)
+            BuildContext::loop_node(self)
         }
     }
 
@@ -689,7 +689,7 @@ impl<M: Mode> Context for Build<M> {
 }
 
 /// The builder a mode-agnostic core is written against: a view of a
-/// `Build<Local>` or a `Build<Threaded>` that stores only what is `Send`.
+/// `BuildContext<Local>` or a `BuildContext<Threaded>` that stores only what is `Send`.
 ///
 /// A core takes `&mut Portable<'_>`, which has no type parameter, so a
 /// closure it writes itself needs no bound to name it: the compiler checks
@@ -764,9 +764,9 @@ pub struct Portable<'a> {
 
 /// The builder a `Portable` borrows.
 enum Arm<'a> {
-    Local(&'a mut Build<Local>),
+    Local(&'a mut BuildContext<Local>),
     #[cfg(target_has_atomic = "ptr")]
-    Threaded(&'a mut Build<Threaded>),
+    Threaded(&'a mut BuildContext<Threaded>),
 }
 
 /// Runs `$e` with `$b` bound to the borrowed builder, whichever mode it is,
@@ -808,7 +808,7 @@ fn parts_into<C>(
     parts.into_vec().into_iter().map(into).collect()
 }
 
-impl Build<Local> {
+impl BuildContext<Local> {
     /// A [`Portable`] view of this builder, for a core that runs in both
     /// modes. It stores only what is `Send`; the graph it builds is this
     /// one, so its tokens and this builder's mix freely.
@@ -820,7 +820,7 @@ impl Build<Local> {
 }
 
 #[cfg(target_has_atomic = "ptr")]
-impl Build<Threaded> {
+impl BuildContext<Threaded> {
     /// A [`Portable`] view of this builder, for a core that runs in both
     /// modes.
     pub fn portable(&mut self) -> Portable<'_> {
@@ -832,13 +832,13 @@ impl Build<Threaded> {
 
 impl<'a> Portable<'a> {
     /// A view of a `Local` builder, for the engine's construct node.
-    pub(crate) fn local(b: &'a mut Build<Local>) -> Self {
+    pub(crate) fn local(b: &'a mut BuildContext<Local>) -> Self {
         Portable { arm: Arm::Local(b) }
     }
 
     /// A view of a `Threaded` builder, for the engine's construct node.
     #[cfg(target_has_atomic = "ptr")]
-    pub(crate) fn threaded(b: &'a mut Build<Threaded>) -> Self {
+    pub(crate) fn threaded(b: &'a mut BuildContext<Threaded>) -> Self {
         Portable {
             arm: Arm::Threaded(b),
         }
@@ -856,7 +856,7 @@ impl<T: Send> Stores<T> for Portable<'_> {
     }
 }
 
-impl<'a> Context for Portable<'a> {
+impl<'a> Builder for Portable<'a> {
     type Erased = Box<dyn Any + Send>;
     type Inner<'p> = Portable<'p>;
 
