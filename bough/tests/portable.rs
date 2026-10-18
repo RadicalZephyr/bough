@@ -451,3 +451,47 @@ fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
         *local_heard.lock().unwrap()
     );
 }
+
+// ----------------------------------------------------------- Send
+
+/// A portable core built under `Threaded` leaves the runtime `Send`: it is
+/// built on this thread, moved to another, and pumped there, with events
+/// queued from this one.
+#[test]
+fn a_threaded_runtime_with_a_portable_core_moves_to_another_thread() {
+    fn assert_send<T: Send>(_: &T) {}
+
+    let (mut graph, edge) = Runtime::build_threaded(|b| {
+        let (handles, inputs) = pump_in!(b);
+        (handles, pump_core(&mut b.portable(), inputs))
+    });
+    assert_send(&graph);
+    let (h, out) = edge.keep();
+    let sales = Arc::new(Mutex::new(Vec::new()));
+    let log = sales.clone();
+    graph
+        .listen(out.sales, move |s| log.lock().unwrap().push(s))
+        .keep();
+
+    let remote = graph.remote_io();
+    let (queued, ready) = std::sync::mpsc::channel::<()>();
+    let pump = std::thread::spawn(move || {
+        ready.recv().unwrap();
+        graph.pump();
+        (
+            *graph.sample(out.litres),
+            *graph.sample(out.dollars),
+            *graph.sample(out.filling),
+        )
+    });
+    remote.send(h.nozzle, Nozzle::Up).unwrap();
+    remote.send(h.pulses, 10).unwrap();
+    remote.send(h.pulses, 20).unwrap();
+    remote.send(h.nozzle, Nozzle::Down).unwrap();
+    queued.send(()).unwrap();
+    let (litres, dollars, filling) = pump.join().unwrap();
+    assert!((litres - 3.0).abs() < 1e-9);
+    assert!((dollars - 6.0).abs() < 1e-9);
+    assert!(!filling);
+    assert_eq!(sales.lock().unwrap().len(), 1);
+}
