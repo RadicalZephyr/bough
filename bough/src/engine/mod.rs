@@ -45,6 +45,7 @@ mod tx;
 
 use core::any::Any;
 use core::cell::OnceCell;
+use core::panic::Location;
 
 use alloc::vec::Vec;
 
@@ -168,11 +169,13 @@ pub(crate) struct Relations {
 }
 
 /// Bookkeeping the fast path never reads.
-#[derive(Default)]
 pub(crate) struct Cold {
     /// Bumped when collection frees the slot, so a stale token fails its
     /// check. A slot freed at `u32::MAX` is retired.
     pub(crate) generation: u32,
+    /// Where the node in the slot was created: the user's call, which
+    /// every token made from the slot carries (RFD 3).
+    pub(crate) created: &'static Location<'static>,
     /// A split capture's output and back; a switch_stream's outer.
     pub(crate) partner: u32,
     /// Reach that is not a dependency: snapshot and gate cells, `depends`,
@@ -199,9 +202,29 @@ pub(crate) struct Cold {
 }
 
 impl Cold {
-    /// A reused slot's bookkeeping, fresh but for the generation, which
-    /// its free bumped, and the capacity of its lists.
-    pub(crate) fn reset(&mut self) {
+    /// A new slot's bookkeeping, for a node created at `created`.
+    pub(crate) fn new(created: &'static Location<'static>) -> Self {
+        Cold {
+            generation: 0,
+            created,
+            partner: 0,
+            reach: Vec::new(),
+            watchers: Vec::new(),
+            done: 0,
+            pulling: 0,
+            prep_enter: 0,
+            prep_done: 0,
+            relink: 0,
+            visit: 0,
+            affine_consumer: 0,
+        }
+    }
+
+    /// A reused slot's bookkeeping, for a node created at `created`: fresh
+    /// but for the generation, which its free bumped, and the capacity of
+    /// its lists.
+    pub(crate) fn reset(&mut self, created: &'static Location<'static>) {
+        self.created = created;
         self.partner = 0;
         self.reach.clear();
         self.watchers.clear();

@@ -58,6 +58,7 @@ pub trait Lift<F, R>: sealed::Sealed + Sized {
     /// A read-through cell of these cells: `f` over their values, computed on
     /// read and memoized until one of them steps. Two inputs stepping in one
     /// instant are one step of the result.
+    #[track_caller]
     fn lift<X>(self, builder: &mut X, f: F) -> Self::Output
     where
         X: Builder + Stores<F> + Stores<R>;
@@ -84,6 +85,7 @@ macro_rules! lift_tuple {
         {
             type Output = <join!($($cell),+) as CellKind>::Ref<R>;
 
+            #[track_caller]
             fn lift<X>(self, builder: &mut X, f: F) -> Self::Output
             where
                 X: Builder + Stores<F> + Stores<R>,

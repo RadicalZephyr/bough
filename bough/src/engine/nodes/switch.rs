@@ -152,6 +152,7 @@ fn inner_at(kind: Kind) -> usize {
 impl<M: Mode> BuildContext<M> {
     /// A switch_cell over `outer`, a cell holding `C` tokens. Its one
     /// dependency until its first evaluation is the outer.
+    #[track_caller]
     pub(crate) fn switch_cell_node<C: CellRef>(&mut self, outer: Token) -> Token {
         let outer = self.check(outer);
         let ops = &<SwitchCellNode<C> as NodeOps<M>>::OPS;
@@ -171,6 +172,7 @@ impl<M: Mode> BuildContext<M> {
     /// evaluation. The outer keeps it in reach and watches for it. Over
     /// affine streams, refused if the outer, or a cell that is the same by
     /// construction, has a switch_stream already.
+    #[track_caller]
     pub(crate) fn switch_stream_node<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
     where
         S::Event: 'static,

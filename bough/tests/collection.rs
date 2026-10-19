@@ -1657,3 +1657,101 @@ fn a_due_collection_runs_before_a_later_build_returns() {
     assert_eq!(graph.try_sample(hold).err(), Some(TokenError::Stale));
     assert_eq!(graph.live_nodes(), 4, "the input, the share, the constants");
 }
+
+// ----------------------------------------------------------- creation locations
+
+/// Where a node was made, as a stale-token panic names it: this file and
+/// a line in it.
+fn made_at(line: u32) -> String {
+    format!("{}:{line}:", file!())
+}
+
+/// A build whose nodes no root reaches once it returns, so the tokens it
+/// hands out are stale: an input, a hold of it, and a stream of it, each
+/// with the line it was made on.
+#[allow(clippy::type_complexity)]
+fn stale_tokens(graph: &mut Runtime) -> ((Input<u32>, u32), (Cell<u32>, u32), (Shared<u32>, u32)) {
+    let lost = graph.build_anchored(|b| {
+        let ((numbers, numbers_in), input_at) = (b.input::<u32>(), line!());
+        let (numbers, shared_at) = (numbers.share(b), line!());
+        let (held, held_at) = (numbers.hold(b, 0u32), line!());
+        (
+            (numbers_in, input_at),
+            (held, held_at),
+            (numbers, shared_at),
+        )
+    });
+    let tokens = *lost;
+    drop(lost);
+    graph.collect_garbage();
+    tokens
+}
+
+/// Graph code that uses a stale token panics, in a release build as in a
+/// debug one, and the panic names where the token's node was made: the
+/// test's own call, not the engine's.
+#[test]
+fn a_stale_token_in_graph_code_names_where_its_node_was_made() {
+    let mut graph = Runtime::local();
+    let (_, (held, held_at), _) = stale_tokens(&mut graph);
+    let message = panic_message(|| graph.build(|b| *held.sample(b)));
+    assert!(message.contains("a stale token"), "{message}");
+    assert!(message.contains(&made_at(held_at)), "{message}");
+
+    let mut graph = Runtime::local();
+    let (_, _, (numbers, shared_at)) = stale_tokens(&mut graph);
+    let message = panic_message(|| graph.build(|b| numbers.hold(b, 0u32)));
+    assert!(message.contains(&made_at(shared_at)), "{message}");
+}
+
+/// A `Runtime` operation on a stale token names where its node was made,
+/// wherever it panics today: a sample in both builds, and a send, a
+/// listener, an anchor and a send queued for the pump in a debug build,
+/// where a release build counts them instead.
+#[test]
+fn a_stale_token_at_the_runtime_names_where_its_node_was_made() {
+    let mut graph = Runtime::local();
+    let ((numbers_in, input_at), (held, held_at), (numbers, shared_at)) = stale_tokens(&mut graph);
+    let message = panic_message(|| *graph.sample(held));
+    assert!(message.contains(&made_at(held_at)), "{message}");
+    if cfg!(debug_assertions) {
+        let message = panic_message(|| graph.send(numbers_in, 1));
+        assert!(message.contains(&made_at(input_at)), "{message}");
+        let message = panic_message(|| graph.listen(numbers, |_| ()));
+        assert!(message.contains(&made_at(shared_at)), "{message}");
+        let message = panic_message(|| graph.anchor(held));
+        assert!(message.contains(&made_at(held_at)), "{message}");
+        graph.remote_io().send(numbers_in, 1).unwrap();
+        let message = panic_message(|| graph.pump());
+        assert!(message.contains(&made_at(input_at)), "{message}");
+        let io = graph.io();
+        io.send(numbers_in, 1).unwrap();
+        let message = panic_message(|| graph.pump());
+        assert!(message.contains(&made_at(input_at)), "{message}");
+    } else {
+        graph.send(numbers_in, 1);
+        let _ = graph.listen(numbers, |_| ());
+        assert_eq!(graph.stale_operations(), 2, "counted, as before");
+    }
+}
+
+/// A stale token whose slot another node has taken since still names its
+/// own node's location, not the new node's: the location travels in the
+/// token. The free list hands slots out oldest first, so one of the next
+/// three nodes takes the hold's.
+#[test]
+fn a_stale_token_in_a_reused_slot_names_its_own_node() {
+    let mut graph = Runtime::local();
+    let (_, (held, held_at), _) = stale_tokens(&mut graph);
+    let mut taker = None;
+    for _ in 0..3 {
+        let (constant, at) = graph.build(|b| (b.constant(6u32), line!()));
+        if format!("{constant:?}") == format!("{held:?}") {
+            taker = Some(at);
+        }
+    }
+    let taker_at = taker.expect("one of them takes the hold's slot");
+    let message = panic_message(|| *graph.sample(held));
+    assert!(message.contains(&made_at(held_at)), "{message}");
+    assert!(!message.contains(&made_at(taker_at)), "{message}");
+}

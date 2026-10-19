@@ -113,6 +113,7 @@ impl CellKind for NoSteps {
 /// A read-through cell over the cells at `inputs`: `f` of their values,
 /// computed on read. Its function and its memo live in the node's data; it
 /// has no program.
+#[track_caller]
 pub(crate) fn read_through<C, V, R, F>(builder: &mut C, inputs: &[u32], f: F) -> Token
 where
     C: Builder + Stores<F> + Stores<R>,
@@ -158,6 +159,7 @@ impl<A: 'static> State<A> {
     ///     let _counts = count.steps(b); // error: no method named `steps` found for struct `State`
     /// });
     /// ```
+    #[track_caller]
     pub fn map_cell<C, B, F>(self, builder: &mut C, f: F) -> State<B>
     where
         C: Builder + Stores<F> + Stores<B>,
@@ -205,6 +207,7 @@ impl<A: 'static> Cell<A> {
     /// view computes the value after the instant during the instant, and
     /// that value becomes the memo at commit, so the view and the listeners
     /// share one call per step.
+    #[track_caller]
     pub fn map_cell<C, B, F>(self, builder: &mut C, f: F) -> Cell<B>
     where
         C: Builder + Stores<F> + Stores<B>,
@@ -234,6 +237,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// after the instant and kept, and at commit it becomes the cell's
     /// memo, so the cell's function runs once per step, however many steps
     /// views and listeners the cell has.
+    #[track_caller]
     pub fn steps<C>(self, builder: &mut C) -> Stream<A>
     where
         C: Builder + Stores<A>,
@@ -250,6 +254,7 @@ impl<A: Clone + 'static> Cell<A> {
     /// hold built there over it starts at the cell's value. A creation
     /// and a step in one instant are one event, carrying the value after
     /// the step.
+    #[track_caller]
     pub fn steps_with_current<C>(self, builder: &mut C) -> Stream<A>
     where
         C: Builder + Stores<A>,
@@ -260,6 +265,7 @@ impl<A: Clone + 'static> Cell<A> {
 
 /// The node of `steps` and `steps_with_current`: a stream node whose one
 /// dependency is the cell, and which has no program of its own.
+#[track_caller]
 fn steps_node<C, A, const CURRENT: bool>(cell: Cell<A>, builder: &mut C) -> Token
 where
     C: Builder + Stores<A>,
@@ -336,6 +342,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// may be a loop that is not closed yet. Its first link and every move
     /// to another inner check that no cycle forms, and one that does is a
     /// panic that poisons the graph, naming the cycle's nodes.
+    #[track_caller]
     pub fn switch_cell<C: Builder>(self, builder: &mut C) -> Cell<A> {
         Cell::from_token(builder.make_switch_cell::<Cell<A>>(self.token))
     }
@@ -370,6 +377,7 @@ impl<A: 'static> Cell<State<A>> {
     /// graph.send(pick_in, true);
     /// assert_eq!(*graph.sample(current), ["ada"]);
     /// ```
+    #[track_caller]
     pub fn switch_cell<C: Builder>(self, builder: &mut C) -> State<A> {
         State::from_token(builder.make_switch_cell::<State<A>>(self.token))
     }
@@ -470,6 +478,7 @@ where
     ///     let _events = selected.switch_stream(b); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     pub fn switch_stream<C>(self, builder: &mut C) -> Stream<S::Event>
     where
         C: Builder + Stores<S::Event>,

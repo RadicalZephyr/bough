@@ -203,6 +203,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// The hold is the chain's sole consumer and moves the event into its
     /// committed value at commit, so no `Clone` is needed.
+    #[track_caller]
     fn hold<C>(self, builder: &mut C, initial: Self::Event) -> Cell<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<Self::Event>,
@@ -222,6 +223,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// The cell being snapshotted is the result itself, so `f` reads the
     /// accumulator's value from before the instant, as every reader in the
     /// transaction does.
+    #[track_caller]
     fn accumulate<C, S, F>(self, builder: &mut C, initial: S, f: F) -> Cell<S>
     where
         C: Builder + Stores<Self> + Stores<S> + Stores<F>,
@@ -266,6 +268,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///         .accumulate_mut(b, 0u32, |_, n: &mut u32| *n += 1); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn accumulate_mut<C, S, F>(self, builder: &mut C, initial: S, f: F) -> State<S>
     where
         C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<Self::Event>,
@@ -312,6 +315,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn scan<C, S, B, F>(self, builder: &mut C, initial: S, f: F) -> Stream<B>
     where
         C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<B>,
@@ -340,6 +344,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// Explicit fan-out: a stream with any number of consumers, each of which
     /// clones the event. This and `map_to` are the only places `Clone` is
     /// required of a stream's events.
+    #[track_caller]
     fn share<C>(self, builder: &mut C) -> Shared<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<Self::Event>,
@@ -364,6 +369,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn node<C>(self, builder: &mut C) -> Stream<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<Self::Event>,
@@ -396,6 +402,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _halves = numbers.map(|n| (Rc::new(n), n)).unzip(b); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn unzip<C, A, B>(self, builder: &mut C) -> (Stream<A>, Stream<B>)
     where
         Self: Source<Event = (A, B)>,
@@ -421,6 +428,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
 
     /// Merges two streams; `f` combines simultaneous events, with this
     /// stream's event on the left. Both inputs move through.
+    #[track_caller]
     fn merge<C, T, F>(self, builder: &mut C, other: T, f: F) -> Stream<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<T> + Stores<F> + Stores<Self::Event>,
@@ -433,6 +441,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     }
 
     /// Merges two streams, this stream winning when both fire.
+    #[track_caller]
     fn or_else<C, T>(self, builder: &mut C, other: T) -> Stream<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<T> + Stores<Self::Event>,
@@ -512,6 +521,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn split<C>(self, builder: &mut C) -> Stream<<Self::Event as IntoIterator>::Item>
     where
         C: Builder
@@ -594,6 +604,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn defer<C>(self, builder: &mut C) -> Stream<Self::Event>
     where
         C: Builder + Stores<Self> + Stores<Self::Event>,
@@ -691,6 +702,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
     /// });
     /// ```
+    #[track_caller]
     fn construct<C, B, F>(self, builder: &mut C, f: F) -> Stream<B>
     where
         C: Builder + Stores<Self> + Stores<F> + Stores<B>,
@@ -709,6 +721,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
 }
 
 /// The node of `node` and `share`: the chain, fused into one program.
+#[track_caller]
 fn chain_node<S, C>(chain: S, builder: &mut C) -> Token
 where
     S: Source,
@@ -725,6 +738,7 @@ where
 /// One of `unzip`'s halves, of node type `N`: a stream node whose slot
 /// holds `H`s, with no parts, which depends on the pairs node and takes its
 /// half from there.
+#[track_caller]
 fn half_node<C, H, N>(builder: &mut C, pairs: u32) -> Token
 where
     C: Builder + Stores<H>,
@@ -737,6 +751,7 @@ where
 }
 
 /// The node of `merge` and `or_else`: two chains and an erased function.
+#[track_caller]
 fn merge_node<C, S, T, F>(left: S, builder: &mut C, right: T, f: C::Erased) -> Stream<S::Event>
 where
     C: Builder + Stores<S> + Stores<T> + Stores<S::Event>,

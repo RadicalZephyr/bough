@@ -1,6 +1,7 @@
 //! Tokens: the names I/O code and graph code hold for nodes.
 //!
-//! A token is an index, a generation and a graph id. It has no method that
+//! A token is an index, a generation and a graph id, and where its node was
+//! created, for a stale-token panic to name. It has no method that
 //! creates a node without a [`BuildContext`](crate::BuildContext). `Cell`, `State`,
 //! `Input` and `Shared` are `Copy` for every event type; `Stream` is
 //! move-only because it is affine (RFD 4).
@@ -8,14 +9,39 @@
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
+use core::panic::Location;
 
 /// The node reference inside every token. `pub` so the sealed accessor may
 /// name it, but the module is private, so it is unnameable from outside.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+///
+/// It carries where its node was created, the user's call that
+/// `#[track_caller]` found, so that a stale-token panic can name it after
+/// the node is collected and its slot reused (RFD 3). The location is not
+/// part of the token's identity: equality and hashing ignore it.
+#[derive(Clone, Copy, Debug)]
 pub struct Token {
     pub(crate) index: u32,
     pub(crate) generation: u32,
     pub(crate) graph: u32,
+    pub(crate) created: &'static Location<'static>,
+}
+
+impl PartialEq for Token {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.generation == other.generation
+            && self.graph == other.graph
+    }
+}
+
+impl Eq for Token {}
+
+impl Hash for Token {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.index.hash(state);
+        self.generation.hash(state);
+        self.graph.hash(state);
+    }
 }
 
 pub(crate) mod sealed {
@@ -39,7 +65,8 @@ pub trait TokenRef: sealed::Sealed {}
 /// and using it twice is a compile error. To give it more than one consumer,
 /// [`share`](crate::Source::share) it. A toolkit's event becomes a Bough
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
-/// token `Send` and `Sync` whatever `A` is; a token is three integers.
+/// token `Send` and `Sync` whatever `A` is; a token is three integers and
+/// a `&'static` source location.
 #[must_use = "streams do nothing unless consumed"]
 pub struct Stream<A> {
     pub(crate) token: Token,
@@ -166,3 +193,18 @@ copy_impls!(Shared);
 copy_impls!(Cell);
 copy_impls!(State);
 copy_impls!(Input);
+
+/// Every token stays `Send` and `Sync` whatever its event type, and every
+/// one but the affine `Stream` stays `Copy`, with the creation location in
+/// it.
+const _: () = {
+    const fn copy_send_sync<T: Copy + Send + Sync>() {}
+    const fn send_sync<T: Send + Sync>() {}
+    type NotSend = alloc::rc::Rc<u8>;
+    copy_send_sync::<Token>();
+    copy_send_sync::<Shared<NotSend>>();
+    copy_send_sync::<Cell<NotSend>>();
+    copy_send_sync::<State<NotSend>>();
+    copy_send_sync::<Input<NotSend>>();
+    send_sync::<Stream<NotSend>>();
+};

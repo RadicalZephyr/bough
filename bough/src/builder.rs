@@ -138,6 +138,7 @@ pub trait Builder: sealed::Sealed + Sized {
 
     /// Creates a node of type `N`, with the reach given.
     #[doc(hidden)]
+    #[track_caller]
     fn make<N: AllOps>(
         &mut self,
         kind: Kind,
@@ -150,6 +151,7 @@ pub trait Builder: sealed::Sealed + Sized {
 
     /// A split or defer's capture of type `N` and output of type `O`.
     #[doc(hidden)]
+    #[track_caller]
     fn make_pair<N: AllOps, O: AllOps>(
         &mut self,
         dependency: u32,
@@ -160,10 +162,12 @@ pub trait Builder: sealed::Sealed + Sized {
 
     /// A switch_cell over the cell `outer`.
     #[doc(hidden)]
+    #[track_caller]
     fn make_switch_cell<C: CellRef>(&mut self, outer: Token) -> Token;
 
     /// A switch_stream over the cell `outer`, with its slot.
     #[doc(hidden)]
+    #[track_caller]
     fn make_switch_stream<S: Node>(&mut self, outer: Token, slot: Self::Erased) -> Token
     where
         S::Event: 'static;
@@ -186,6 +190,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// A construct node over a chain `S` running an `F`, both erased in
     /// `parts`, with its slot.
     #[doc(hidden)]
+    #[track_caller]
     fn make_construct<S, B, F>(
         &mut self,
         dependency: u32,
@@ -205,6 +210,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// A loop's forward node, open in the current scope: a cell loop's,
     /// or with `stream` a stream loop's.
     #[doc(hidden)]
+    #[track_caller]
     fn open_forward(&mut self, stream: bool) -> Token;
 
     /// Adds to what node `n` reaches beyond its dependencies.
@@ -270,6 +276,7 @@ pub trait Builder: sealed::Sealed + Sized {
     ///
     /// The input's slot is created here and keeps an event nobody consumed
     /// until the next send, so the mode must accept the event type.
+    #[track_caller]
     fn input<A: 'static>(&mut self) -> (Stream<A>, Input<A>)
     where
         Self: Stores<A>,
@@ -282,6 +289,7 @@ pub trait Builder: sealed::Sealed + Sized {
 
     /// An input that may be sent more than once in a transaction; `f`
     /// combines the values, first send on the left.
+    #[track_caller]
     fn input_coalescing<A, F>(&mut self, f: F) -> (Stream<A>, Input<A>)
     where
         A: 'static,
@@ -296,6 +304,7 @@ pub trait Builder: sealed::Sealed + Sized {
     }
 
     /// A cell driven from I/O code: a hold over an input, two nodes.
+    #[track_caller]
     fn input_cell<A>(&mut self, initial: A) -> (Cell<A>, Input<A>)
     where
         A: Trace + 'static,
@@ -306,6 +315,7 @@ pub trait Builder: sealed::Sealed + Sized {
     }
 
     /// A cell driven from I/O code whose input coalesces.
+    #[track_caller]
     fn input_cell_coalescing<A, F>(&mut self, initial: A, f: F) -> (Cell<A>, Input<A>)
     where
         A: Trace + 'static,
@@ -317,6 +327,7 @@ pub trait Builder: sealed::Sealed + Sized {
     }
 
     /// A cell that never changes.
+    #[track_caller]
     fn constant<A>(&mut self, value: A) -> Cell<A>
     where
         A: Trace + 'static,
@@ -332,6 +343,7 @@ pub trait Builder: sealed::Sealed + Sized {
     ///
     /// Its node stores nothing: a reader checks the stamp before the slot,
     /// and this node's stamp never matches.
+    #[track_caller]
     fn never<A: 'static>(&mut self) -> Stream<A> {
         let n =
             self.make::<DefaultNode>(Kind::Never, Plane::Empty, Box::new([]), &[], 0, Vec::new());
@@ -383,6 +395,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// before the loop is closed, since there is no value to return. A
     /// definition that is a [`State`] closes a
     /// [`state_loop`](Builder::state_loop) instead.
+    #[track_caller]
     fn cell_loop<A: 'static>(&mut self) -> (Cell<A>, CellLoop<A>) {
         let token = self.open_forward(false);
         (Cell::from_token(token), CellLoop::new(token))
@@ -418,6 +431,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// The rule is the one [`cell_loop`](Builder::cell_loop) states: the
     /// dependency graph stays acyclic, and a read of a cell's value from
     /// before the instant is not a dependency.
+    #[track_caller]
     fn state_loop<A: 'static>(&mut self) -> (State<A>, StateLoop<A>) {
         let token = self.open_forward(false);
         (State::from_token(token), StateLoop::new(token))
@@ -452,6 +466,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// too, since their output fires in a later child instant. A chain
     /// whose events come from the forward itself, or from anything that
     /// depends on it, a hold's `steps` included, is refused at close.
+    #[track_caller]
     fn stream_loop<A: 'static>(&mut self) -> (Stream<A>, StreamLoop<A>) {
         let token = self.open_forward(true);
         (Stream::from_token(token), StreamLoop::new(token))
@@ -539,6 +554,7 @@ pub trait Builder: sealed::Sealed + Sized {
 /// The hold of an input cell. Its chain is the input's own stream token,
 /// which is `Send` whatever `A` is, so it is erased through `erase_send`
 /// and needs no `Stores<Stream<A>>` bound.
+#[track_caller]
 fn hold_input<C, A>(builder: &mut C, stream: Stream<A>, initial: A) -> Cell<A>
 where
     C: Builder + Stores<A>,
@@ -600,6 +616,7 @@ impl<M: Mode> Builder for BuildContext<M> {
         BuildContext::chain_reach(self, chain)
     }
 
+    #[track_caller]
     fn make<N: AllOps>(
         &mut self,
         kind: Kind,
@@ -615,6 +632,7 @@ impl<M: Mode> Builder for BuildContext<M> {
         n
     }
 
+    #[track_caller]
     fn make_pair<N: AllOps, O: AllOps>(
         &mut self,
         dependency: u32,
@@ -633,10 +651,12 @@ impl<M: Mode> Builder for BuildContext<M> {
         )
     }
 
+    #[track_caller]
     fn make_switch_cell<C: CellRef>(&mut self, outer: Token) -> Token {
         BuildContext::switch_cell_node::<C>(self, outer)
     }
 
+    #[track_caller]
     fn make_switch_stream<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
     where
         S::Event: 'static,
@@ -667,6 +687,7 @@ impl<M: Mode> Builder for BuildContext<M> {
         )
     }
 
+    #[track_caller]
     fn make_construct<S, B, F>(
         &mut self,
         dependency: u32,
@@ -691,6 +712,7 @@ impl<M: Mode> Builder for BuildContext<M> {
         BuildContext::value::<A>(self, i)
     }
 
+    #[track_caller]
     fn open_forward(&mut self, stream: bool) -> Token {
         if stream {
             BuildContext::stream_loop_node(self)
@@ -903,6 +925,7 @@ impl<'a> Builder for Portable<'a> {
         dispatch!(&self.arm, |b, _into| b.chain_reach(chain))
     }
 
+    #[track_caller]
     fn make<N: AllOps>(
         &mut self,
         kind: Kind,
@@ -922,6 +945,7 @@ impl<'a> Builder for Portable<'a> {
         ))
     }
 
+    #[track_caller]
     fn make_pair<N: AllOps, O: AllOps>(
         &mut self,
         dependency: u32,
@@ -937,10 +961,12 @@ impl<'a> Builder for Portable<'a> {
         ))
     }
 
+    #[track_caller]
     fn make_switch_cell<C: CellRef>(&mut self, outer: Token) -> Token {
         dispatch!(&mut self.arm, |b, _into| b.switch_cell_node::<C>(outer))
     }
 
+    #[track_caller]
     fn make_switch_stream<S: Node>(&mut self, outer: Token, slot: Box<dyn Any + Send>) -> Token
     where
         S::Event: 'static,
@@ -971,6 +997,7 @@ impl<'a> Builder for Portable<'a> {
         ))
     }
 
+    #[track_caller]
     fn make_construct<S, B, F>(
         &mut self,
         dependency: u32,
@@ -997,6 +1024,7 @@ impl<'a> Builder for Portable<'a> {
         dispatch!(&self.arm, |b, _into| b.read::<A>(t))
     }
 
+    #[track_caller]
     fn open_forward(&mut self, stream: bool) -> Token {
         dispatch!(&mut self.arm, |b, _into| b.open_forward(stream))
     }

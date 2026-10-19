@@ -87,6 +87,7 @@ impl<M: Mode> BuildContext<M> {
     /// A cell loop's forward: a `Loop` node with no dependency and no data,
     /// open in the current scope. Created now, so it runs in this
     /// transaction's new-node phase, by pull after its definition.
+    #[track_caller]
     pub(crate) fn loop_node(&mut self) -> Token {
         let n = self.materialize(
             Kind::Loop,
@@ -120,6 +121,7 @@ impl<M: Mode> BuildContext<M> {
     /// A stream loop's forward: a stream node whose program panics if run,
     /// with no data until close creates its slot, open in the current
     /// scope.
+    #[track_caller]
     pub(crate) fn stream_loop_node(&mut self) -> Token {
         let n = self.materialize(
             Kind::Stream,

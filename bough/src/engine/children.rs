@@ -38,6 +38,7 @@ impl<M: Mode> BuildContext<M> {
     /// dependency; it keeps its capture in reach, so collection keeps the
     /// capture while the output is live. Returns the output, the node the
     /// caller's stream token names.
+    #[track_caller]
     pub(crate) fn capture_pair(
         &mut self,
         dependency: u32,

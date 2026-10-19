@@ -14,6 +14,7 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::panic::Location;
 
 use super::{Cold, Data, Entry, Hot, Kind, LIVE, NOOP, Ops, Relations, Tx};
 use crate::build::BuildContext;
@@ -63,6 +64,7 @@ impl<M: Mode> Store<M> {
             &Ops::<M>::DEFAULT,
             0,
             0,
+            Location::caller(),
         );
         debug_assert_eq!(noop, NOOP);
         store.live = 0;
@@ -70,9 +72,11 @@ impl<M: Mode> Store<M> {
         store
     }
 
-    /// A slot for a new node: the oldest freed slot, or a new one at the
-    /// end. A reused slot keeps its generation, which its free bumped, and
-    /// the capacity of its lists.
+    /// A slot for a new node, created in transaction `created` by the call
+    /// at `at`: the oldest freed slot, or a new one at the end. A reused
+    /// slot keeps its generation, which its free bumped, and the capacity
+    /// of its lists.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn alloc(
         &mut self,
         kind: Kind,
@@ -81,6 +85,7 @@ impl<M: Mode> Store<M> {
         ops: &'static Ops<M>,
         created: Tx,
         flags: u8,
+        at: &'static Location<'static>,
     ) -> u32 {
         let hot = Hot {
             mark: 0,
@@ -99,7 +104,7 @@ impl<M: Mode> Store<M> {
             let relations = &mut self.relations[n];
             relations.deps.clear();
             relations.dependents.clear();
-            self.cold[n].reset();
+            self.cold[n].reset(at);
             self.data[n] = data;
             self.parts[n] = Some(parts);
             self.ops[n] = ops;
@@ -111,7 +116,7 @@ impl<M: Mode> Store<M> {
             .expect("bough: more than u32::MAX - 1 nodes in one graph");
         self.hot.push(hot);
         self.relations.push(Relations::default());
-        self.cold.push(Cold::default());
+        self.cold.push(Cold::new(at));
         self.data.push(data);
         self.parts.push(Some(parts));
         self.ops.push(ops);
@@ -180,16 +185,22 @@ impl<M: Mode> BuildContext<M> {
         match self.lookup(t) {
             Ok(i) => i,
             Err(TokenFault::Foreign) => panic!("bough: a token from another graph"),
-            Err(TokenFault::Stale) => panic!("bough: a stale token: its node was collected"),
+            Err(TokenFault::Stale) => panic!(
+                "bough: a stale token: its node, created at {}, was collected",
+                t.created
+            ),
         }
     }
 
-    /// The token naming a node of this graph.
+    /// The token naming a node of this graph, with where the node was
+    /// created.
     pub(crate) fn token(&self, index: u32) -> Token {
+        let cold = &self.store.cold[index as usize];
         Token {
             index,
-            generation: self.store.cold[index as usize].generation,
+            generation: cold.generation,
             graph: self.graph_id,
+            created: cold.created,
         }
     }
 
@@ -197,7 +208,10 @@ impl<M: Mode> BuildContext<M> {
     /// dependencies at once. Linking during a transaction is harmless:
     /// marking has finished, and evaluation follows the order and the
     /// dependencies, not the dependents lists. The node is evaluated in the
-    /// new-node phase of this transaction, after its dependencies.
+    /// new-node phase of this transaction, after its dependencies. The
+    /// node records the user's call that created it, which
+    /// `#[track_caller]` carries here from the public operation.
+    #[track_caller]
     pub(crate) fn materialize(
         &mut self,
         kind: Kind,
@@ -207,7 +221,9 @@ impl<M: Mode> BuildContext<M> {
         deps: &[u32],
         flags: u8,
     ) -> u32 {
-        let n = self.store.alloc(kind, data, parts, ops, self.tx, flags);
+        let n = self
+            .store
+            .alloc(kind, data, parts, ops, self.tx, flags, Location::caller());
         for &d in deps {
             self.link(d, n);
         }

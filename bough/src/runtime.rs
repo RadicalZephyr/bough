@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 ))]
 use core::any::Any;
 use core::ops::Deref;
+use core::panic::Location;
 use core::task::Waker;
 
 use crate::BuildContext;
@@ -170,9 +171,12 @@ impl Runtime<Threaded> {
 const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
 
 /// Why a pump stopped: the error [`Runtime::try_pump`] returns, and what the
-/// refused operation was, for the panic [`Runtime::pump`] makes of a stale
-/// token.
-pub(crate) type Stop = (PumpError, &'static str);
+/// refused operation was and where the node its token names was created,
+/// for the panic [`Runtime::pump`] makes of a stale token.
+pub(crate) type Stop = (PumpError, &'static str, Created);
+
+/// Where a token's node was created, which a stale-token panic names.
+pub(crate) type Created = &'static Location<'static>;
 
 /// What the operations on collected nodes that the semantics cannot
 /// observe were asked to do, for the debug-build panic.
@@ -389,7 +393,7 @@ impl<M: Mode> Runtime<M> {
             Ok(i) => Some(i),
             Err(TokenFault::Foreign) => panic!("bough: a token from another graph"),
             Err(TokenFault::Stale) => {
-                self.stale_operation(what);
+                self.stale_operation(what, token.created);
                 None
             }
         }
@@ -400,12 +404,13 @@ impl<M: Mode> Runtime<M> {
     /// panic in a debug build and, following the integer-overflow
     /// precedent, a no-op in a release build, counted so that a release
     /// build can still report that it drops them.
-    fn stale_operation(&mut self, what: &str) {
+    fn stale_operation(&mut self, what: &str, created: Created) {
         if cfg!(debug_assertions) {
             panic!(
-                "bough: {what}: its token is stale. A node no root reaches is collected; \
-                 anchor or listen to what I/O code keeps a token of. In a release build this \
-                 is a no-op that `Runtime::stale_operations` counts"
+                "bough: {what}: its token is stale, and its node, created at {created}, was \
+                 collected. A node no root reaches is collected; anchor or listen to what I/O \
+                 code keeps a token of. In a release build this is a no-op that \
+                 `Runtime::stale_operations` counts"
             );
         }
         self.stale_operations += 1;
@@ -821,12 +826,12 @@ impl<M: Mode> Runtime<M> {
     ) -> Result<Option<u32>, Stop> {
         match self.build.lookup(token) {
             Ok(i) => Ok(Some(i)),
-            Err(TokenFault::Foreign) => Err((PumpError::ForeignGraph, what)),
+            Err(TokenFault::Foreign) => Err((PumpError::ForeignGraph, what, token.created)),
             Err(TokenFault::Stale) if skip_stale => {
                 self.stale_operations += 1;
                 Ok(None)
             }
-            Err(TokenFault::Stale) => Err((PumpError::Stale, what)),
+            Err(TokenFault::Stale) => Err((PumpError::Stale, what, token.created)),
         }
     }
 
@@ -1229,9 +1234,9 @@ impl<M: Mode> Runtime<M> {
     /// pump.
     pub fn pump(&mut self) {
         self.enter();
-        if let Err((error, what)) = self.pump_all(!cfg!(debug_assertions)) {
+        if let Err((error, what, created)) = self.pump_all(!cfg!(debug_assertions)) {
             match error {
-                PumpError::Stale => self.stale_operation(what),
+                PumpError::Stale => self.stale_operation(what, created),
                 PumpError::DoubleSend => {
                     panic!("bough: a second send to a non-coalescing input in one queued unit")
                 }
@@ -1248,7 +1253,7 @@ impl<M: Mode> Runtime<M> {
         if self.poisoned() {
             return Err(PumpError::Poisoned);
         }
-        self.pump_all(false).map_err(|(error, _)| error)
+        self.pump_all(false).map_err(|(error, ..)| error)
     }
 
     /// One unit at a time: the highest-priority pending slot, if there is
@@ -1447,7 +1452,7 @@ impl<M: Mode> Runtime<M> {
             self.build.boundary.slots.remove(k);
             slot.disconnect();
             if !skip_stale {
-                return Err((PumpError::Stale, SEND));
+                return Err((PumpError::Stale, SEND, input.created));
             }
             self.stale_operations += 1;
         }
@@ -1592,7 +1597,9 @@ impl<M: Mode> Transaction<'_, M> {
                 panic!("bough: a second send to a non-coalescing input in one transaction")
             }
             Err(TransactionSendError::ForeignGraph) => panic!("bough: a token from another graph"),
-            Err(TransactionSendError::Stale) => self.graph.stale_operation(SEND),
+            Err(TransactionSendError::Stale) => {
+                self.graph.stale_operation(SEND, input.token.created)
+            }
         }
     }
 
@@ -2190,7 +2197,7 @@ impl UnitState {
     /// A call in the unit failed, for `what`: a stale token is skipped and
     /// counted where the pump skips those, and anything else drops the
     /// unit.
-    fn fail(&mut self, fault: Fault, what: &'static str) {
+    fn fail(&mut self, fault: Fault, what: &'static str, created: Created) {
         let error = match fault {
             Fault::Stale if self.skip_stale => {
                 self.skipped += 1;
@@ -2200,7 +2207,7 @@ impl UnitState {
             Fault::ForeignGraph => PumpError::ForeignGraph,
             Fault::DoubleSend => PumpError::DoubleSend,
         };
-        self.fault = Some((error, what));
+        self.fault = Some((error, what, created));
     }
 }
 
@@ -2233,7 +2240,7 @@ impl IoTransaction<'_> {
             Err(fault) => Err(fault.into()),
         };
         if let Err(fault) = sent {
-            self.unit.fail(fault, SEND);
+            self.unit.fail(fault, SEND, input.token.created);
         }
     }
 
@@ -2249,11 +2256,12 @@ impl IoTransaction<'_> {
         if self.unit.failed() {
             return;
         }
-        match self.runtime.build.lookup(source.node_token()) {
+        let token = source.node_token();
+        match self.runtime.build.lookup(token) {
             Ok(i) => self
                 .tied
                 .once(self.runtime, i, f, call_stream_once::<Local, S, F>),
-            Err(fault) => self.unit.fail(fault.into(), LISTEN),
+            Err(fault) => self.unit.fail(fault.into(), LISTEN, token.created),
         }
     }
 
@@ -2268,9 +2276,10 @@ impl IoTransaction<'_> {
         if self.unit.failed() {
             return;
         }
-        match self.runtime.build.lookup(cell.token()) {
+        let token = cell.token();
+        match self.runtime.build.lookup(token) {
             Ok(i) => self.tied.cell_once(i, f),
-            Err(fault) => self.unit.fail(fault.into(), LISTEN),
+            Err(fault) => self.unit.fail(fault.into(), LISTEN, token.created),
         }
     }
 }
@@ -2361,7 +2370,7 @@ impl RemoteTransaction<'_> {
         }
         let mut event = Some(value);
         if let Err(fault) = self.runtime.start(input.token, &mut event) {
-            self.unit.fail(fault, SEND);
+            self.unit.fail(fault, SEND, input.token.created);
         }
     }
 
@@ -2376,8 +2385,9 @@ impl RemoteTransaction<'_> {
         if self.unit.failed() {
             return;
         }
-        if let Err(fault) = self.runtime.check(source.node_token()) {
-            return self.unit.fail(fault, LISTEN);
+        let token = source.node_token();
+        if let Err(fault) = self.runtime.check(token) {
+            return self.unit.fail(fault, LISTEN, token.created);
         }
         let flag = Liveness::new(self.runtime.released());
         let listen = ListenOnce {
@@ -2401,9 +2411,10 @@ impl RemoteTransaction<'_> {
         if self.unit.failed() {
             return;
         }
-        match self.runtime.check(cell.token()) {
+        let token = cell.token();
+        match self.runtime.check(token) {
             Ok(()) => self.cells.push(Box::new(TiedCell { cell, f })),
-            Err(fault) => self.unit.fail(fault, LISTEN),
+            Err(fault) => self.unit.fail(fault, LISTEN, token.created),
         }
     }
 }
