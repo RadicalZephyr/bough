@@ -105,8 +105,8 @@ struct Tagged<T, U> {
 
 /// A hold of a derived enum keeps what its current variant names, and
 /// only that: a page no value names is collected, and so is the page the
-/// route has moved on from. The pages leave the build with the edge, and
-/// the test keeps the rest of the edge and lets the pages' share go.
+/// route has moved on from. The pages leave the build with the boundary,
+/// and the test keeps the rest of the boundary and lets the pages' share go.
 #[test]
 fn a_derived_enum_in_a_hold_roots_what_its_current_variant_names() {
     let (mut graph, edge) = Runtime::build(|b| {
@@ -225,7 +225,7 @@ struct Members {
 /// RFD 6's chat room, built as the RFD writes it, in a `Threaded` graph,
 /// with the one outbound listener attached before the sends; the members
 /// are an in-place accumulator of a derived type. Driven directly here,
-/// since `RemoteIo` and `pump` are the I/O edge's stage.
+/// since `RemoteIo` and `pump` are the I/O boundary's stage.
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
     let (mut graph, edge) = Runtime::build_threaded(|b| {

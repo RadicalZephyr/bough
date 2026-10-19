@@ -2,7 +2,7 @@
 //! claim that integrations compose because none of them owns anything.
 //!
 //! - The thread driver RFD 6 says the core ships: a dedicated thread that
-//!   builds the graph, hands back the edge and a `RemoteIo`, and blocks on a
+//!   builds the graph, hands back the boundary and a `RemoteIo`, and blocks on a
 //!   condition variable until woken. It is here rather than in the core,
 //!   because RFD 6 does not say how it stops or what it does when a
 //!   transaction panics; this one stops when its handle is dropped.
@@ -78,8 +78,8 @@ impl Drop for Driver {
 
 /// Runs `make` on a thread of its own, which keeps the graph and pumps it
 /// whenever a remote send or a slot write wakes it, and hands back the
-/// edge and a remote. The graph may be `Local`: it never leaves its thread,
-/// and `make` attaches its listeners there.
+/// boundary and a remote. The graph may be `Local`: it never leaves its
+/// thread, and `make` attaches its listeners there.
 fn spawn_driver<M, R>(
     make: impl FnOnce() -> (Runtime<M>, R) + Send + 'static,
 ) -> (R, RemoteIo, Driver)

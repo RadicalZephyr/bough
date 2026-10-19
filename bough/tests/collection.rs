@@ -5,8 +5,8 @@
 //! build closure returned comes back anchored. A node reaches its
 //! dependencies, the tokens in a stateful cell's committed value, the
 //! tokens its chain holds, and what `depends` declares. A token I/O code
-//! keeps without rooting it, which a test here takes out of the edge
-//! before it drops the edge's anchor, or which a listener hands out as
+//! keeps without rooting it, which a test here takes out of the boundary
+//! before it drops the boundary's anchor, or which a listener hands out as
 //! data, names a node that is collected when nothing else reaches it, and
 //! its next use is a stale-token error.
 
@@ -108,7 +108,7 @@ struct Counts {
 
 /// Build, drive, drop, collect, compare (RFD 3). The build closure returns
 /// its inputs, which are kept for the graph's life, and the rest of its
-/// logic, which listeners root once the edge's anchor goes; after twenty
+/// logic, which listeners root once the boundary's anchor goes; after twenty
 /// drives the handles are dropped and a collection must leave exactly the
 /// inputs' nodes, and the tokens of what it freed stale.
 fn build_drive_drop<L: Trace + 'static>(
@@ -731,7 +731,7 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
     }
 }
 
-/// Anchor it at the edge, under the stress setting (RFD 3). A collection
+/// Anchor it at the boundary, under the stress setting (RFD 3). A collection
 /// runs after each unit, so a row a construct closure sends out plain,
 /// which nothing else reaches, is gone by the time `send` returns: I/O code
 /// can't anchor it after the fact. The closure anchors it instead, as in
@@ -954,7 +954,7 @@ fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
         .map(|c| graph.listen_cell(*c, |_| ()))
         .collect();
     drop(edge);
-    graph.collect_garbage(); // dropping the edge released a root: count from here
+    graph.collect_garbage(); // dropping the boundary released a root: count from here
     graph.send(n_in, 1);
     assert_eq!(graph.live_nodes(), 6);
     release(handles);
@@ -995,7 +995,7 @@ fn the_automatic_policy_counts_a_once_listener_released_when_it_fires() {
         .map(|s| graph.listen_once(*s, |_| ()))
         .collect();
     drop(edge);
-    graph.collect_garbage(); // dropping the edge released a root: count from here
+    graph.collect_garbage(); // dropping the boundary released a root: count from here
     assert_eq!(graph.live_nodes(), 6);
     graph.send(n_in, 1);
     assert_eq!(graph.live_nodes(), 6, "4 released, 6 live");

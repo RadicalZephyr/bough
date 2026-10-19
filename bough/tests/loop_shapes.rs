@@ -58,7 +58,7 @@ enum Reads {
     Forward,
 }
 
-/// The edge: whatever build returns is the root set.
+/// The boundary: whatever build returns is the root set.
 struct Slice {
     heal: Input<u32>,
     damage: Input<u32>,

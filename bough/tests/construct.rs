@@ -520,7 +520,7 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
 /// the construct's stream receives its token by value, with a cell and a
 /// linear stream built over it, anchored where the closure built them,
 /// and after `send` returns, I/O code listens to them and sends to the
-/// input (RFD 3: anchor it at the edge). Stage6.hs:
+/// input (RFD 3: anchor it at the boundary). Stage6.hs:
 ///
 /// ```text
 /// input inside: samples total after [1], [2], [3]: [100,105,111]
