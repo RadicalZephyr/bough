@@ -52,10 +52,10 @@ fn a_listener_on_an_input_sees_the_folded_event_of_a_coalescing_input() {
     let (seen, on) = recorder();
     graph.listen(words, on).keep();
     graph.transaction(|tx| {
-        tx.send(words_in, "bo".to_string());
-        tx.send(words_in, "ugh".to_string());
+        tx.send(words_in, "fo".to_string());
+        tx.send(words_in, "ld".to_string());
     });
-    assert_eq!(*seen.borrow(), ["bough".to_string()]);
+    assert_eq!(*seen.borrow(), ["fold".to_string()]);
 }
 
 #[test]
