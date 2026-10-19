@@ -39,8 +39,8 @@ fn a_core_that_stores_its_own_closure_builds_in_both_modes() {
 
 // ----------------------------------------------------------- a GTK-shaped host
 
-/// A core the shell feeds: it counts clicks in steps the shell's cell
-/// gives, and reports the total and each new total.
+/// A core the `Local` graph code feeds: it counts clicks in steps that
+/// code's cell gives, and reports the total and each new total.
 fn counter(b: &mut Portable<'_>, clicks: Stream<()>, step: Cell<u32>) -> (Cell<u32>, Stream<u32>) {
     let total = clicks
         .snapshot(step, |(), s| *s)
@@ -48,8 +48,8 @@ fn counter(b: &mut Portable<'_>, clicks: Stream<()>, step: Cell<u32>) -> (Cell<u
     (total, total.steps(b))
 }
 
-/// A second core the shell feeds with a cell it built from the first
-/// core's output.
+/// A second core the `Local` graph code feeds with a cell it built from
+/// the first core's output.
 fn longest(b: &mut Portable<'_>, label: Cell<String>) -> Cell<usize> {
     label
         .steps(b)
@@ -59,9 +59,9 @@ fn longest(b: &mut Portable<'_>, label: Cell<String>) -> Cell<usize> {
 
 /// RFD 6's GTK frontend: a `Local` build holds graph code that is not
 /// `Send`, here an `Rc` captured in a closure the graph stores, beside a
-/// portable core's outputs. Tokens pass both ways: the shell's input and
-/// cell into the core, the core's cell and stream into the shell, and the
-/// shell's `Rc`-built cell into a second core.
+/// portable core's outputs. Tokens pass both ways: the `Local` graph code's
+/// input and cell into the core, the core's cell and stream into that code,
+/// and its `Rc`-built cell into a second core.
 #[test]
 fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
     let (mut graph, boundary) = Runtime::build(|b| {
@@ -69,10 +69,11 @@ fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
         let (clicks, clicks_in) = b.input::<()>();
         let (step, step_in) = b.input_cell(1u32);
 
-        // Shell into core.
+        // `Local` graph code into the core.
         let (total, totals) = counter(&mut b.portable(), clicks, step);
 
-        // Core into shell: a closure capturing an `Rc`, stored in the graph.
+        // The core into `Local` graph code: a closure capturing an `Rc`,
+        // stored in the graph.
         let label = totals
             .map(move |t| format!("{prefix}{t}"))
             .hold(b, String::from("none"));
@@ -83,7 +84,7 @@ fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
             l.len()
         });
 
-        // The shell's `Rc`-built cell into a second core.
+        // The `Local` graph code's `Rc`-built cell into a second core.
         let widest = longest(&mut b.portable(), label);
         (clicks_in, step_in, total, label, logged, widest)
     });
