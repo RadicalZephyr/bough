@@ -105,7 +105,7 @@ macro_rules! smoke_graph {
             // Stage 5: a switch_cell between an input cell and a constant,
             // with a steps view, and a switch_cell over states; a
             // switch_stream between shared streams held directly, and one
-            // between linear streams in constant cells, selected through a
+            // between affine streams in constant cells, selected through a
             // switch_cell.
             let picked = n
                 .map(move |v| if v % 2 == 0 { level } else { three })

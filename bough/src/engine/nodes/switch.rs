@@ -31,12 +31,12 @@
 //! selection moves the switch even at an instant its old inner is quiet,
 //! when nothing else would reach it.
 //!
-//! A linear stream has one consumer (RFD 4), so a cell holding linear
+//! An affine stream has at most one consumer (RFD 4), so a cell holding affine
 //! streams may have one switch_stream. A second on the same cell is refused
 //! when it is built, and so is one on a cell that is the same cell by
 //! construction, a cell loop's forward and its definition, then or when the
 //! loop closes. A switch_cell can still select, at run time, a cell whose
-//! streams another switch_stream takes from, so each linear stream records
+//! streams another switch_stream takes from, so each affine stream records
 //! the switch_stream consuming it, set when a switch links it and cleared
 //! when the switch moves away, and a link to a stream another switch
 //! consumes is a panic that poisons the graph. Relink clears every claim
@@ -84,7 +84,7 @@ impl<M: Mode, C: CellRef> NodeOps<M> for SwitchCellNode<C> {
     };
 }
 
-/// `switch_stream` over an outer holding `S` tokens: a linear `Stream`,
+/// `switch_stream` over an outer holding `S` tokens: an affine `Stream`,
 /// whose event it takes, or a `Shared` one, whose event it clones.
 pub(crate) struct SwitchStreamNode<S>(Marker<S>);
 
@@ -169,7 +169,7 @@ impl<M: Mode> BuildContext<M> {
     /// A switch_stream over `outer`, a cell holding `S` tokens, with the
     /// slot its `Accepts` bound made. It has no dependency until its first
     /// evaluation. The outer keeps it in reach and watches for it. Over
-    /// linear streams, refused if the outer, or a cell that is the same by
+    /// affine streams, refused if the outer, or a cell that is the same by
     /// construction, has a switch_stream already.
     pub(crate) fn switch_stream_node<S: Node>(&mut self, outer: Token, slot: M::Carrier) -> Token
     where
@@ -228,7 +228,7 @@ impl<M: Mode> BuildContext<M> {
 
     /// A switch's first evaluation links the inner its outer selected
     /// before the instant. Refused, with the cycle's nodes, if that inner
-    /// depends on the switch, and over linear streams if another
+    /// depends on the switch, and over affine streams if another
     /// switch_stream consumes it.
     pub(crate) fn link_inner(&mut self, n: u32) {
         let inner = self.selected(n, false);
@@ -238,7 +238,7 @@ impl<M: Mode> BuildContext<M> {
         self.store.hot[n as usize].flags |= LINKED;
     }
 
-    /// A switch_stream over linear streams becomes the one consumer of
+    /// A switch_stream over affine streams becomes the one consumer of
     /// `stream`. A stream another switch_stream consumes can only have been
     /// selected through a switch_cell, which no build-time check sees.
     fn claim_affine(&mut self, stream: u32, n: u32) {
@@ -258,7 +258,7 @@ impl<M: Mode> BuildContext<M> {
         *consumer = n;
     }
 
-    /// Whether a switch_stream over linear streams watches `cell`, or a
+    /// Whether a switch_stream over affine streams watches `cell`, or a
     /// cell that is the same by construction: a closed cell loop's forward
     /// and its definition, followed down to the definition that is no
     /// forward and back up through every forward closed with it.
@@ -355,7 +355,8 @@ impl<M: Mode> BuildContext<M> {
 
     /// The second pass of relink at commit, once every switch of the
     /// instant has moved and given up its old stream: the dependency graph
-    /// must still be acyclic, and a linear stream may have one consumer.
+    /// must still be acyclic, and an affine stream may have at most one
+    /// consumer.
     pub(crate) fn check_moved(&mut self, n: u32) {
         let at = inner_at(self.store.hot[n as usize].kind);
         let inner = self.store.relations[n as usize].deps[at];

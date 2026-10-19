@@ -1,10 +1,10 @@
 //! Streams as chains and nodes (RFD 4).
 //!
 //! Adapters transform events and take no context; each returns its adapter
-//! type, which is itself a [`Source`]. A chain is a linear sequence of
+//! type, which is itself a [`Source`]. A chain is a sequence of
 //! adapters with no materializer. Materializers take the build context and
 //! create exactly one node from a chain, fusing its adapters into that
-//! node's closure. A chain is linear: it is consumed by the first
+//! node's closure. A chain is affine: it is consumed by the first
 //! materializer, and using it twice is a compile error.
 //!
 //! ```
@@ -97,7 +97,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     fn dependency(&self) -> Token;
 
     /// Runs the fused chain for this instant: reads the dependency's slot,
-    /// taking the event from a linear stream and cloning it from a shared
+    /// taking the event from an affine stream and cloning it from a shared
     /// one, and applies every adapter. `None` when nothing fires.
     #[doc(hidden)]
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<Self::Event>;
@@ -350,7 +350,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Shared::from_token(chain_node(self, build))
     }
 
-    /// Materializes a chain as a linear stream with an identity of its own,
+    /// Materializes a chain as an affine stream with an identity of its own,
     /// so it can be stored in a value or returned from build.
     ///
     /// The node's slot keeps an event nobody consumed between transactions,
@@ -375,7 +375,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Stream::from_token(chain_node(self, build))
     }
 
-    /// Splits a stream of pairs into two linear streams, without cloning
+    /// Splits a stream of pairs into two affine streams, without cloning
     /// either half: each pair's halves move apart, the first into one
     /// stream and the second into the other, in the same instant. It
     /// denotes two maps, one taking each half.
@@ -788,10 +788,10 @@ impl<M: Mode> BuildContext<M> {
 /// Adapter types do not implement it, so a chain cannot be listened to.
 ///
 /// Sealed, with hidden items: a listener reads a node the way its type
-/// says, taking the event from a linear stream and cloning it from a
+/// says, taking the event from an affine stream and cloning it from a
 /// shared one, and a switch needs to know which of the two it holds.
 pub trait Node: Source {
-    /// A linear stream, whose one consumer takes the event.
+    /// An affine stream, whose one consumer takes the event.
     #[doc(hidden)]
     const AFFINE: bool;
 
@@ -800,7 +800,7 @@ pub trait Node: Source {
     fn node_token(&self) -> Token;
 
     /// Reads the event of the node at `index` the way this type does: take
-    /// for a linear stream, clone for a shared one.
+    /// for an affine stream, clone for a shared one.
     #[doc(hidden)]
     fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<Self::Event>;
 }

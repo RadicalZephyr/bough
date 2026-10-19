@@ -203,7 +203,7 @@ impl<A: 'static> CellLoop<A> {
     ///
     /// Panics if the loop was declared in another scope, and if the new
     /// dependency would close a cycle, naming the cycle's nodes. The
-    /// forward and the definition become one cell, so a loop of linear
+    /// forward and the definition become one cell, so a loop of affine
     /// streams panics too if each has a
     /// [`switch_stream`](Cell::switch_stream).
     pub fn close<C: Builder>(self, build: &mut C, definition: Cell<A>) {

@@ -231,7 +231,7 @@ const SILENT: &str = "bough: a listener tied to a transaction heard nothing: its
                       neither the transaction nor its child transactions. In a release build it \
                       is dropped";
 
-/// A stream listener's call: take the event from a linear stream, clone it
+/// A stream listener's call: take the event from an affine stream, clone it
 /// from a shared one.
 fn call_stream<M, S, F>(e: &mut Entry<M>, b: &mut BuildContext<M>, n: u32)
 where
@@ -516,7 +516,7 @@ impl<M: Mode> Runtime<M> {
         Ok(self.transaction(f))
     }
 
-    /// Listens to a materialized node. A linear stream is moved in, so it can
+    /// Listens to a materialized node. An affine stream is moved in, so it can
     /// be listened to once; a shared stream any number of times. Listeners
     /// take the event by value, have no graph access, and run after commit
     /// on the thread that called `send`, `transaction` or `pump`.
@@ -531,7 +531,7 @@ impl<M: Mode> Runtime<M> {
     /// let _l = graph.listen(events.map(|n| n + 1), |n| println!("{n}")); // error: Map<..> is not a Node
     /// ```
     ///
-    /// A linear stream cannot be listened to twice:
+    /// An affine stream cannot be listened to twice:
     ///
     /// ```compile_fail,E0382
     /// use bough::prelude::*;
@@ -639,7 +639,7 @@ impl<M: Mode> Runtime<M> {
     /// the listener. Until then it is a listener like any other, a root,
     /// which dropping its handle cancels and [`keep`](Listener::keep) keeps
     /// until it fires. Once spent it roots nothing, and its handle does
-    /// nothing. A linear stream is moved in, as for
+    /// nothing. An affine stream is moved in, as for
     /// [`listen`](Runtime::listen).
     pub fn listen_once<S, F>(&mut self, source: S, f: F) -> Listener
     where
@@ -1655,7 +1655,7 @@ impl<M: Mode> Transaction<'_, M> {
 /// has pointer atomics. Every mode returns the same type.
 ///
 /// A live listener is a root: its node, and everything the node reaches,
-/// stays alive. Dropping the last one lets collection free them; a linear
+/// stays alive. Dropping the last one lets collection free them; an affine
 /// stream is consumed by `listen`, so once its listener is dropped nothing
 /// can observe it again. The drop counts as a released root for the
 /// automatic policy, through the shared count, with no graph access. A
@@ -2368,7 +2368,7 @@ mod tests {
     use crate::engine::slot;
     use crate::{Local, Runtime, Source};
 
-    /// Claim 1, read off the data plane: a linear consumer moves the event
+    /// Claim 1, read off the data plane: an affine consumer moves the event
     /// out of its dependency's slot, and a shared slot keeps its event for
     /// every consumer.
     #[test]
@@ -2392,7 +2392,7 @@ mod tests {
         assert_eq!(data(&graph, linear_in.token.index), None);
         graph.send(shared_in, 7);
         // The shared node took its input's event, since its own chain reads
-        // a linear stream, and both of its consumers cloned from it.
+        // an affine stream, and both of its consumers cloned from it.
         assert_eq!(data(&graph, shared_in.token.index), None);
         assert_eq!(data(&graph, shared.token.index), Some(7));
     }

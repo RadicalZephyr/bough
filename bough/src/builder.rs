@@ -419,7 +419,7 @@ pub trait Builder: sealed::Sealed + Sized {
         (State::from_token(token), StateLoop::new(token))
     }
 
-    /// Declares a stream loop: a linear forward stream, and the closer that
+    /// Declares a stream loop: an affine forward stream, and the closer that
     /// later defines it with any chain. Close fuses the chain into the
     /// forward's own node, so a stream loop adds no node to its definition.
     ///
@@ -457,7 +457,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// hold, for a closure that captures them (RFD 3). Each value is traced,
     /// so a token counts wherever it sits: bare, or in a struct, a tuple or a
     /// collection at any depth. One declaration per closure; the slice is
-    /// heterogeneous, and takes references, so a linear stream is not
+    /// heterogeneous, and takes references, so an affine stream is not
     /// consumed.
     ///
     /// A node is alive while a root reaches it: the build closure's return

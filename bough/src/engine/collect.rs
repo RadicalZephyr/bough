@@ -18,7 +18,7 @@
 //! frees every live node it did not mark, which bumps the slot's
 //! generation and puts it on the free list or retires it (`Store::free`);
 //! and prunes the dead out of the survivors' dependents lists, watcher
-//! lists and linear-stream claims. Nothing is counted, so a cycle through
+//! lists and affine-stream claims. Nothing is counted, so a cycle through
 //! values is collected like anything else.
 //!
 //! It never runs inside a transaction. While it runs it holds the
@@ -191,7 +191,7 @@ impl<M: Mode> BuildContext<M> {
     }
 
     /// Takes the freed nodes out of what the survivors record: dependents,
-    /// which marking follows, watchers, and linear-stream claims, so that a
+    /// which marking follows, watchers, and affine-stream claims, so that a
     /// reused slot is never mistaken for the node it held before. A live
     /// node's dependencies and reach are live, since it reached them.
     fn prune(&mut self) {

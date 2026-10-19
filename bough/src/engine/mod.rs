@@ -12,7 +12,7 @@
 //! static functions (`ops`) and its listeners. Evaluating node N takes N's
 //! parts out of the arena, calls N's `eval` with `&mut BuildContext`, the whole
 //! arena, and puts them back. N's data stays in the arena, so N can read
-//! itself while it runs. A linear dependency takes the event out of the
+//! itself while it runs. An affine dependency takes the event out of the
 //! dependency's slot through `&mut`, a shared one clones it through `&`.
 //! Every typed access is a checked downcast, and the engine has no `unsafe`.
 
@@ -133,7 +133,7 @@ pub(crate) const COMMITS: u8 = 1 << 3;
 pub(crate) const LINKED: u8 = 1 << 4;
 /// The slot holds a node that collection has not freed.
 pub(crate) const LIVE: u8 = 1 << 5;
-/// A switch_stream over linear streams: the one consumer of the inner it
+/// A switch_stream over affine streams: the one consumer of the inner it
 /// links, which it records in that inner's `affine_consumer`.
 pub(crate) const TAKES_AFFINE: u8 = 1 << 6;
 
@@ -192,7 +192,7 @@ pub(crate) struct Cold {
     pub(crate) relink: Tx,
     /// Path checks; collection's mark epoch.
     pub(crate) visit: u64,
-    /// The switch_stream taking events from this linear stream, or node 0
+    /// The switch_stream taking events from this affine stream, or node 0
     /// for none: the run-time backstop of the one-consumer rule.
     pub(crate) affine_consumer: u32,
 }
@@ -382,7 +382,7 @@ pub struct Cx<'a, M: Mode> {
 }
 
 impl<M: Mode> Cx<'_, M> {
-    /// A linear dependency: takes the event out of the slot.
+    /// An affine dependency: takes the event out of the slot.
     pub(crate) fn take<A: 'static>(&mut self, i: u32) -> Option<A> {
         self.b.take_event::<A>(i)
     }

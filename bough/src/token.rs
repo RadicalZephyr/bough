@@ -3,7 +3,7 @@
 //! A token is an index, a generation and a graph id. It has no method that
 //! creates a node without a [`BuildContext`](crate::BuildContext). `Cell`, `State`,
 //! `Input` and `Shared` are `Copy` for every event type; `Stream` is
-//! move-only because it is linear (RFD 4).
+//! move-only because it is affine (RFD 4).
 
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -33,9 +33,9 @@ pub(crate) mod sealed {
 /// value that holds tokens, takes a single token too.
 pub trait TokenRef: sealed::Sealed {}
 
-/// A linear stream of events.
+/// An affine stream of events.
 ///
-/// A `Stream` has exactly one consumer: every constructor takes it by value,
+/// A `Stream` has at most one consumer: every constructor takes it by value,
 /// and using it twice is a compile error. To give it more than one consumer,
 /// [`share`](crate::Source::share) it. A toolkit's event becomes a Bough
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the

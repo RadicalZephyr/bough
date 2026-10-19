@@ -103,7 +103,7 @@ impl<M: Mode> BuildContext<M> {
 
     /// Closes a cell loop: its node depends on `definition` from now on.
     /// The forward becomes the same cell as the definition, so if each had
-    /// a switch_stream over linear streams, the cell would have two.
+    /// a switch_stream over affine streams, the cell would have two.
     pub(crate) fn close_cell_loop(&mut self, forward: Token, definition: Token) {
         let l = self.check(forward);
         let d = self.check(definition);

@@ -39,7 +39,7 @@ fn rotation(seed: u64, tx: Tx, n: u32, len: usize) -> usize {
 impl<M: Mode> BuildContext<M> {
     // ----------------------------------------------------------- slots
 
-    /// A linear read: the event, moved out of the slot, if the node fired
+    /// An affine read: the event, moved out of the slot, if the node fired
     /// in this instant. A stale slot is never touched.
     pub(crate) fn take_event<A: 'static>(&mut self, i: u32) -> Option<A> {
         if self.store.hot[i as usize].fired != self.tx {
