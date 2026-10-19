@@ -481,7 +481,8 @@ fn a_remote_send_from_a_thread() {
 /// registration keeps its counter alive while it waits for the next pump,
 /// so both survive.
 fn rows_one_pump_opens() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (open_in, opened) = graph.build_here(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -489,7 +490,6 @@ fn rows_one_pump_opens() {
         });
         (open_in, opened)
     });
-    let (open_in, opened) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     let remote = graph.remote_io();
     let io = graph.io();

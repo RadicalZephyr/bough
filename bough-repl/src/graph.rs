@@ -1,8 +1,8 @@
 //! The Bough side: the one running graph, and the `construct` that every
 //! command which adds nodes goes through.
 //!
-//! Nothing adds nodes after `Runtime::build` except a `construct` closure,
-//! so the build makes one input of [`Command`]s and a construct over it.
+//! Every command that adds nodes does so in a `construct` closure: the
+//! build makes one input of [`Command`]s and a construct over it.
 //! A command travels into the graph as an event, the closure builds what it
 //! says, and what it built comes back out as an event, anchored, which a
 //! listener leaves for [`Graph::make`] to pick up once `send` returns.
@@ -103,12 +103,12 @@ pub struct Graph {
 impl Graph {
     /// Builds the graph: an input of commands and the construct over it.
     pub fn new() -> Graph {
-        let (mut runtime, boundary) = Runtime::build(|b| {
+        let mut runtime = Runtime::local();
+        let (commands, made_events) = runtime.build_here(|b| {
             let (commands, commands_in) = b.input::<Command>();
             let made = commands.construct(b, make);
             (commands_in, made)
         });
-        let (commands, made_events) = boundary.keep();
         let made = Rc::new(RefCell::new(None));
         let slot = made.clone();
         runtime

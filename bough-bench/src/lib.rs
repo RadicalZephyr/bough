@@ -52,7 +52,8 @@ pub struct Shallow {
 
 impl Shallow {
     pub fn new(share: bool, heavy: bool) -> Self {
-        let (graph, boundary) = Runtime::build(|b| {
+        let mut graph = Runtime::local();
+        let (input, out) = graph.build_here(|b| {
             let (numbers, input) = b.input::<u64>();
             let mapped = numbers.map(move |x| if heavy { payload(x) } else { first(x) });
             let out = if share {
@@ -62,7 +63,6 @@ impl Shallow {
             };
             (input, out)
         });
-        let (input, out) = boundary.keep();
         Shallow { graph, input, out }
     }
 
@@ -109,7 +109,8 @@ pub struct Frame {
 
 impl Frame {
     pub fn new() -> Self {
-        let (graph, boundary) = Runtime::build(|b| {
+        let mut graph = Runtime::local();
+        let (inputs, outs) = graph.build_here(|b| {
             let (open, _open_in) = b.input_cell(true);
             let mut inputs = Vec::with_capacity(FRAME_INPUTS);
             let mut outs = Vec::with_capacity(FRAME_INPUTS * 4);
@@ -128,7 +129,6 @@ impl Frame {
             }
             (inputs, outs)
         });
-        let (inputs, outs) = boundary.keep();
         Frame {
             graph,
             inputs,
@@ -216,12 +216,12 @@ pub struct FanOut {
 
 impl FanOut {
     pub fn new() -> Self {
-        let (mut graph, boundary) = Runtime::build(|b| {
+        let mut graph = Runtime::local();
+        let (input, numbers) = graph.build_here(|b| {
             let (numbers, input) = b.input::<u64>();
             let numbers: Shared<u64> = numbers.share(b);
             (input, numbers)
         });
-        let (input, numbers) = boundary.keep();
         let sum = Rc::new(StdCell::new(0u64));
         let listeners = (0..LISTENERS)
             .map(|_| {

@@ -259,8 +259,9 @@ impl<S: Source<Event = i64> + Send> Chain for S {}
 /// Implemented for [`Local`] and [`Threaded`](bough::Threaded) by one macro, so both run the
 /// same builder: see the module documentation.
 pub trait EngineMode: bough::Mode {
-    /// `Runtime::build` or `Runtime::build_threaded`.
-    fn build<R: Trace + Send>(f: impl FnOnce(&mut BuildContext<Self>) -> R) -> (Runtime<Self>, R);
+    /// `Runtime::local()` or `Runtime::threaded()`: an empty runtime to
+    /// build on.
+    fn runtime() -> Runtime<Self>;
     /// `b.input()`.
     fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>);
     /// `b.input_coalescing(f)`.
@@ -401,15 +402,12 @@ pub trait EngineMode: bough::Mode {
 /// The same bodies for every mode: in each impl the mode is concrete, and it
 /// accepts every `Send` type.
 macro_rules! engine_mode {
-    ($mode:ty, $build:ident, $fused:expr) => {
+    ($mode:ty, $new:ident, $fused:expr) => {
         impl EngineMode for $mode {
             const FUSED: usize = $fused;
 
-            fn build<R: Trace + Send>(
-                f: impl FnOnce(&mut BuildContext<Self>) -> R,
-            ) -> (Runtime<Self>, R) {
-                let (runtime, boundary) = Runtime::$build(f);
-                (runtime, boundary.keep())
+            fn runtime() -> Runtime<Self> {
+                Runtime::$new()
             }
             fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>) {
                 b.input()
@@ -616,9 +614,9 @@ macro_rules! engine_mode {
     };
 }
 
-engine_mode!(Local, build, MAX_FUSED);
+engine_mode!(Local, local, MAX_FUSED);
 #[cfg(target_has_atomic = "ptr")]
-engine_mode!(bough::Threaded, build_threaded, 1);
+engine_mode!(bough::Threaded, threaded, 1);
 
 // ----- expressions -----
 
@@ -4172,7 +4170,9 @@ pub fn refusal<M: EngineMode>(
 ) -> Result<Refusal, BuildError> {
     let checked = checked(program)?;
     let built = panic::catch_unwind(AssertUnwindSafe(|| {
-        M::build(|b| build_program(b, program, &checked, None))
+        let mut graph = M::runtime();
+        let boundary = graph.build_here(|b| build_program(b, program, &checked, None));
+        (graph, boundary)
     }));
     let (mut graph, boundary) = match built {
         Ok(built) => built,
@@ -4331,7 +4331,8 @@ fn execute<M: EngineMode>(
     options: RunOptions,
 ) -> Result<EngineRun, BuildError> {
     let checked = checked(program)?;
-    let (mut graph, boundary) = M::build(|b| build_program(b, program, &checked, slot));
+    let mut graph = M::runtime();
+    let boundary = graph.build_here(|b| build_program(b, program, &checked, slot));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
     graph.set_collect_after_every_unit(options.collect_every_unit);

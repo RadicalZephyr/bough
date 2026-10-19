@@ -49,7 +49,8 @@ pub struct App {
 }
 
 pub fn build() -> (Runtime, App) {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let app = graph.build_here(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
         let counter_label = count.map_cell(b, |n| format!("Clicked {n} times"));
@@ -98,7 +99,7 @@ pub fn build() -> (Runtime, App) {
             clock,
         }
     });
-    (graph, boundary.keep())
+    (graph, app)
 }
 
 /// A row that wires itself. It takes an `Io`, not the runtime, so it can
