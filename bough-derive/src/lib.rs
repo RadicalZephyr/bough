@@ -173,7 +173,7 @@ fn refuse_anchored(field: &syn::Field) -> syn::Result<()> {
         return Err(syn::Error::new_spanned(
             ty,
             "a `Trace` type can't hold an `Anchored`, skipped or not: in graph state, its \
-             root could keep alive the node that holds it. Keep `Anchored` at the edge",
+             root could keep alive the node that holds it. Keep `Anchored` at the boundary",
         ));
     }
     Ok(())

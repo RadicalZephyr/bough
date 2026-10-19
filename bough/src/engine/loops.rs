@@ -111,9 +111,9 @@ impl<M: Mode> BuildContext<M> {
         self.refuse_cycle(l, d);
         assert!(
             !(self.has_affine_switch(l) && self.has_affine_switch(d)),
-            "bough: closing this loop gives a cell holding linear streams two switch_streams, \
-             one over the forward and one over the definition. A linear stream has one \
-             consumer; share the streams to switch to them from several places"
+            "bough: closing this loop gives a cell holding affine streams two switch_streams, \
+             one over the forward and one over the definition. An affine stream has at most \
+             one consumer; share the streams to switch to them from several places"
         );
         self.link(d, l);
     }

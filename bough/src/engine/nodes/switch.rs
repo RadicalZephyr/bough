@@ -179,9 +179,9 @@ impl<M: Mode> BuildContext<M> {
         if S::AFFINE {
             assert!(
                 !self.has_affine_switch(outer),
-                "bough: a cell holding linear streams may have exactly one switch_stream, and \
-                 this cell, or a cell loop that is the same cell, has one already. A linear \
-                 stream has one consumer; share the streams to switch to them from several places"
+                "bough: a cell holding affine streams may have at most one switch_stream, and \
+                 this cell, or a cell loop that is the same cell, has one already. An affine \
+                 stream has at most one consumer; share the streams to switch to them from several places"
             );
         }
         let ops = &<SwitchStreamNode<S> as NodeOps<M>>::OPS;
@@ -248,9 +248,9 @@ impl<M: Mode> BuildContext<M> {
         let consumer = &mut self.store.cold[stream as usize].affine_consumer;
         assert!(
             *consumer == 0 || *consumer == n,
-            "bough: a linear stream selected by a second switch_stream: the switch_stream at \
+            "bough: an affine stream selected by a second switch_stream: the switch_stream at \
              node {n} selected the stream at node {stream}, which the switch_stream at node \
-             {other} takes from. A cell holding linear streams may have exactly one \
+             {other} takes from. A cell holding affine streams may have at most one \
              switch_stream, and a switch_cell selected such a cell for another; share the \
              streams to switch to them from several places",
             other = *consumer

@@ -1543,7 +1543,7 @@ fn a_second_switch_stream_over_a_cell_of_affine_streams_is_refused() {
         })
     });
     assert!(
-        message.contains("a cell holding linear streams may have exactly one switch_stream"),
+        message.contains("a cell holding affine streams may have at most one switch_stream"),
         "{message}"
     );
 }
@@ -1578,7 +1578,7 @@ fn a_switch_stream_on_a_loop_forward_and_one_on_its_definition_are_refused() {
         })
     });
     assert!(
-        after_close.contains("exactly one switch_stream"),
+        after_close.contains("at most one switch_stream"),
         "{after_close}"
     );
 }
@@ -1633,7 +1633,7 @@ fn a_switch_cell_selecting_a_affine_stream_that_has_a_switch_stream_panics_and_p
     let message = panic_message(|| graph.send(sel_in, ()));
     assert!(
         message.contains(
-            "a linear stream selected by a second switch_stream: the switch_stream at node 9 \
+            "an affine stream selected by a second switch_stream: the switch_stream at node 9 \
              selected the stream at node 1, which the switch_stream at node 3 takes from"
         ),
         "{message}"
@@ -1657,7 +1657,7 @@ fn a_first_link_to_a_affine_stream_that_has_a_switch_stream_panics_in_the_build(
         })
     });
     assert!(
-        message.contains("a linear stream selected by a second switch_stream"),
+        message.contains("an affine stream selected by a second switch_stream"),
         "{message}"
     );
 }
