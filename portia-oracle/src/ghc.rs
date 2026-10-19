@@ -28,7 +28,7 @@ pub const INSTALL_HINT: &str = "install GHC and HUnit with `apt-get install ghc 
      or GHC through ghcup (https://www.haskell.org/ghcup/) and then `cabal install --lib HUnit`";
 
 /// The name of the oracle binary in the build directory.
-const ORACLE: &str = "bough-oracle";
+const ORACLE: &str = "portia-oracle";
 
 /// When the build lock counts as abandoned, and how long a build waits for
 /// it. A build of the oracle takes seconds; the lock is touched throughout.
@@ -53,10 +53,10 @@ pub fn haskell_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("haskell")
 }
 
-/// The GHC to run: the `BOUGH_GHC` environment variable when it is set,
+/// The GHC to run: the `PORTIA_GHC` environment variable when it is set,
 /// otherwise `ghc` on the `PATH`.
 pub fn ghc_command() -> OsString {
-    env::var_os("BOUGH_GHC")
+    env::var_os("PORTIA_GHC")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| OsString::from("ghc"))
 }
@@ -64,7 +64,7 @@ pub fn ghc_command() -> OsString {
 /// Something that went wrong building or running the oracle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// GHC could not be run: it is not installed, or `BOUGH_GHC` names
+    /// GHC could not be run: it is not installed, or `PORTIA_GHC` names
     /// nothing.
     GhcMissing(String),
     /// The build failed: GHC's output, or why GHC could not start.
@@ -195,23 +195,23 @@ pub enum Plan {
 }
 
 /// Decides what a test that needs GHC does, from the value of the
-/// `BOUGH_ORACLE` environment variable and, unless it says to skip, from
+/// `PORTIA_ORACLE` environment variable and, unless it says to skip, from
 /// `probe`, which runs GHC and returns its version or why it could not.
 ///
-/// `BOUGH_ORACLE=skip` skips; any other value is a mistake, not a way to run.
+/// `PORTIA_ORACLE=skip` skips; any other value is a mistake, not a way to run.
 /// Without the variable a test runs when GHC answers, and fails with the
 /// install hint when it does not.
 pub fn plan(setting: Option<&str>, probe: impl FnOnce() -> Result<String, String>) -> Plan {
     match setting {
         Some("skip") => Plan::Skip,
         Some(other) if !other.is_empty() => Plan::Fail(format!(
-            "BOUGH_ORACLE is `{other}`, and the one value it takes is `skip`"
+            "PORTIA_ORACLE is `{other}`, and the one value it takes is `skip`"
         )),
         _ => match probe() {
             Ok(_version) => Plan::Run,
             Err(reason) => Plan::Fail(format!(
                 "this test needs GHC, and {reason}. To run it, {INSTALL_HINT}. \
-                 To skip every test that needs GHC, set BOUGH_ORACLE=skip."
+                 To skip every test that needs GHC, set PORTIA_ORACLE=skip."
             )),
         },
     }
@@ -243,14 +243,14 @@ fn probe_ghc() -> Result<String, String> {
 /// `None` when the test should skip, after saying so on the standard error
 /// with the name of the test.
 ///
-/// Panics with the install hint when GHC is missing and `BOUGH_ORACLE=skip`
+/// Panics with the install hint when GHC is missing and `PORTIA_ORACLE=skip`
 /// is not set, and with GHC's output when the build fails. A test that
 /// needs GHC starts with `let Some(oracle) = for_tests(directory) else {
 /// return };`, with `directory` under `CARGO_TARGET_TMPDIR`.
 #[track_caller]
 pub fn for_tests(directory: impl AsRef<Path>) -> Option<&'static Oracle> {
     static SHARED: OnceLock<Result<Oracle, Error>> = OnceLock::new();
-    match plan(env::var("BOUGH_ORACLE").ok().as_deref(), probe_ghc) {
+    match plan(env::var("PORTIA_ORACLE").ok().as_deref(), probe_ghc) {
         Plan::Skip => {
             // Written to the standard error itself: the test harness keeps
             // what `eprintln!` prints and shows it only for a test that
@@ -262,7 +262,7 @@ pub fn for_tests(directory: impl AsRef<Path>) -> Option<&'static Oracle> {
                 .name()
                 .map_or_else(String::new, |name| format!(" {name}"));
             let line = format!(
-                "skipped{test}: BOUGH_ORACLE=skip, so this test, which needs GHC, did not run\n"
+                "skipped{test}: PORTIA_ORACLE=skip, so this test, which needs GHC, did not run\n"
             );
             let _ = io::stderr().write_all(line.as_bytes());
             None
@@ -407,7 +407,7 @@ impl BuildLock {
                     }
                     let (stop, stopped) = mpsc::channel::<()>();
                     let heartbeat = thread::Builder::new()
-                        .name("bough-oracle build lock".to_owned())
+                        .name("portia-oracle build lock".to_owned())
                         .spawn(move || {
                             while let Err(RecvTimeoutError::Timeout) =
                                 stopped.recv_timeout(timing.heartbeat)
@@ -708,7 +708,7 @@ impl Process {
         };
         let (sender, received) = mpsc::channel();
         let answers = thread::Builder::new()
-            .name("bough-oracle answers".to_owned())
+            .name("portia-oracle answers".to_owned())
             .spawn(move || {
                 let mut reader = BufReader::new(output);
                 loop {
@@ -735,7 +735,7 @@ impl Process {
         let standard_error = Arc::new(Mutex::new(String::new()));
         let kept = Arc::clone(&standard_error);
         let errors = thread::Builder::new()
-            .name("bough-oracle errors".to_owned())
+            .name("portia-oracle errors".to_owned())
             .spawn(move || {
                 let mut buffer = [0; 4096];
                 while let Ok(count @ 1..) = errors.read(&mut buffer) {
@@ -856,12 +856,12 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("ghcup"), "{message}");
-        assert!(message.contains("BOUGH_ORACLE=skip"), "{message}");
+        assert!(message.contains("PORTIA_ORACLE=skip"), "{message}");
         assert!(message.contains("not found"), "{message}");
     }
 
     #[test]
-    fn another_value_of_bough_oracle_is_a_mistake() {
+    fn another_value_of_portia_oracle_is_a_mistake() {
         let Plan::Fail(message) = plan(Some("yes"), || Ok("9.4.7".to_owned())) else {
             panic!("expected a failure");
         };
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn a_line_break_is_refused_before_any_process_starts() {
-        let oracle = Oracle::with_binary(PathBuf::from("/nonexistent/bough-oracle"));
+        let oracle = Oracle::with_binary(PathBuf::from("/nonexistent/portia-oracle"));
         assert_eq!(
             oracle.answer_line("Program\nEverything"),
             Err(Error::NotOneLine)
@@ -889,18 +889,18 @@ mod tests {
 
     #[test]
     fn a_missing_binary_is_an_error_not_a_panic() {
-        let oracle = Oracle::with_binary(PathBuf::from("/nonexistent/bough-oracle"));
+        let oracle = Oracle::with_binary(PathBuf::from("/nonexistent/portia-oracle"));
         let Err(Error::Process(message)) = oracle.answer_line("Program Everything [] [] [] []")
         else {
             panic!("expected a process error");
         };
-        assert!(message.contains("/nonexistent/bough-oracle"), "{message}");
+        assert!(message.contains("/nonexistent/portia-oracle"), "{message}");
     }
 
     /// A directory of its own for one lock test, under the system's
     /// temporary directory.
     fn lock_directory(name: &str) -> PathBuf {
-        let directory = env::temp_dir().join(format!("bough-oracle-{name}-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("portia-oracle-{name}-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         directory
     }

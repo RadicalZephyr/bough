@@ -1,10 +1,10 @@
 [book]
-title = "Bough"
+title = "Portia"
 authors = ["Zefira Shannon"]
 language = "en"
 src = "src"
 
 [output.html]
-git-repository-url = "https://github.com/bough-frp/bough"
+git-repository-url = "https://github.com/portia-rs/portia"
 
 [output.linkcheck2]

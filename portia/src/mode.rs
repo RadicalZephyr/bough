@@ -26,14 +26,14 @@
 //!
 //! ```compile_fail,E0277
 //! fn assert_send<T: Send>() {}
-//! assert_send::<bough::Runtime<bough::Local>>(); // error: dyn Any cannot be sent between threads
+//! assert_send::<portia::Runtime<portia::Local>>(); // error: dyn Any cannot be sent between threads
 //! ```
 //!
 //! A `Threaded` graph refuses a closure that captures something that is not
 //! `Send`, at the materializer that stores it:
 //!
 //! ```compile_fail,E0277
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //! use std::rc::Rc;
 //!
 //! let offset = Rc::new(5u32);
@@ -177,8 +177,8 @@ pub enum Erase<T> {
 /// types:
 ///
 /// ```
-/// use bough::prelude::*;
-/// use bough::Map;
+/// use portia::prelude::*;
+/// use portia::Map;
 ///
 /// fn plus<M, F>(b: &mut BuildContext<M>, numbers: Stream<u32>, f: F) -> Cell<u32>
 /// where
@@ -193,7 +193,7 @@ pub enum Erase<T> {
 /// have to name the closure's type:
 ///
 /// ```compile_fail,E0277
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// fn plus_one<M: Mode + Accepts<u32>>(b: &mut BuildContext<M>, numbers: Stream<u32>) -> Cell<u32> {
 ///     numbers.map(|n| n + 1).hold(b, 0) // error: M: Accepts<Map<Stream<u32>, {closure}>>
@@ -206,7 +206,7 @@ pub enum Erase<T> {
 /// Either mode's builder lends one:
 ///
 /// ```
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 ///     numbers.map(|n| n + 1).hold(b, 0)

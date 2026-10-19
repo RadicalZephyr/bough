@@ -1,4 +1,4 @@
-//! The engine against the oracle: programs built with the Bough API, run,
+//! The engine against the oracle: programs built with the Portia API, run,
 //! and compared with GHC's answers event by event and step by step.
 //!
 //! Every program runs in both modes, `Local` and `Threaded`: plainly, under
@@ -14,7 +14,7 @@
 //! comparison does not compare; the order of the listener calls across
 //! nodes, against the oracle's times; and every sample after a transaction.
 //!
-//! The random programs come from `bough_oracle::programs()`, in four tests
+//! The random programs come from `portia_oracle::programs()`, in four tests
 //! that run in parallel. Most have loops, cell, state and stream loops,
 //! child transactions, switches and constructs, and some loops run through
 //! children or through a switch's selection; some constructs are nested,
@@ -29,7 +29,7 @@
 //! showed it. `PROPTEST_CASES` sets how many
 //! programs in all, 1024 unless set; `PROPTEST_RNG_SEED` fixes the seed,
 //! which a failure prints. A failing program is shrunk by proptest, then by
-//! `bough_oracle::reduce` to a program that fails the same way, and reported
+//! `portia_oracle::reduce` to a program that fails the same way, and reported
 //! with its schedule and every observed node, the engine beside the oracle.
 //!
 //! RFD 7's fold law runs in two more tests, on half as many random
@@ -63,7 +63,7 @@
 //! the instant before.
 //!
 //! A test that needs GHC starts with `let Some(oracle) = oracle() else {
-//! return };`: with `BOUGH_ORACLE=skip` it says that it skipped and returns.
+//! return };`: with `PORTIA_ORACLE=skip` it says that it skipped and returns.
 //! The tests of the builder, the comparison and the generator alone, and
 //! the tests that the engine refuses same-instant cycles through loops and
 //! through switches, need no GHC.
@@ -83,8 +83,8 @@ use Definition::{
 };
 use Expression::{Argument, ArgumentAt, ConstructEvent, Literal, Sample, SecondArgument};
 use Reference::TopLevel;
-use bough::{InputSlot, Local, Threaded};
-use bough_oracle::{
+use portia::{InputSlot, Local, Threaded};
+use portia_oracle::{
     Answer, Body, BodyResult, ConstructCount, Definition, Drive, Engine, Expected, Expression,
     FedEngine, Feed, Held, Input, NodeType, Observation, Oracle, Program, Reference, Refusal,
     RunOptions, Scalar, SwitchCount, Switching, Type, Value, Window, check, check_fed,
@@ -100,7 +100,7 @@ use proptest::test_runner::{Config, RngSeed, TestCaseError, TestError, TestRunne
 
 /// The oracle every test shares, or `None` when the tests skip.
 fn oracle() -> Option<&'static Oracle> {
-    bough_oracle::for_tests(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bough-oracle"))
+    portia_oracle::for_tests(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("portia-oracle"))
 }
 
 /// Both modes, through the same builder.
@@ -1739,7 +1739,7 @@ fn a_stream_loop_through_a_defer_counts_down_one_child_level_at_a_time() {
         vec![6, 8],
         &[&[(0, 3)], &[(0, 9)], &[(0, -1)]],
     );
-    assert!(bough_oracle::well_founded(&countdown));
+    assert!(portia_oracle::well_founded(&countdown));
     assert_eq!(
         agree(oracle, &countdown),
         [
@@ -1822,7 +1822,7 @@ fn a_stream_loop_through_a_split_runs_its_children_depth_first() {
         vec![6, 8],
         &[&[(0, 4)], &[(0, 2)]],
     );
-    assert!(bough_oracle::well_founded(&tree));
+    assert!(portia_oracle::well_founded(&tree));
     let events: &[(&[i64], i64)] = &[
         (&[1], 4),
         (&[1, 0], 3),
@@ -2005,7 +2005,7 @@ fn a_cell_loop_through_a_defer_of_its_steps_view() {
         vec![0, 7],
         &[&[(0, 6)], &[(0, 3)]],
     );
-    assert!(bough_oracle::well_founded(&looped));
+    assert!(portia_oracle::well_founded(&looped));
     let steps: &[(&[i64], i64)] = &[
         (&[1], 6),
         (&[1, 0], 4),
@@ -2090,7 +2090,7 @@ fn a_loop_through_its_holds_steps_view_is_refused_at_close() {
         check(&f3).is_ok(),
         "the builder leaves the refusal to the engine"
     );
-    assert!(!bough_oracle::well_founded(&f3));
+    assert!(!portia_oracle::well_founded(&f3));
     for engine in ENGINES {
         let message = panic_message(|| (engine.run)(&f3, RunOptions::default()))
             .unwrap_or_else(|| panic!("{} mode built F3's loop", engine.name));
@@ -2331,7 +2331,7 @@ fn a_switch_stream_loop_through_its_selection() {
     });
     let tick: &[(usize, i64)] = &[(0, 1)];
     let probe = program(integers(1), definitions, vec![1], &[tick; 4]);
-    assert!(bough_oracle::well_founded(&probe));
+    assert!(portia_oracle::well_founded(&probe));
     assert_eq!(agree(oracle, &probe), [stream(&[&[1], &[2], &[3], &[4]])]);
 }
 
@@ -2395,7 +2395,7 @@ fn a_switch_cell_that_switches_to_a_quiet_inner_steps() {
 /// the two moves make together has no cycle, and GHC gives A 1 then 102
 /// and B 11 then 2. A relink that checked each move as it made it would
 /// find the cycle y, B, p, the loop, A through B's old inner. The program
-/// is not what [`well_founded`](bough_oracle::well_founded) calls well
+/// is not what [`well_founded`](portia_oracle::well_founded) calls well
 /// founded, since each switch may select a cell that depends on the other,
 /// so the generator never makes one like it.
 #[test]
@@ -2445,7 +2445,7 @@ fn two_switches_may_reverse_a_dependency_between_them_in_one_instant() {
         vec![12, 8, 5, 9],
         &[&[(0, 0)], &[]],
     );
-    assert!(!bough_oracle::well_founded(&reversal));
+    assert!(!portia_oracle::well_founded(&reversal));
     assert_eq!(
         agree(oracle, &reversal),
         [
@@ -3110,7 +3110,7 @@ fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
             &[(0, 4)],
         ],
     );
-    assert!(bough_oracle::well_founded(&navigation));
+    assert!(portia_oracle::well_founded(&navigation));
     assert_eq!(
         agree(oracle, &navigation),
         [
@@ -3438,7 +3438,7 @@ fn a_split_built_at_a_child_instant_splits_nothing_from_before_it_unlike_the_tex
 // ----- the builder and the generator alone -----
 
 /// Runs a program in `Local` mode, plainly.
-fn run_local(program: &Program) -> bough_oracle::EngineRun {
+fn run_local(program: &Program) -> portia_oracle::EngineRun {
     run::<Local>(program, RunOptions::default()).unwrap_or_else(|error| panic!("{error}"))
 }
 
@@ -3468,12 +3468,12 @@ fn the_builder_fuses_two_adapters_into_the_materializer_and_gives_a_third_a_node
     // The input and the hold: the chain fused into the hold.
     assert_eq!(run.live_nodes, 2);
     // Threaded fuses one adapter, so the filter needs a node of the map.
-    let threaded = bough_oracle::run::<Threaded>(&two, RunOptions::default()).unwrap();
+    let threaded = portia_oracle::run::<Threaded>(&two, RunOptions::default()).unwrap();
     assert_eq!(threaded.live_nodes, 3);
     assert_eq!(threaded.observations, run.observations);
     assert_eq!(
         run.observations[0],
-        bough_oracle::EngineObservation::Cell {
+        portia_oracle::EngineObservation::Cell {
             registration: vec![0],
             steps_registration: vec![],
             values: vec![vec![], vec![6]],
@@ -3514,7 +3514,7 @@ fn the_builder_fuses_two_adapters_into_the_materializer_and_gives_a_third_a_node
     assert_eq!(run.live_nodes, 5);
     assert_eq!(
         run.observations[0],
-        bough_oracle::EngineObservation::Cell {
+        portia_oracle::EngineObservation::Cell {
             registration: vec![3],
             steps_registration: vec![],
             values: vec![vec![11]],
@@ -3727,7 +3727,7 @@ fn the_builder_declares_each_loop_by_its_definition() {
     let run = run_local(&loops);
     assert_eq!(
         run.observations[0],
-        bough_oracle::EngineObservation::Cell {
+        portia_oracle::EngineObservation::Cell {
             registration: vec![0],
             steps_registration: vec![],
             values: vec![vec![3], vec![10]],
@@ -3782,7 +3782,7 @@ fn the_builder_declares_each_loop_by_its_definition() {
     assert_eq!(run.live_nodes, 3 + 1 + 2 + 1 + 2);
     assert_eq!(
         run.observations[1],
-        bough_oracle::EngineObservation::Stream {
+        portia_oracle::EngineObservation::Stream {
             events: vec![vec![5, 6]]
         }
     );
@@ -4017,12 +4017,12 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
         ],
     };
     let types = check(&switches).unwrap();
-    let integers = bough_oracle::Held::Streams(Scalar::Integer);
+    let integers = portia_oracle::Held::Streams(Scalar::Integer);
     assert_eq!(types[7], NodeType::Tokens(integers));
     assert_eq!(types[8], NodeType::Outer(integers));
     assert_eq!(
         types[21],
-        NodeType::Outer(bough_oracle::Held::Cells { state: true })
+        NodeType::Outer(portia_oracle::Held::Cells { state: true })
     );
     assert_eq!(
         types[22],
@@ -4038,9 +4038,9 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
     // a constant, a pick, a hold, a switch and a steps view; a share, two
     // accumulators, a map_cell and a switch; a constant and a switch.
     assert_eq!(run.live_nodes, 7 + 2 + 4 + 5 + 5 + 2);
-    let stream = |events: Vec<Vec<i64>>| bough_oracle::EngineObservation::Stream { events };
+    let stream = |events: Vec<Vec<i64>>| portia_oracle::EngineObservation::Stream { events };
     let cell = |registration: i64, steps: Vec<Vec<i64>>, samples: Vec<i64>| {
-        bough_oracle::EngineObservation::Cell {
+        portia_oracle::EngineObservation::Cell {
             registration: vec![registration],
             steps_registration: vec![],
             values: steps.clone(),
@@ -4058,7 +4058,7 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
             stream(vec![vec![20], vec![40], vec![60]]),
         ]
     );
-    let threaded = bough_oracle::run::<Threaded>(&switches, RunOptions::default()).unwrap();
+    let threaded = portia_oracle::run::<Threaded>(&switches, RunOptions::default()).unwrap();
     assert_eq!(threaded.observations, run.observations);
     // A candidate no selection has reached yet lives only by the builder's
     // depends declarations; collecting after every unit shows it.
@@ -4067,8 +4067,8 @@ fn the_builder_builds_switches_as_a_user_writes_them() {
         ..RunOptions::default()
     };
     for collected in [
-        bough_oracle::run::<Local>(&switches, collecting).unwrap(),
-        bough_oracle::run::<Threaded>(&switches, collecting).unwrap(),
+        portia_oracle::run::<Local>(&switches, collecting).unwrap(),
+        portia_oracle::run::<Threaded>(&switches, collecting).unwrap(),
     ] {
         assert_eq!(collected.observations, run.observations);
     }
@@ -4416,9 +4416,9 @@ fn the_builder_builds_constructs_as_a_user_writes_them() {
     // share, so a node each; four holds of tokens and four switches; an
     // accumulator. The first screen is the input's own node.
     assert_eq!(run.live_nodes, 3 + 2 + 1 + 5 + 4 + 4 + 1);
-    let stream = |events: Vec<Vec<i64>>| bough_oracle::EngineObservation::Stream { events };
+    let stream = |events: Vec<Vec<i64>>| portia_oracle::EngineObservation::Stream { events };
     let cell = |registration: i64, steps: Vec<Vec<i64>>, samples: Vec<i64>| {
-        bough_oracle::EngineObservation::Cell {
+        portia_oracle::EngineObservation::Cell {
             registration: vec![registration],
             steps_registration: vec![],
             values: steps.clone(),
@@ -4449,9 +4449,9 @@ fn the_builder_builds_constructs_as_a_user_writes_them() {
         ..RunOptions::default()
     };
     for run in [
-        bough_oracle::run::<Threaded>(&constructs, RunOptions::default()).unwrap(),
-        bough_oracle::run::<Local>(&constructs, collecting).unwrap(),
-        bough_oracle::run::<Threaded>(&constructs, collecting).unwrap(),
+        portia_oracle::run::<Threaded>(&constructs, RunOptions::default()).unwrap(),
+        portia_oracle::run::<Local>(&constructs, collecting).unwrap(),
+        portia_oracle::run::<Threaded>(&constructs, collecting).unwrap(),
     ] {
         assert_eq!(run.observations, expected);
     }
@@ -4682,18 +4682,18 @@ fn the_comparison_holds_listener_calls_across_nodes_to_time_order() {
         timed_stream(1, &[(&[1, 0], 1)]),
         timed_stream(1, &[(&[1], 1)]),
     ];
-    let call = |observed: usize| bough_oracle::Call {
+    let call = |observed: usize| portia_oracle::Call {
         observed,
-        listened: bough_oracle::Listened::Stream,
+        listened: portia_oracle::Listened::Stream,
         transaction: 0,
         index: 0,
     };
-    let mut run = bough_oracle::EngineRun {
+    let mut run = portia_oracle::EngineRun {
         observations: vec![
-            bough_oracle::EngineObservation::Stream {
+            portia_oracle::EngineObservation::Stream {
                 events: vec![vec![1]],
             },
-            bough_oracle::EngineObservation::Stream {
+            portia_oracle::EngineObservation::Stream {
                 events: vec![vec![1]],
             },
         ],
@@ -4844,11 +4844,11 @@ fn census(program: &Program) -> Census {
                     census.switch_cells = true;
                     census.switch_states |= matches!(
                         types[node],
-                        bough_oracle::NodeType::Cell { state: true, .. }
+                        portia_oracle::NodeType::Cell { state: true, .. }
                     );
                 }
                 census.nested_switches |=
-                    bough_oracle::switch_candidates(&program.definitions, *outer)
+                    portia_oracle::switch_candidates(&program.definitions, *outer)
                         .iter()
                         .any(is_switch);
             }
@@ -4881,13 +4881,13 @@ fn census(program: &Program) -> Census {
                 census.cell_loops = true;
                 census.state_loops |= matches!(
                     types[node],
-                    bough_oracle::NodeType::Cell { state: true, .. }
+                    portia_oracle::NodeType::Cell { state: true, .. }
                 );
             }
             Definition::StreamLoop(_) => census.stream_loops = true,
             Definition::Split(_) => census.splits = true,
             Definition::Defer(_) => census.defers = true,
-            Definition::Filter { predicate, .. } if *predicate == bough_oracle::guard_filter() => {
+            Definition::Filter { predicate, .. } if *predicate == portia_oracle::guard_filter() => {
                 census.children_in_loops = true;
             }
             _ => {}
@@ -4956,26 +4956,26 @@ fn the_generator_makes_well_formed_programs_with_every_kind() {
         let program = strategy.new_tree(&mut runner).unwrap().current();
         check(&program).unwrap_or_else(|error| panic!("{error}\n{program:?}"));
         assert!(
-            bough_oracle::well_founded(&program),
+            portia_oracle::well_founded(&program),
             "a generated program is not well founded: {program:?}"
         );
-        assert!((5..=bough_oracle::MAX_DEFINITIONS).contains(&program.definitions.len()));
+        assert!((5..=portia_oracle::MAX_DEFINITIONS).contains(&program.definitions.len()));
         assert!((1..=10).contains(&program.schedule.len()));
         sizes.push(program.definitions.len());
         watched += program.observe.len();
         for definition in &program.definitions {
-            defined.insert(bough_oracle::name(definition));
+            defined.insert(portia_oracle::name(definition));
             if let Lift { cells, .. } = definition {
                 lifts |= 1 << cells.len();
             }
         }
         for &node in &program.observe {
-            observed.insert(bough_oracle::name(&program.definitions[node]));
+            observed.insert(portia_oracle::name(&program.definitions[node]));
         }
         for body in bodies(&program) {
             body_sizes.push(body.definitions.len());
             for definition in &body.definitions {
-                in_bodies.insert(bough_oracle::name(definition));
+                in_bodies.insert(portia_oracle::name(definition));
             }
         }
         // A diamond: a Share read by two nodes that both lead to one node.
@@ -5266,7 +5266,7 @@ fn the_reducer_keeps_what_the_failure_needs_and_drops_the_rest() {
         .expect("a big program with loops and switches that observes a merge");
     let reduced = reduce(&program, |candidate| {
         assert!(check(candidate).is_ok(), "{candidate:?}");
-        assert!(bough_oracle::well_founded(candidate), "{candidate:?}");
+        assert!(portia_oracle::well_founded(candidate), "{candidate:?}");
         observes_a_merge(candidate)
     });
     // Two streams and their merge, observed; no transactions; the merge's
@@ -5316,7 +5316,7 @@ fn the_reducer_cuts_a_construct_body_to_what_the_failure_needs() {
         .expect("a program that reads a body with a snapshot, and has a body of four definitions");
     let reduced = reduce(&program, |candidate| {
         assert!(check(candidate).is_ok(), "{candidate:?}");
-        assert!(bough_oracle::well_founded(candidate), "{candidate:?}");
+        assert!(portia_oracle::well_founded(candidate), "{candidate:?}");
         fails(candidate)
     });
     let left = bodies(&reduced);

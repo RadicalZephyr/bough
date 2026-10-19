@@ -4,7 +4,7 @@
 
 mod common;
 
-use bough_repl::Repl;
+use portia_repl::Repl;
 use common::{listing, transcript};
 
 fn repl(lines: &[&str]) -> Repl {

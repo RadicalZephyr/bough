@@ -10,8 +10,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::thread;
 
-use bough::prelude::*;
-use bough::{Anchor, Io, IoError, RemoteIo, Tracer};
+use portia::prelude::*;
+use portia::{Anchor, Io, IoError, RemoteIo, Tracer};
 
 /// A value whose `Drop` panics once it's armed.
 struct Bomb(Rc<Cell<bool>>);
@@ -33,7 +33,7 @@ impl Trace for Bomb {
 struct Fixture {
     graph: Runtime,
     numbers_in: Input<u32>,
-    held: bough::Cell<u32>,
+    held: portia::Cell<u32>,
     io: Io,
     remote: RemoteIo,
     armed: Rc<Cell<bool>>,

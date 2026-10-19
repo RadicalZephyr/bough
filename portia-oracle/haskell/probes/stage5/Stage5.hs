@@ -1,9 +1,9 @@
 {-# LANGUAGE GADTs #-}
--- Expected values for bough's stage 5 switch tests, computed over an
+-- Expected values for portia's stage 5 switch tests, computed over an
 -- unchanged copy of Reactive.Sodium.Denotational (Sodium 1.1; SHA-256
--- d6772fb8...c822b, the file vendored in bough-oracle/haskell) with the
+-- d6772fb8...c822b, the file vendored in portia-oracle/haskell) with the
 -- oracle's patch F6: a switch cell created at t0 is SwitchC over its outer
--- chopped at t0, exactly bough-oracle's Oracle/Derived.hs `switchCell`.
+-- chopped at t0, exactly portia-oracle's Oracle/Derived.hs `switchCell`.
 -- SwitchS is the text's (no creation time).
 --
 -- Loops are solved by explicit fixed-point iteration (fact 2), the method of
@@ -245,7 +245,7 @@ newInnerFires = do
   line "new inner fires: out" (occs out)
   line "new inner fires: linear, through a switch cell" (occs viaCells)
 
--- 10. A switch between two accumulators (Bough's accumulate_mut, whose
+-- 10. A switch between two accumulators (Portia's accumulate_mut, whose
 --     denotation is accumulate's): the State switch. Names are pushed; the
 --     short list takes names under four letters.
 stateSwitch :: IO ()

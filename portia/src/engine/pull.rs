@@ -84,12 +84,12 @@ impl<M: Mode> BuildContext<M> {
             }
             assert!(
                 p != self.s.cursor,
-                "bough: a same-instant cycle through a dynamic read at node {x}"
+                "portia: a same-instant cycle through a dynamic read at node {x}"
             );
             match self.s.order[p as usize] {
                 NOOP => return,
                 IN_PROGRESS => {
-                    panic!("bough: a same-instant cycle through a dynamic read at node {x}")
+                    panic!("portia: a same-instant cycle through a dynamic read at node {x}")
                 }
                 _ => {}
             }
@@ -105,7 +105,7 @@ impl<M: Mode> BuildContext<M> {
             }
             assert!(
                 c.pulling != tx,
-                "bough: a same-instant cycle among nodes created in this transaction at node {x}"
+                "portia: a same-instant cycle among nodes created in this transaction at node {x}"
             );
             count!(self.s, new_nodes);
             self.store.cold[x as usize].pulling = tx;
@@ -148,7 +148,7 @@ impl<M: Mode> BuildContext<M> {
             Kind::InPlace => in_place::<M, A>(data),
             Kind::ReadThrough => (self.store.ops[i as usize].value)(self, i, passed)
                 .downcast_ref::<A>()
-                .expect("bough engine: cell type"),
+                .expect("portia engine: cell type"),
             Kind::Loop => self.value_through::<A>(self.loop_target(i), passed),
             Kind::SwitchCell => {
                 let outer = self.store.relations[i as usize].deps[0];
@@ -156,14 +156,14 @@ impl<M: Mode> BuildContext<M> {
                 let inner = self.check(inner);
                 let passed = passed.pass(i).unwrap_or_else(|| {
                     panic!(
-                        "bough: a same-instant cycle through a switch_cell read before its first \
+                        "portia: a same-instant cycle through a switch_cell read before its first \
                          link or its move at commit, at node {i}. The cell a switch selects may \
                          not depend on the switch at the same instant"
                     )
                 });
                 self.value_through::<A>(inner, passed)
             }
-            k => panic!("bough engine: node {i} ({k:?}) is not a cell"),
+            k => panic!("portia engine: node {i} ({k:?}) is not a cell"),
         }
     }
 
@@ -186,7 +186,7 @@ impl<M: Mode> BuildContext<M> {
         }
         assert!(
             c.prep_enter != tx,
-            "bough: a same-instant cycle through a read after the instant at node {x}"
+            "portia: a same-instant cycle through a read after the instant at node {x}"
         );
         self.store.cold[x as usize].prep_enter = tx;
         self.ensure(x);
@@ -240,15 +240,15 @@ impl<M: Mode> BuildContext<M> {
             Kind::Hold if stepped => cell::<M, A>(data)
                 .pending
                 .as_ref()
-                .expect("bough engine: a hold that stepped has its pending value"),
+                .expect("portia engine: a hold that stepped has its pending value"),
             Kind::Hold | Kind::Constant => &cell::<M, A>(data).value,
             Kind::ReadThrough if stepped => memo::<M, A>(data)
                 .post_value
                 .as_ref()
-                .expect("bough engine: a read-through cell read after the instant before prepare"),
+                .expect("portia engine: a read-through cell read after the instant before prepare"),
             Kind::ReadThrough => self.value::<A>(x),
             Kind::InPlace => unreachable!(
-                "bough engine: node {x} is an in-place accumulator, whose value after the \
+                "portia engine: node {x} is an in-place accumulator, whose value after the \
                  instant does not exist before commit; a State has no stream view"
             ),
             // Whether or not the loop stepped: its definition's value after
@@ -259,7 +259,7 @@ impl<M: Mode> BuildContext<M> {
             // step, neither did its outer, whose value after the instant is
             // then its value, the current inner, which did not step either.
             Kind::SwitchCell => self.post::<A>(self.selected_after(x)),
-            k => panic!("bough engine: node {x} ({k:?}) is not a cell"),
+            k => panic!("portia engine: node {x} ({k:?}) is not a cell"),
         }
     }
 }

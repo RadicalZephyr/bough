@@ -1,11 +1,11 @@
 {-# LANGUAGE GADTs #-}
--- | Every Bough operation, defined over the constructors of the executable
+-- | Every Portia operation, defined over the constructors of the executable
 -- semantics, Reactive.Sodium.Denotational (Denotational Semantics of Sodium,
 -- revision 1.1). That module is imported unchanged.
 --
 -- Ported from the spike's research (research-derived-ops, Derived.hs) with
 -- its verification's corrections, and with two patches where the text
--- departs from the two principles Bough holds over it (RFD 1), time order
+-- departs from the two principles Portia holds over it (RFD 1), time order
 -- and existence from creation. The patches live here, in the derived layer;
 -- the vendored file stays untouched.
 --
@@ -23,13 +23,13 @@
 --
 -- Conventions.
 --
--- * Argument order follows Bough: the receiver first, then the Rust
+-- * Argument order follows Portia: the receiver first, then the Rust
 --   arguments in order. @s.map(f)@ is @map s f@; @s.hold(b, init)@ is
 --   @hold s init@.
 -- * The build context is the 'Reactive' monad. An operation lives in
 --   'Reactive' only when its denotation reads the time, which is its
 --   creation time t0. Every other operation is a plain function, even where
---   Bough makes it a materializer that takes @b@.
+--   Portia makes it a materializer that takes @b@.
 -- * Time: the build runs as transaction zero at @[0]@; external
 --   transactions are @[1]@, @[2]@, ...; the child transactions of @t@ are
 --   @t ++ [n]@. 'build' runs a build closure at @[0]@.
@@ -42,7 +42,7 @@
 --   5.16 Sample.
 module Oracle.Derived
   ( -- * Time
-    buildTime, externalTime, build, ioSample, wellFormed, boughInput
+    buildTime, externalTime, build, ioSample, wellFormed, portiaInput
     -- * Build: things that start from nothing
   , input, inputCoalescing, inputCoalescingByMerge
   , inputCell, inputCellCoalescing, constant, never
@@ -58,7 +58,7 @@ module Oracle.Derived
     -- * Loops
   , cellLoop, cellLoopCount, streamLoop, streamLoopCount
   , cellLoopKnot, streamLoopKnot, fixCell, fixStream
-    -- * Sodium operations Bough does not name
+    -- * Sodium operations Portia does not name
   , switcher, apply, coalesceStream, snapshotViaExecute
     -- * Helpers
   , concrete, concreteCell, chopCell
@@ -96,9 +96,9 @@ ioSample c k = D.at (D.steps c) [k + 1]
 wellFormed :: S a -> Bool
 wellFormed s = and (zipWith (<) ts (drop 1 ts)) where ts = P.map fst s
 
--- | What I/O code can put into a Bough input: external times only.
-boughInput :: S a -> Bool
-boughInput s = wellFormed s && all (\(t, _) -> length t == 1 && head t >= 1) s
+-- | What I/O code can put into a Portia input: external times only.
+portiaInput :: S a -> Bool
+portiaInput s = wellFormed s && all (\(t, _) -> length t == 1 && head t >= 1) s
 
 ------------------------------------------------------------------------------
 -- Build: things that start from nothing
@@ -341,7 +341,7 @@ chopCell t0 c = concrete (D.chopFront (D.steps c) t0)
 -- | A cell loop as an explicit fixed point. The forward cell is a concrete
 -- cell holding the previous iterate's steps; the first never steps and
 -- has an initial value that is an error to read, as sampling an open loop
--- is in Bough. Returns the fixed point and the number of iterations that
+-- is in Portia. Returns the fixed point and the number of iterations that
 -- reached it (body evaluations, not counting the one that confirms it).
 fixCell :: Eq a => (Cell a -> Cell a) -> (Cell a, Int)
 fixCell body = go 1 start
@@ -386,13 +386,13 @@ streamLoopKnot :: (Stream a -> Reactive (Stream a)) -> Reactive (Stream a)
 streamLoopKnot body = Reactive $ \t -> let s = run (body s) t in s
 
 ------------------------------------------------------------------------------
--- Sodium operations Bough does not name
+-- Sodium operations Portia does not name
 
 -- | Conal's switcher, section 4: hold then switch_cell, both at [0].
 switcher :: Cell a -> Stream (Cell a) -> Cell a
 switcher c s = SwitchC (Hold c s [0]) [0]
 
--- | Apply, section 5.14: Bough spells it @(cf, ca).lift(b, |f, a| f(a))@.
+-- | Apply, section 5.14: Portia spells it @(cf, ca).lift(b, |f, a| f(a))@.
 apply :: Cell (a -> b) -> Cell a -> Cell b
 apply = Apply
 

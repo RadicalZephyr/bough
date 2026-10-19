@@ -1,9 +1,9 @@
-//! Derive macros for bough.
+//! Derive macros for portia.
 //!
-//! `#[derive(Trace)]` implements `bough::Trace` for a struct or an enum by
+//! `#[derive(Trace)]` implements `portia::Trace` for a struct or an enum by
 //! tracing every field, and `#[trace(skip)]` leaves a field out. It refuses
-//! a field whose type names `Anchored`. The `bough` crate re-exports it with
-//! its `derive` feature, so it is written `#[derive(bough::Trace)]` or, with
+//! a field whose type names `Anchored`. The `portia` crate re-exports it with
+//! its `derive` feature, so it is written `#[derive(portia::Trace)]` or, with
 //! the trait imported, `#[derive(Trace)]`.
 
 use proc_macro::TokenStream;
@@ -12,7 +12,7 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Fields, Ident, parse_macro_input, parse_quote};
 
-/// Derives `bough::Trace`: the collector's walk visits every token the
+/// Derives `portia::Trace`: the collector's walk visits every token the
 /// value holds, directly or inside its fields (RFD 3).
 ///
 /// Every field is traced, so every field's type must implement `Trace`.
@@ -97,13 +97,13 @@ fn expand(mut input: DeriveInput) -> syn::Result<TokenStream2> {
     for param in &bounded {
         where_clause
             .predicates
-            .push(parse_quote!(#param: ::bough::Trace));
+            .push(parse_quote!(#param: ::portia::Trace));
     }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
         #[automatically_derived]
-        impl #impl_generics ::bough::Trace for #name #ty_generics #where_clause {
-            fn trace(&self, tracer: &mut ::bough::Tracer) {
+        impl #impl_generics ::portia::Trace for #name #ty_generics #where_clause {
+            fn trace(&self, tracer: &mut ::portia::Tracer) {
                 #body
             }
         }
@@ -128,7 +128,7 @@ fn destructure(
                     continue;
                 }
                 let ident = field.ident.as_ref().expect("a named field has a name");
-                let binding = format_ident!("__bough_field_{}", i);
+                let binding = format_ident!("__portia_field_{}", i);
                 bound.push(quote! { #ident: #binding });
                 visits.push(visit(&binding, &field.ty));
                 let ty = &field.ty;
@@ -144,7 +144,7 @@ fn destructure(
                     bound.push(quote! { _ });
                     continue;
                 }
-                let binding = format_ident!("__bough_field_{}", i);
+                let binding = format_ident!("__portia_field_{}", i);
                 bound.push(quote! { #binding });
                 visits.push(visit(&binding, &field.ty));
                 let ty = &field.ty;
@@ -161,12 +161,12 @@ fn destructure(
 /// `Trace` is an error at the field rather than at the derive.
 fn visit(binding: &Ident, ty: &syn::Type) -> TokenStream2 {
     quote_spanned! {ty.span()=>
-        ::bough::Trace::trace(#binding, tracer);
+        ::portia::Trace::trace(#binding, tracer);
     }
 }
 
 /// Refuses a field whose type names `Anchored` anywhere, `Anchored<T>`,
-/// `bough::Anchored<T>` or `Vec<Leaf<Anchored<T>>>`, at the field's type.
+/// `portia::Anchored<T>` or `Vec<Leaf<Anchored<T>>>`, at the field's type.
 fn refuse_anchored(field: &syn::Field) -> syn::Result<()> {
     let ty = &field.ty;
     if names(&quote!(#ty), &format_ident!("Anchored")) {
@@ -224,7 +224,7 @@ mod tests {
             parse_quote! { struct Row { #[trace(skip)] kept: Anchored<Input<u32>> } },
             parse_quote! { struct Row { kept: Anchored<Input<u32>> } },
             parse_quote! { struct Rows { rows: Vec<Leaf<Anchored<Input<u32>>>> } },
-            parse_quote! { struct Row(#[trace(skip)] bough::Anchored<Cell<u32>>); },
+            parse_quote! { struct Row(#[trace(skip)] portia::Anchored<Cell<u32>>); },
             parse_quote! { enum Row { Open { #[trace(skip)] kept: Option<Anchored<Cell<u32>>> }, Shut } },
         ];
         for input in refused {

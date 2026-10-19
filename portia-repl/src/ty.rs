@@ -1,5 +1,5 @@
 //! The REPL's parallel enums: [`Type`], the data-free tag the REPL reasons
-//! with, and [`Node`], the concrete Bough cell it wires. Every `match` on
+//! with, and [`Node`], the concrete Portia cell it wires. Every `match` on
 //! them is a place a new type has to be added; the findings note counts
 //! them.
 //!
@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use bough::{BuildContext, Builder, Cell, Input, Runtime, Trace};
+use portia::{BuildContext, Builder, Cell, Input, Runtime, Trace};
 
 /// The static description of a binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +32,7 @@ impl fmt::Display for Type {
     }
 }
 
-/// A binding's storage: a concrete, fully monomorphized Bough cell.
+/// A binding's storage: a concrete, fully monomorphized Portia cell.
 #[derive(Clone, Copy, Debug, Trace)]
 pub enum Node {
     /// An `Int` cell.
@@ -72,7 +72,7 @@ impl Node {
 }
 
 fn mismatch(wanted: Type, got: Node) -> ! {
-    unreachable!("bough-repl: the checks passed a {got:?} where a {wanted} belongs")
+    unreachable!("portia-repl: the checks passed a {got:?} where a {wanted} belongs")
 }
 
 /// A literal in a command: its syntax gives its [`Type`].
@@ -154,7 +154,7 @@ impl InputToken {
             (InputToken::Bool(input), Literal::Bool(p)) => runtime.send(input, p),
             (InputToken::Str(input), Literal::Str(text)) => runtime.send(input, text),
             (input, value) => {
-                unreachable!("bough-repl: the checks passed {value} to {input:?}")
+                unreachable!("portia-repl: the checks passed {value} to {input:?}")
             }
         }
     }

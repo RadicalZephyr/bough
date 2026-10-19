@@ -1,8 +1,8 @@
-//! Spike, not API: GTK 4 on bough's `Io`.
+//! Spike, not API: GTK 4 on portia's `Io`.
 //!
-//! What a `bough-gtk` crate would give an app. The [`Driver`], a future on
+//! What a `portia-gtk` crate would give an app. The [`Driver`], a future on
 //! the main loop, owns the runtime and pumps it, and every widget reaches
-//! the runtime through a [`bough::Io`], whose calls wait for the next
+//! the runtime through a [`portia::Io`], whose calls wait for the next
 //! pump. GTK runs handlers at its own times: a listener writes to a
 //! widget, and the widget runs its handler at once, or a list view binds a
 //! row inside a model change a listener made. That code can call the `Io`
@@ -18,7 +18,7 @@ use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
 
-use bough::{CellRef, Input, Io, IoError, Listener, PumpError, Runtime};
+use portia::{CellRef, Input, Io, IoError, Listener, PumpError, Runtime};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 use gtk::{gio, glib::object::IsA};
@@ -29,7 +29,7 @@ use gtk::{gio, glib::object::IsA};
 pub fn send<A: 'static>(io: &Io, input: Input<A>, value: A) {
     match io.send(input, value) {
         Ok(()) | Err(IoError::Gone) => {}
-        Err(error) => glib::g_critical!("bough-gtk", "a send was refused: {error:?}"),
+        Err(error) => glib::g_critical!("portia-gtk", "a send was refused: {error:?}"),
     }
 }
 
@@ -40,7 +40,7 @@ pub fn sender<A: 'static>(io: &Io, input: Input<A>) -> impl Fn(A) + Clone + 'sta
     move |value| send(&io, input, value)
 }
 
-/// Keeps `handle`, such as a [`Listener`], an [`Anchor`](bough::Anchor) or
+/// Keeps `handle`, such as a [`Listener`], an [`Anchor`](portia::Anchor) or
 /// the [`Driver`], for as long as `widget` lives, and drops it when the
 /// widget is finalized.
 pub fn tie<T: 'static>(widget: &impl IsA<glib::Object>, handle: T) {
@@ -104,7 +104,7 @@ where
 
 /// The driver: a future on the thread's main context that owns the
 /// runtime and pumps it whenever a call through an [`Io`] or a
-/// [`RemoteIo`](bough::RemoteIo), or a slot write, wakes it. A pump that
+/// [`RemoteIo`](portia::RemoteIo), or a slot write, wakes it. A pump that
 /// drops a unit is logged, and the driver pumps again for the rest. A
 /// poisoned runtime ends it.
 ///
@@ -133,7 +133,7 @@ pub fn spawn_driver(runtime: Runtime) -> Driver {
             Ok(()) => Poll::Pending,
             Err(PumpError::Poisoned) => Poll::Ready(()),
             Err(error) => {
-                glib::g_critical!("bough-gtk", "the pump dropped a unit: {error:?}");
+                glib::g_critical!("portia-gtk", "the pump dropped a unit: {error:?}");
                 // What the failure left pending waits for the next pump.
                 cx.waker().wake_by_ref();
                 Poll::Pending

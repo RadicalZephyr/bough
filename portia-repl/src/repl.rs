@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::task::Waker;
 use std::time::Duration;
 
-use bough::Listener;
+use portia::Listener;
 
 use crate::clock::{Clock, WallClock};
 use crate::graph::{Command, Def, Graph, Made};
@@ -167,10 +167,10 @@ impl Repl {
         };
         let made = self.graph.make(Command::Input(Literal::Int(0)));
         let Made::Input(input) = &made else {
-            unreachable!("bough-repl: an input command makes an input")
+            unreachable!("portia-repl: an input command makes an input")
         };
         let InputToken::Int(input) = input.1 else {
-            unreachable!("bough-repl: an Int literal makes an Int input")
+            unreachable!("portia-repl: an Int literal makes an Int input")
         };
         let remote = self.graph.runtime().remote_io();
         self.clock.start(period, remote, input);

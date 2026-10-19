@@ -15,7 +15,7 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bough::{Builder, Cell, CellRef, Input, Io, IoError, Runtime, Source};
+use portia::{Builder, Cell, CellRef, Input, Io, IoError, Runtime, Source};
 use gtk::gio;
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
@@ -64,7 +64,7 @@ const SCENARIOS: &[(&str, fn())] = &[
 ];
 
 fn main() -> ExitCode {
-    if let Ok(name) = std::env::var("BOUGH_GTK_SCENARIO") {
+    if let Ok(name) = std::env::var("PORTIA_GTK_SCENARIO") {
         let (_, scenario) = SCENARIOS
             .iter()
             .find(|(n, _)| *n == name)
@@ -87,7 +87,7 @@ fn main() -> ExitCode {
         let out = Command::new("timeout")
             .arg("60")
             .arg(&exe)
-            .env("BOUGH_GTK_SCENARIO", name)
+            .env("PORTIA_GTK_SCENARIO", name)
             .env("RUST_BACKTRACE", "0")
             .output()
             .expect("the scenario runs");
@@ -212,15 +212,15 @@ fn list_view_labels(view: &gtk::ListView) -> Vec<String> {
 fn a_counter() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let click = gtk::Button::with_label("Click");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
     column.append(&click);
     column.append(&label);
     let _window = window_with(&column);
-    bough_gtk::bind_label(&io, app.counter_label, &label).unwrap();
-    let clicked = bough_gtk::sender(&io, app.clicks_in);
+    portia_gtk::bind_label(&io, app.counter_label, &label).unwrap();
+    let clicked = portia_gtk::sender(&io, app.clicks_in);
     click.connect_clicked(move |_| clicked(()));
     for _ in 0..3 {
         click.emit_clicked();
@@ -245,7 +245,7 @@ fn rows_wire_themselves() {
     let _window = window_with(&list);
     let views = app::row_list(&io, app, &list).unwrap();
     for name in ["alpha", "beta", "gamma"] {
-        bough_gtk::send(&io, app.add_in, name.to_string());
+        portia_gtk::send(&io, app.add_in, name.to_string());
     }
     drive(&mut graph);
     let rows = graph.sample(app.rows).clone();
@@ -300,7 +300,7 @@ fn a_list_view_binds_rows_inside_a_listener() {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let syncing = Rc::new(StdCell::new(false));
     let busy_binds = Rc::new(StdCell::new(0));
-    let factory = bough_gtk::list_factory(
+    let factory = portia_gtk::list_factory(
         &io,
         || gtk::Label::new(None),
         clone!(
@@ -341,7 +341,7 @@ fn a_list_view_binds_rows_inside_a_listener() {
             syncing,
             move |rows: &Vec<Row>| {
                 syncing.set(true);
-                bough_gtk::sync_store(&store, rows);
+                portia_gtk::sync_store(&store, rows);
                 syncing.set(false);
             }
         ),
@@ -349,7 +349,7 @@ fn a_list_view_binds_rows_inside_a_listener() {
     .unwrap()
     .keep();
     for name in ["alpha", "beta", "gamma"] {
-        bough_gtk::send(&io, app.add_in, name.to_string());
+        portia_gtk::send(&io, app.add_in, name.to_string());
     }
     graph.pump();
     println!("binds inside the listener: {}", busy_binds.get());
@@ -366,8 +366,8 @@ fn a_list_view_binds_rows_inside_a_listener() {
         strings(&["alpha: 0", "beta: 0", "gamma: 0"]),
     );
     let rows = graph.sample(app.rows).clone();
-    bough_gtk::send(&io, rows[2].clicks_in, ());
-    bough_gtk::send(&io, app.remove_in, rows[0]);
+    portia_gtk::send(&io, rows[2].clicks_in, ());
+    portia_gtk::send(&io, app.remove_in, rows[0]);
     drive(&mut graph);
     check(
         "the labels after a click on gamma and removing alpha",
@@ -381,7 +381,7 @@ fn a_list_view_binds_rows_inside_a_listener() {
 fn a_two_way_entry_settles() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let entry = gtk::Entry::new();
     let _window = window_with(&entry);
     let steps: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -395,7 +395,7 @@ fn a_two_way_entry_settles() {
     )
     .unwrap()
     .keep();
-    bough_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
+    portia_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
     settle(); // the pump registers both listeners
     entry.set_text("hello");
     settle();
@@ -413,10 +413,10 @@ fn a_two_way_entry_settles() {
 fn a_handler_the_first_call_sets_off() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let check_button = gtk::CheckButton::new();
     let _window = window_with(&check_button);
-    bough_gtk::send(&io, app.flag_in, true);
+    portia_gtk::send(&io, app.flag_in, true);
     let toggles: Rc<RefCell<Vec<bool>>> = Rc::default();
     check_button.connect_toggled(clone!(
         #[strong]
@@ -425,7 +425,7 @@ fn a_handler_the_first_call_sets_off() {
         toggles,
         move |check| {
             toggles.borrow_mut().push(check.is_active());
-            bough_gtk::send(&io, app.flag_in, check.is_active());
+            portia_gtk::send(&io, app.flag_in, check.is_active());
         }
     ));
     // Not blocked, on purpose.
@@ -454,10 +454,10 @@ fn a_remote_send_from_a_thread() {
     let (graph, app) = app::build();
     let remote = graph.remote_io();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let _window = window_with(&label);
-    bough_gtk::bind_label(&io, app.clock, &label).unwrap();
+    portia_gtk::bind_label(&io, app.clock, &label).unwrap();
     settle(); // the driver registers its waker, and the label's listener
     std::thread::spawn(move || {
         for n in 1..=3 {
@@ -516,7 +516,7 @@ fn rows_one_pump_opens() {
                     ),
                 );
                 match shown {
-                    Ok(listener) => bough_gtk::tie(&label, listener),
+                    Ok(listener) => portia_gtk::tie(&label, listener),
                     Err(error) => glib::g_critical!("scenario", "not wired: {error:?}"),
                 }
                 list.append(&label);
@@ -526,7 +526,7 @@ fn rows_one_pump_opens() {
     )
     .unwrap()
     .keep();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     settle();
     remote.send(open_in, 10).unwrap();
     remote.send(open_in, 20).unwrap();
@@ -534,7 +534,7 @@ fn rows_one_pump_opens() {
     check("the labels", box_labels(&list), strings(&["10", "20"]));
     for input in inputs.borrow().iter() {
         // A counter that was collected would make this a stale send.
-        bough_gtk::send(&io, *input, 1);
+        portia_gtk::send(&io, *input, 1);
     }
     settle();
     check(
@@ -551,7 +551,7 @@ fn rows_one_pump_opens() {
 fn an_echo_is_not_cured_by_waiting() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let entry = gtk::Entry::new();
     let _window = window_with(&entry);
     let steps: Rc<RefCell<Vec<String>>> = Rc::default();
@@ -572,7 +572,7 @@ fn an_echo_is_not_cured_by_waiting() {
         steps,
         move |entry| {
             if steps.borrow().len() < 40 {
-                bough_gtk::send(&io, app.text_in, entry.text().to_string());
+                portia_gtk::send(&io, app.text_in, entry.text().to_string());
             }
         }
     ));
@@ -610,15 +610,15 @@ fn an_echo_is_not_cured_by_waiting() {
 fn dropping_the_driver_drops_the_runtime() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let driver = bough_gtk::spawn_driver(graph);
+    let driver = portia_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let click = gtk::Button::with_label("Click");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
     column.append(&click);
     column.append(&label);
     let _window = window_with(&column);
-    bough_gtk::bind_label(&io, app.counter_label, &label).unwrap();
-    let clicked = bough_gtk::sender(&io, app.clicks_in);
+    portia_gtk::bind_label(&io, app.counter_label, &label).unwrap();
+    let clicked = portia_gtk::sender(&io, app.clicks_in);
     click.connect_clicked(move |_| clicked(()));
     click.emit_clicked();
     settle();
@@ -643,16 +643,16 @@ fn dropping_the_driver_drops_the_runtime() {
 fn a_dropped_unit_is_logged_and_the_rest_runs() {
     let (graph, app) = app::build();
     let io = graph.io();
-    let _driver = bough_gtk::spawn_driver(graph);
+    let _driver = portia_gtk::spawn_driver(graph);
     let label = gtk::Label::new(None);
     let _window = window_with(&label);
-    bough_gtk::bind_label(&io, app.counter_label, &label).unwrap();
+    portia_gtk::bind_label(&io, app.counter_label, &label).unwrap();
     io.transaction(move |tx| {
         tx.send(app.clicks_in, ());
         tx.send(app.clicks_in, ());
     })
     .unwrap();
-    bough_gtk::send(&io, app.clicks_in, ());
+    portia_gtk::send(&io, app.clicks_in, ());
     settle();
     check(
         "the label",
@@ -669,7 +669,7 @@ fn the_driver_ends_its_runtime_on_purpose() {
     let (mut graph, app) = app::build();
     graph.listen_once(app.opened, |_| ()).keep();
     let io = graph.io();
-    let driver = bough_gtk::spawn_driver(graph);
+    let driver = portia_gtk::spawn_driver(graph);
     settle();
     drop(driver);
     settle();

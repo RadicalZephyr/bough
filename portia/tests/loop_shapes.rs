@@ -1,11 +1,11 @@
 //! The loop shapes RFD 1 and RFD 7 promise as fixed tests: the lift2 shape
 //! filed as sodium-rust#52 and its reductions, and bevy-sodium's
 //! health-and-shield slice (record 0003). The programs are the research's,
-//! ported from its Bough sketch, and the expected values are GHC's: the
+//! ported from its Portia sketch, and the expected values are GHC's: the
 //! research ran its `Shapes.hs` over the unchanged `Denotational.hs`, with
 //! each loop solved by explicit fixed-point iteration, and a verification
 //! checked every value against an independent model. Both are in
-//! `bough-oracle/haskell/probes/loop-shapes/`: `loop-shapes.md` (shapes 1,
+//! `portia-oracle/haskell/probes/loop-shapes/`: `loop-shapes.md` (shapes 1,
 //! 2a, 2b, 3b and 3c, whose tables are quoted at each test) and
 //! `verification.md`. Values the research did not print come from the same
 //! program text extended in `probes/stage3/Slice.hs`:
@@ -21,8 +21,8 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use bough::Tracer;
-use bough::prelude::*;
+use portia::Tracer;
+use portia::prelude::*;
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

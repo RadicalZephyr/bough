@@ -8,12 +8,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use bough::{Input, RemoteIo};
-use bough_repl::Repl;
-use bough_repl::clock::Clock;
-use bough_repl::graph::{Command, Def, Graph, Made};
-use bough_repl::registry;
-use bough_repl::ty::{InputToken, Literal, Node};
+use portia::{Input, RemoteIo};
+use portia_repl::Repl;
+use portia_repl::clock::Clock;
+use portia_repl::graph::{Command, Def, Graph, Made};
+use portia_repl::registry;
+use portia_repl::ty::{InputToken, Literal, Node};
 
 /// A script step that fires every timer once and pumps, in place of a
 /// command.

@@ -70,7 +70,7 @@ where
     V: Via<M, F, S::Event, B>,
 {
     let [chain, f] = parts else {
-        unreachable!("bough engine: a construct has two parts")
+        unreachable!("portia engine: a construct has two parts")
     };
     let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) else {
         return;
@@ -83,7 +83,7 @@ where
     // before anything indexes the arena with this node's index.
     assert!(
         b.graph_id == graph,
-        "bough: a construct closure swapped its build context for another graph's"
+        "portia: a construct closure swapped its build context for another graph's"
     );
     b.pop_scope();
     b.put_event(me, out);

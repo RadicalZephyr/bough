@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 
-use bough::InputSlot;
-use bough::prelude::*;
+use portia::InputSlot;
+use portia::prelude::*;
 
 /// A driver step: a write to the slot, or a pump.
 #[derive(Clone, Debug)]

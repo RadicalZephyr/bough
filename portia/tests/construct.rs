@@ -3,7 +3,7 @@
 //! a builder, so that logic is added after build.
 //!
 //! The expected values are GHC's. The program is
-//! `bough-oracle/haskell/probes/stage6/Stage6.hs`, which runs each test's program over an unchanged
+//! `portia-oracle/haskell/probes/stage6/Stage6.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patches F6 and F7
 //! and solves each loop by fixed-point iteration, a loop declared in a
 //! construct body inside the body. The text's `Execute` has no creation
@@ -31,8 +31,8 @@ use std::fmt::Debug;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{PoisonedError, SendError, TokenError, Transaction};
+use portia::prelude::*;
+use portia::{PoisonedError, SendError, TokenError, Transaction};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

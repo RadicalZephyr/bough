@@ -1,23 +1,23 @@
 //! The GHC programs behind the engine's fixed tests still give the output
 //! the tests quote.
 //!
-//! Several engine tests in `bough/tests` quote values GHC computed over the
+//! Several engine tests in `portia/tests` quote values GHC computed over the
 //! vendored semantics. The programs are in `haskell/probes`, each beside the
 //! output it gave when the tests were written. Each test here builds one
 //! program and compares what it prints with that output, so every quoted
 //! value can be derived again. Without GHC the tests follow the oracle's
-//! rule: they panic with the install hint unless `BOUGH_ORACLE=skip` is set.
+//! rule: they panic with the install hint unless `PORTIA_ORACLE=skip` is set.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use bough_oracle::{compile_haskell, for_tests, haskell_directory};
+use portia_oracle::{compile_haskell, for_tests, haskell_directory};
 
 /// The directory the oracle's own tests build into, so the oracle binary
 /// `for_tests` wants is usually built already.
 fn directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bough-oracle")
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("portia-oracle")
 }
 
 /// Builds `probes/<program>.hs` and checks it prints `probes/<program>.out`.

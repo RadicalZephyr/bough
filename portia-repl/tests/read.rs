@@ -1,7 +1,7 @@
 //! The reader: a line of text to one form, before any command is checked.
 
-use bough_repl::read::{Form, read};
-use bough_repl::ty::Literal;
+use portia_repl::read::{Form, read};
+use portia_repl::ty::Literal;
 
 fn symbol(s: &str) -> Form {
     Form::Symbol(s.to_string())

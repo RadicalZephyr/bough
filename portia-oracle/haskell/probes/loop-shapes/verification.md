@@ -14,11 +14,11 @@ Method:
 - I wrote `Verify.hs`, which has an imperative model of the slice that
   shares no code with the research. It also has a separate fixed-point
   solver and 41 new checks.
-- I type-checked and ran the Bough sketch.
+- I type-checked and ran the Portia sketch.
 - I ran the reproduction and the reconstructed reductions on the real
   `sodium-rust` 2.1.3 from crates.io.
 
-Nothing under `/home/user/bough`, `/home/user/rfd` or `/home/user/sodiumfrp`
+Nothing under `/home/user/portia`, `/home/user/rfd` or `/home/user/sodiumfrp`
 changed. All three `git status` checks are clean, and no `.o` or `.hi` files
 were written there.
 
@@ -30,7 +30,7 @@ Files in this directory:
 | `shapes.rerun.out` | my rerun of `Shapes.hs`, byte-identical to `shapes.out` |
 | `Verify.hs`, `verify.out` | the new checks: 38 pass, and 3 fail as expected because they document the `SwitchC` defect |
 | `sodium-rust-run/`, `sodium-rust.out` | the #52 program and its variants on `sodium-rust` 2.1.3 |
-| `bough-sketch/` | a copy of the sketch, with its own `target` |
+| `portia-sketch/` | a copy of the sketch, with its own `target` |
 
 ## 1. The semantics: the PDF against `Denotational.hs`
 
@@ -49,7 +49,7 @@ Files in this directory:
 
 | Claim | Verdict | Correction and evidence |
 |---|---|---|
-| "5.14" for Apply, "5.3" for Snapshot | **corrected** | The PDF has no numbered sections. Its headings are unnumbered and its figures are E.1–E.20. The numbers come from bevy-sodium's markdown rendering, `docs/reference/sodium/denotational-semantics.md`, where 5.3 is Snapshot and 5.14 is Apply; the research says so in its sources. Bough has not vendored a rendering yet: `bough-oracle/haskell` holds only the `.hs` files and the README, although RFD 1 promises one. Until it does, cite the PDF by heading and figure: Apply, p. 10–11, fig. E.15; Snapshot, p. 4, fig. E.3. |
+| "5.14" for Apply, "5.3" for Snapshot | **corrected** | The PDF has no numbered sections. Its headings are unnumbered and its figures are E.1–E.20. The numbers come from bevy-sodium's markdown rendering, `docs/reference/sodium/denotational-semantics.md`, where 5.3 is Snapshot and 5.14 is Apply; the research says so in its sources. Portia has not vendored a rendering yet: `portia-oracle/haskell` holds only the `.hs` files and the README, although RFD 1 promises one. Until it does, cite the PDF by heading and figure: Apply, p. 10–11, fig. E.15; Snapshot, p. 4, fig. E.3. |
 | "The clamp reads max_health from before the instant (5.3)" | corrected (precision) | The rule is `at` (PDF p. 3; §4 of the rendering). Snapshot (5.3) inherits it. Cite both. |
 
 ## 3. Sources
@@ -108,7 +108,7 @@ the maximum.
 | Capped counter: 12 evaluations, the 11th right and the 12th confirming. This matches fact 2's 11 iterations. | confirmed | B: the first right iterate is the 11th |
 | Evaluation counts: 2 for shape 1, 3 for 2b, 7 for NoMaxRead long, 3 for NoMerge long, 3 for 3c | confirmed | A |
 | The fixed-point iteration equals the lazy knot wherever the knot terminates | confirmed for every shape here | research checks |
-| "Every path around a loop passes through a hold, **so** a loop's step at t depends only on steps strictly before t" | **corrected** | A hold alone does not delay a dependency. The strictness comes from how the forward token is read: through `at` (`Snapshot`, `sample`), or at a child time (`split`, `defer`). A hold read back through `Updates` (Bough's `Cell::steps`) or `Value` (`steps_with_current`) satisfies the cycle rule as RFD 2 and the glossary state it, yet it depends on itself at the same instant. For `hold 0 (updates c)`, every step list is a fixed point; the iteration returns the least one, `(0,[])`. `hold 0 (map (+1) (value c))` has no fixed point: the iterates are `[0]1`, `[0]2`, `[0]3`, …, and the lazy knot runs out of memory. Uniqueness holds for every shape in this research, because each forward token is read only by `Snapshot`. The cycle rule itself may need tightening; that is a question for RFD 2. |
+| "Every path around a loop passes through a hold, **so** a loop's step at t depends only on steps strictly before t" | **corrected** | A hold alone does not delay a dependency. The strictness comes from how the forward token is read: through `at` (`Snapshot`, `sample`), or at a child time (`split`, `defer`). A hold read back through `Updates` (Portia's `Cell::steps`) or `Value` (`steps_with_current`) satisfies the cycle rule as RFD 2 and the glossary state it, yet it depends on itself at the same instant. For `hold 0 (updates c)`, every step list is a fixed point; the iteration returns the least one, `(0,[])`. `hold 0 (map (+1) (value c))` has no fixed point: the iterates are `[0]1`, `[0]2`, `[0]3`, …, and the lazy knot runs out of memory. Uniqueness holds for every shape in this research, because each forward token is read only by `Snapshot`. The cycle rule itself may need tightening; that is a question for RFD 2. |
 | "Reached within (number of step times + 1) evaluations" | **corrected** (wording) | This holds only if "step times" means the times at which the loop's feeding stream fires, the candidate times. It fails if it means the answer's steps. The parity loop `hold 0 (map fst (filter (even . snd) (snapshot ticks c (,))))` has 1 answer step and needs 4 evaluations: right at the 3rd, confirmed at the 4th. |
 | `fixLoops` solves loops of one type only, and cell loops only | missing | 1. The slice's loops are all `Int`, so this is fine here. A generator needs mixed-type loops as a tuple or an existential. 2. Stream loops, which RFD 2 allows through `split` and `defer`, are not covered. A terminating stream loop through `defer` always has a filter on values, so the lazy knot can never compute one. C's countdown `s = merge input (filter (>0) (map pred (defer s)))` runs out of memory by knot. By fixed point it gives `[1]3 [1,0]2 [1,0,0]1 [2]1` in 4 evaluations. `solveS` in `Verify.hs` is the stream version: replay the previous iterate's events with `MkStream`, starting from none. |
 
@@ -151,7 +151,7 @@ For the fixed tests: every shape here merges with `(+)`, which is
 commutative. The #52 fixed test cannot catch an engine that swaps merge's
 arguments. The generator should use a non-commutative combining function.
 
-## 7. The Bough sketch
+## 7. The Portia sketch
 
 | Claim | Verdict | Evidence |
 |---|---|---|
@@ -168,6 +168,6 @@ ghc -O0 -outputdir build -i/home/user/sodiumfrp/sodium/denotational Verify.hs -o
 ( ulimit -v 3000000; timeout 15 ./verify knot-defer )   # out of memory, 13 s
 ( ulimit -v 3000000; timeout 15 ./verify knot-value )   # out of memory, 9 s
 ( ulimit -v 3000000; timeout 15 ./shapes knot-3c )      # out of memory, 12 s
-cd bough-sketch && cargo check --offline --tests && cargo clippy --offline --tests && cargo test --offline   # 4 panics at graph.rs:44
+cd portia-sketch && cargo check --offline --tests && cargo clippy --offline --tests && cargo test --offline   # 4 panics at graph.rs:44
 cd sodium-rust-run && cargo run -q > ../sodium-rust.out   # sodium-rust =2.1.3 from crates.io
 ```

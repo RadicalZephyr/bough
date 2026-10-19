@@ -53,7 +53,7 @@ impl Variant {
 // ---------------------------------------------------------------------------
 // The emulated driver
 
-/// The emulated Bough driver: one `spawn_future_local` future (default
+/// The emulated Portia driver: one `spawn_future_local` future (default
 /// priority) holding a queue of closures. Each poll stores its waker, takes
 /// the closures queued at that moment and runs them, and returns pending. A
 /// closure queued while they run waits for the next poll, which its wake

@@ -15,14 +15,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
-name = "bough"
+name = "portia"
 version = "0.1.0"
 dependencies = [
- "bough-derive",
+ "portia-derive",
 ]
 
 [[package]]
-name = "bough-derive"
+name = "portia-derive"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -31,10 +31,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bough-gtk"
+name = "portia-gtk"
 version = "0.0.0"
 dependencies = [
- "bough",
+ "portia",
  "gtk4",
 ]
 

@@ -6,7 +6,7 @@
 //! Where a test quotes GHC, the value comes from GHC running the unchanged
 //! `Denotational.hs` with every loop solved by explicit fixed-point
 //! iteration, the research's method (`probes/loop-shapes/loop-shapes.md`);
-//! the programs are `bough-oracle/haskell/probes/stage3/Stage3.hs` and
+//! the programs are `portia-oracle/haskell/probes/stage3/Stage3.hs` and
 //! `Boundary.hs` beside it, and each test quotes their output. The other
 //! tests state the semantics they follow. Instant `[0]` is the build, and
 //! `[k]` is the k-th transaction after it.
@@ -15,7 +15,7 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
+use portia::prelude::*;
 
 /// A shared log and a closure that appends to it.
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
@@ -501,7 +501,7 @@ fn a_loop_left_open_panics_when_the_build_ends_and_poisons_its_runtime() {
     );
     assert_eq!(
         open.try_send(numbers_in, 1),
-        Err(bough::SendError::Poisoned)
+        Err(portia::SendError::Poisoned)
     );
     let mut graph = Runtime::local();
     let (numbers_in, latest) = graph.build(|b| {
@@ -726,7 +726,7 @@ fn a_state_loop_closes_with_a_cell_and_its_forward_only_reads() {
         let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
         count_loop.close(b, next);
         let (factor, _factor_in) = b.input_cell(3u32);
-        let scaled: bough::State<u32> = (count, factor).lift(b, |c, f| c * f);
+        let scaled: portia::State<u32> = (count, factor).lift(b, |c, f| c * f);
         (ticks_in, count, scaled)
     });
     for _ in 0..4 {

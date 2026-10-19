@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{IoError, PoisonedError, SendError, TokenError, Tracer, TransactionListenError};
+use portia::prelude::*;
+use portia::{IoError, PoisonedError, SendError, TokenError, Tracer, TransactionListenError};
 
 /// A shared log and a closure that appends to it.
 fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
@@ -292,7 +292,7 @@ fn a_tied_once_listener_reports_a_stale_or_foreign_token() {
 }
 
 /// A shared stream and its input, for the drop checks below.
-fn shared_numbers() -> (Runtime, bough::Input<u32>, bough::Shared<u32>) {
+fn shared_numbers() -> (Runtime, portia::Input<u32>, portia::Shared<u32>) {
     let mut graph = Runtime::local();
     let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
@@ -352,7 +352,7 @@ fn the_drop_check_skips_what_may_rightly_go_unheard() {
 /// runtime drops in a debug build, whichever handle asked, stream or cell.
 #[test]
 fn a_kept_once_listener_a_handle_asked_for_panics_as_its_runtime_drops_unpumped() {
-    type Ask = fn(&Runtime, bough::Shared<u32>, bough::Cell<u32>);
+    type Ask = fn(&Runtime, portia::Shared<u32>, portia::Cell<u32>);
     let ways: [(&str, Ask); 4] = [
         ("Io::listen_once", |graph, numbers, _| {
             graph.io().listen_once(numbers, |_| ()).unwrap().keep()
@@ -560,7 +560,7 @@ fn a_listener_may_drop_its_own_handle() {
 }
 
 /// Every later call on a poisoned graph fails.
-fn assert_poisoned(graph: &mut Runtime, numbers_in: bough::Input<u32>, level: bough::Cell<u32>) {
+fn assert_poisoned(graph: &mut Runtime, numbers_in: portia::Input<u32>, level: portia::Cell<u32>) {
     assert_eq!(graph.try_send(numbers_in, 9), Err(SendError::Poisoned));
     assert_eq!(graph.try_transaction(|_| ()), Err(PoisonedError));
     assert_eq!(graph.try_sample(level).err(), Some(TokenError::Poisoned));

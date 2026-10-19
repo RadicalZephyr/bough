@@ -1,4 +1,4 @@
-//! The Bough side: the one running graph, and the `construct` that every
+//! The Portia side: the one running graph, and the `construct` that every
 //! command which adds nodes goes through.
 //!
 //! Every command that adds nodes does so in a `construct` closure: the
@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bough::{Anchored, BuildContext, Builder, Cell, Input, Runtime, Source};
+use portia::{Anchored, BuildContext, Builder, Cell, Input, Runtime, Source};
 
 use crate::registry::Wire;
 use crate::ty::{InputToken, Literal, Node};
@@ -128,7 +128,7 @@ impl Graph {
         self.made
             .borrow_mut()
             .take()
-            .expect("bough-repl: the construct fires once per command")
+            .expect("portia-repl: the construct fires once per command")
     }
 
     /// Redefines a binding: one send, so one transaction.

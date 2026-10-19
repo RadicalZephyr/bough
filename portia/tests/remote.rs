@@ -14,8 +14,8 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
-use bough::prelude::*;
-use bough::{InputSlot, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
+use portia::prelude::*;
+use portia::{InputSlot, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
 
 fn panic_message<R>(f: impl FnOnce() -> R) -> String {
     let payload = match catch_unwind(AssertUnwindSafe(f)) {
@@ -904,7 +904,7 @@ type Row = (Input<u32>, Cell<u32>);
 /// collects after every unit, so a row nothing keeps is gone by then.
 fn open_a_row(
     mut on_row: impl FnMut(&RemoteIo, Row) + Send + 'static,
-) -> (Runtime<bough::Threaded>, Row) {
+) -> (Runtime<portia::Threaded>, Row) {
     let mut graph = Runtime::threaded();
     let (open_in, rows) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();

@@ -18,7 +18,7 @@ fn values(stdout: &str, name: &str) -> Vec<i64> {
 
 #[test]
 fn a_redefinition_under_a_real_timer_neither_restarts_nor_skips_it() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bough-repl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_portia-repl"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -58,7 +58,7 @@ fn a_redefinition_under_a_real_timer_neither_restarts_nor_skips_it() {
 
 #[test]
 fn piped_input_prints_only_what_the_commands_print() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bough-repl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_portia-repl"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -70,7 +70,7 @@ impl<M: Mode> BuildContext<M> {
     pub(crate) fn collect(&mut self) -> usize {
         assert!(
             !self.in_tx,
-            "bough: the graph is poisoned: a panic escaped an earlier transaction"
+            "portia: the graph is poisoned: a panic escaped an earlier transaction"
         );
         // The poison: set while user code can run in a `Drop`.
         self.in_tx = true;

@@ -13,7 +13,7 @@ use app::Row;
 
 fn main() -> ExitCode {
     let application = gtk::Application::builder()
-        .application_id("org.bough.GtkSpike")
+        .application_id("org.portia.GtkSpike")
         .build();
     application.connect_activate(activate);
     application.run()
@@ -23,19 +23,19 @@ fn activate(application: &gtk::Application) {
     let (graph, app) = app::build();
     let remote = graph.remote_io();
     let io = graph.io();
-    let driver = bough_gtk::spawn_driver(graph);
+    let driver = portia_gtk::spawn_driver(graph);
 
     // A counter: a label bound to a cell, and a button with a sender.
     let counter = gtk::Label::new(None);
     let click = gtk::Button::with_label("Click");
-    bough_gtk::bind_label(&io, app.counter_label, &counter).unwrap();
-    let clicked = bough_gtk::sender(&io, app.clicks_in);
+    portia_gtk::bind_label(&io, app.counter_label, &counter).unwrap();
+    let clicked = portia_gtk::sender(&io, app.clicks_in);
     click.connect_clicked(move |_| clicked(()));
 
     // Two-way text: what you type comes back shouted.
     let entry = gtk::Entry::new();
     entry.set_placeholder_text(Some("Type here"));
-    bough_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
+    portia_gtk::bind_entry(&io, app.shout, app.text_in, &entry).unwrap();
 
     // Two-way flag. The listener's first call, at the pump, writes the
     // check button, and its handler would send while the runtime pumps;
@@ -45,7 +45,7 @@ fn activate(application: &gtk::Application) {
     let toggled = flag.connect_toggled(clone!(
         #[strong]
         io,
-        move |check| bough_gtk::send(&io, app.flag_in, check.is_active())
+        move |check| portia_gtk::send(&io, app.flag_in, check.is_active())
     ));
     let shown = io
         .listen_cell(
@@ -61,7 +61,7 @@ fn activate(application: &gtk::Application) {
             ),
         )
         .unwrap();
-    bough_gtk::tie(&flag, shown);
+    portia_gtk::tie(&flag, shown);
 
     // Rows: each built by `construct`, each wired by the listener that
     // hears of it.
@@ -74,7 +74,7 @@ fn activate(application: &gtk::Application) {
         #[weak]
         name,
         move |_| {
-            bough_gtk::send(&io, app.add_in, name.text().to_string());
+            portia_gtk::send(&io, app.add_in, name.text().to_string());
             name.set_text("");
         }
     ));
@@ -84,7 +84,7 @@ fn activate(application: &gtk::Application) {
     // The same rows in a list view, whose rows GTK binds when it likes,
     // here inside the listener that updates the model.
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let factory = bough_gtk::list_factory(
+    let factory = portia_gtk::list_factory(
         &io,
         || gtk::Label::new(None),
         |io, row: &Row, label: &gtk::Label| {
@@ -104,7 +104,7 @@ fn activate(application: &gtk::Application) {
         clone!(
             #[weak]
             store,
-            move |rows: &Vec<Row>| bough_gtk::sync_store(&store, rows)
+            move |rows: &Vec<Row>| portia_gtk::sync_store(&store, rows)
         ),
     )
     .unwrap()
@@ -117,7 +117,7 @@ fn activate(application: &gtk::Application) {
     // A clock another thread ticks through a `RemoteIo`, which the driver
     // pumps.
     let clock = gtk::Label::new(None);
-    bough_gtk::bind_label(&io, app.clock, &clock).unwrap();
+    portia_gtk::bind_label(&io, app.clock, &clock).unwrap();
     std::thread::spawn(move || {
         for n in 1.. {
             std::thread::sleep(Duration::from_secs(1));
@@ -151,13 +151,13 @@ fn activate(application: &gtk::Application) {
 
     let window = gtk::ApplicationWindow::builder()
         .application(application)
-        .title("bough-gtk spike")
+        .title("portia-gtk spike")
         .default_width(420)
         .default_height(640)
         .child(&column)
         .build();
     // The window keeps the driver, which owns the runtime: both go when the
     // window does.
-    bough_gtk::tie(&window, driver);
+    portia_gtk::tie(&window, driver);
     window.present();
 }

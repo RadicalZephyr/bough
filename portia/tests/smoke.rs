@@ -61,5 +61,5 @@ fn the_smoke_graph_runs_in_every_mode() {
     //
     // Each mode gives 26 + 241 + 9 + 13 + 208 + 13 + 103, and the host has
     // both modes.
-    assert_eq!(bough::smoke(), 2 * (26 + 241 + 9 + 13 + 208 + 13 + 103));
+    assert_eq!(portia::smoke(), 2 * (26 + 241 + 9 + 13 + 208 + 13 + 103));
 }

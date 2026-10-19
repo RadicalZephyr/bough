@@ -5,7 +5,7 @@
 use std::thread;
 use std::time::Duration;
 
-use bough::{Input, RemoteIo};
+use portia::{Input, RemoteIo};
 
 /// Starts the timer each `tick` asks for.
 pub trait Clock {

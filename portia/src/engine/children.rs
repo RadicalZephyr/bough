@@ -88,7 +88,7 @@ impl<M: Mode> BuildContext<M> {
     pub(crate) fn fire_child<A: 'static>(&mut self, capture: u32, item: A) {
         let output = self.store.cold[capture as usize].partner;
         self.fire_start(output, item)
-            .expect("bough engine: a capture's output starts once per child instant");
+            .expect("portia engine: a capture's output starts once per child instant");
     }
 
     /// Runs the children of the instant that just ran, depth first, each a
@@ -110,7 +110,7 @@ impl<M: Mode> BuildContext<M> {
             }
             debug_assert!(
                 self.s.levels[depth].is_empty(),
-                "bough engine: a level starts empty"
+                "portia engine: a level starts empty"
             );
             let mut emitted = false;
             let mut k = 0;
@@ -143,7 +143,7 @@ impl<M: Mode> BuildContext<M> {
         let ops = self.store.ops[n];
         let mut parts = self.store.parts[n]
             .take()
-            .expect("bough engine: a node's program is in place");
+            .expect("portia engine: a node's program is in place");
         let emitted = (ops.emit_child)(&mut parts, self, capture);
         self.store.parts[n] = Some(parts);
         emitted
@@ -156,7 +156,7 @@ impl<M: Mode> BuildContext<M> {
             let n = capture as usize;
             let parts = store.parts[n]
                 .as_deref_mut()
-                .expect("bough engine: a node's program is in place");
+                .expect("portia engine: a node's program is in place");
             (store.ops[n].end_children)(parts);
         }
         s.levels[level].clear();

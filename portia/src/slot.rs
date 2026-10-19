@@ -35,8 +35,8 @@ use crate::engine::boundary::{Drain, Lock};
 /// [`connect`](crate::BuildContext::connect).
 ///
 /// ```
-/// use bough::prelude::*;
-/// use bough::InputSlot;
+/// use portia::prelude::*;
+/// use portia::InputSlot;
 ///
 /// static PRESSES: InputSlot<u32> = InputSlot::new(|a, b| a + b);
 ///

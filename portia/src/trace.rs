@@ -55,8 +55,8 @@ impl Tracer {
 /// implementation visits every token the value holds:
 ///
 /// ```
-/// use bough::prelude::*;
-/// use bough::Tracer;
+/// use portia::prelude::*;
+/// use portia::Tracer;
 ///
 /// struct Panel {
 ///     title: String,
@@ -90,7 +90,7 @@ With the `derive` feature, `#[derive(Trace)]` visits every field, and
 ```
 use std::sync::mpsc;
 
-use bough::prelude::*;
+use portia::prelude::*;
 
 #[derive(Trace)]
 struct Screen {
@@ -108,7 +108,7 @@ compile:
 ```compile_fail,E0277
 use std::sync::mpsc;
 
-use bough::prelude::*;
+use portia::prelude::*;
 
 #[derive(Trace)]
 struct Screen {
@@ -122,7 +122,7 @@ derive goes by name, since it can't see types, so a type alias or a type
 parameter gets past it:
 
 ```compile_fail
-use bough::prelude::*;
+use portia::prelude::*;
 
 #[derive(Trace)]
 struct Row {
@@ -134,7 +134,7 @@ struct Row {
 `skip` is the one attribute:
 
 ```compile_fail
-use bough::prelude::*;
+use portia::prelude::*;
 
 #[derive(Trace)]
 struct Screen {

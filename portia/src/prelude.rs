@@ -1,7 +1,7 @@
 //! The names a graph author uses, in one import:
 //!
 //! ```
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! let mut graph = Runtime::local();
 //! let (numbers_in, doubled) = graph.build(|b| {
@@ -24,7 +24,7 @@
 //! builder's methods stay in scope:
 //!
 //! ```
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! struct Builder; // the app's own, as `gtk::Builder` would be
 //!

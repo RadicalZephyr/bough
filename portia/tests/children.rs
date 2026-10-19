@@ -3,7 +3,7 @@
 //! whole transaction, and poison across them.
 //!
 //! The expected values are GHC's. The program is
-//! `bough-oracle/haskell/probes/stage4/Stage4.hs`, which runs each test's program over an unchanged
+//! `portia-oracle/haskell/probes/stage4/Stage4.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patch F7, Split's
 //! output sorted stably by time, and solves each loop by fixed-point
 //! iteration; `Stage4.out` beside it is its output, and each test quotes the
@@ -21,8 +21,8 @@ use std::fmt::Debug;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{SendError, TokenError};
+use portia::prelude::*;
+use portia::{SendError, TokenError};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

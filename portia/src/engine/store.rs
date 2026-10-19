@@ -113,7 +113,7 @@ impl<M: Mode> Store<M> {
         let index = u32::try_from(self.hot.len())
             .ok()
             .filter(|&i| i != u32::MAX)
-            .expect("bough: more than u32::MAX - 1 nodes in one graph");
+            .expect("portia: more than u32::MAX - 1 nodes in one graph");
         self.hot.push(hot);
         self.relations.push(Relations::default());
         self.cold.push(Cold::new(at));
@@ -184,9 +184,9 @@ impl<M: Mode> BuildContext<M> {
     pub(crate) fn check(&self, t: Token) -> u32 {
         match self.lookup(t) {
             Ok(i) => i,
-            Err(TokenFault::Foreign) => panic!("bough: a token from another graph"),
+            Err(TokenFault::Foreign) => panic!("portia: a token from another graph"),
             Err(TokenFault::Stale) => panic!(
-                "bough: a stale token: its node, created at {}, was collected",
+                "portia: a stale token: its node, created at {}, was collected",
                 t.created
             ),
         }

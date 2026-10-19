@@ -6,8 +6,8 @@ mod common;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bough_repl::graph::{Def, Graph};
-use bough_repl::ty::{Literal, Node};
+use portia_repl::graph::{Def, Graph};
+use portia_repl::ty::{Literal, Node};
 use common::{apply, define, int_input};
 
 fn int(n: i64) -> Def {

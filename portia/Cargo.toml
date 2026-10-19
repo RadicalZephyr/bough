@@ -1,5 +1,5 @@
 [package]
-name = "bough"
+name = "portia"
 description = "Lightweight FRP rooted in Rust: a Sodium-semantics engine with a build-time and I/O-time separation."
 readme = "../README.md"
 version.workspace = true
@@ -18,17 +18,17 @@ std = []
 # Guards input slots on bare metal with the critical section every HAL
 # implements. The default feature set has no runtime dependency.
 critical-section = ["dep:critical-section"]
-# Re-exports `#[derive(Trace)]` from `bough-derive`.
-derive = ["dep:bough-derive"]
+# Re-exports `#[derive(Trace)]` from `portia-derive`.
+derive = ["dep:portia-derive"]
 # Per-transaction phase counters for attributing a regression to a phase.
 statistics = []
-# Spike scaffolding, not API: `bough::smoke` builds and drives a graph with
+# Spike scaffolding, not API: `portia::smoke` builds and drives a graph with
 # every node kind the engine has so far, so that a library build for a
 # bare-metal target pushes the generic engine through code generation.
 smoke = []
 
 [dependencies]
-bough-derive = { workspace = true, optional = true }
+portia-derive = { workspace = true, optional = true }
 critical-section = { workspace = true, optional = true }
 
 [dev-dependencies]

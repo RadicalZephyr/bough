@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["bough", "bough-derive", "bough-oracle", "bough-bench", "bough-repl"]
+members = ["portia", "portia-derive", "portia-oracle", "portia-bench", "portia-repl"]
 # The GTK spike needs GTK's system libraries, so it is a workspace of its own.
-exclude = ["bough-gtk"]
+exclude = ["portia-gtk"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,12 +10,12 @@ authors = ["Zefira Shannon"]
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/bough-frp/bough"
+repository = "https://github.com/portia-rs/portia"
 
 [workspace.dependencies]
-bough = { path = "bough", version = "0.1.0" }
-bough-derive = { path = "bough-derive", version = "0.1.0" }
-bough-oracle = { path = "bough-oracle", version = "0.1.0" }
+portia = { path = "portia", version = "0.1.0" }
+portia-derive = { path = "portia-derive", version = "0.1.0" }
+portia-oracle = { path = "portia-oracle", version = "0.1.0" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

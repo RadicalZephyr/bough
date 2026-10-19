@@ -239,7 +239,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (open_in, opened) = graph.build(|b| {
@@ -356,7 +356,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// when the definition steps.
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (ticks_in, count) = graph.build(|b| {
@@ -408,7 +408,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// may also close with a [`Cell`], giving a forward that only reads.
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (names_in, members) = graph.build(|b| {
@@ -442,7 +442,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// forward's own node, so a stream loop adds no node to its definition.
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
     /// let mut graph = Runtime::local();
@@ -491,7 +491,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// stale-token error. Here the map emits a cell nothing else names:
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (pick_in, shown) = graph.build(|b| {
@@ -541,7 +541,7 @@ pub trait Builder: sealed::Sealed + Sized {
             let younger = self.created(r);
             assert!(
                 younger <= made,
-                "bough: `depends` was given a token from transaction {younger}, younger than \
+                "portia: `depends` was given a token from transaction {younger}, younger than \
                  the node it was declared on, from transaction {made}. A node keeps only \
                  tokens from its own transaction or earlier ones; a token younger than what \
                  keeps it belongs in a cell's value, where `Trace` reaches it"
@@ -747,7 +747,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 /// `Send` at each materializer, against the closure's real type.
 ///
 /// ```
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 ///     numbers.map(|n| n + 1).hold(b, 0)
@@ -776,7 +776,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// fn offset(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 ///     let by = Rc::new(5u32);
@@ -795,7 +795,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// fn spawner(b: &mut Portable<'_>, numbers: Stream<u32>) -> Stream<Cell<u32>> {
 ///     let by = Rc::new(5u32);

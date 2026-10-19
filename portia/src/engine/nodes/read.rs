@@ -75,17 +75,17 @@ where
     F: ReadFn<V, R>,
 {
     let Data::ReadThrough { f, memo } = &b.store.data[me as usize] else {
-        unreachable!("bough engine: node {me} is not a read-through cell")
+        unreachable!("portia engine: node {me} is not a read-through cell")
     };
     let memo = memo
         .get()
         .downcast_ref::<Memo<R>>()
-        .expect("bough engine: memo type");
+        .expect("portia engine: memo type");
     memo.value.get_or_init(|| {
         let f = f
             .get()
             .downcast_ref::<F>()
-            .expect("bough engine: function type");
+            .expect("portia engine: function type");
         f.values(b, &b.store.relations[me as usize].deps, passed)
     })
 }
@@ -104,12 +104,12 @@ where
     let v = {
         let b: &BuildContext<M> = b;
         let Data::ReadThrough { f, .. } = &b.store.data[me as usize] else {
-            unreachable!("bough engine: node {me} is not a read-through cell")
+            unreachable!("portia engine: node {me} is not a read-through cell")
         };
         let f = f
             .get()
             .downcast_ref::<F>()
-            .expect("bough engine: function type");
+            .expect("portia engine: function type");
         f.posts(b, &b.store.relations[me as usize].deps)
     };
     memo_mut::<M, R>(&mut b.store.data[me as usize]).post_value = Some(v);

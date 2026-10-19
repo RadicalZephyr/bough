@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, Sender};
 use std::task::{Wake, Waker};
 use std::thread;
 
-use bough_repl::Repl;
+use portia_repl::Repl;
 
 enum Event {
     Line(String),

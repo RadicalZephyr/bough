@@ -5,7 +5,7 @@ The exact programs behind two promises. RFD 1: the `lift2` shape filed as
 the health-and-shield slice is tested in the oracle long before the Bevy
 adapter exists. Each shape below has the program in Sodium terms, the
 program over the constructors of `Denotational.hs`, an input schedule, the
-expected outputs from GHC, and a sketch in Bough's API.
+expected outputs from GHC, and a sketch in Portia's API.
 
 Every expected value here came out of GHC 9.4.7 running `Shapes.hs`. That
 file imports `Reactive.Sodium.Denotational` unchanged. It computes every
@@ -151,7 +151,7 @@ are separate definitions. The fixed test's value is against the engine,
 and each row is its own graph. Two evaluations reach the fixed point. The
 lazy knot terminates and agrees.
 
-### In Bough (excerpt, the `Drive::Full` arm; the whole file `bough-sketch/src/lib.rs` type-checks against the skeleton)
+### In Portia (excerpt, the `Drive::Full` arm; the whole file `portia-sketch/src/lib.rs` type-checks against the skeleton)
 
 ```rust
 pub fn slice(b: &mut Build, drive: Drive, lifts: Lifts) -> Slice {
@@ -263,7 +263,7 @@ For the adapter: in arm A the three inputs arrive as one host message,
 unit, so its three sends are one transaction, as in `run`, or one tuple
 input. It is never a frame batched into one transaction.
 
-The Bough test is `health_and_shield_long_run` in the sketch. It uses
+The Portia test is `health_and_shield_long_run` in the sketch. It uses
 `LONG_RUN` and the vectors above, with fraction compared as `f32`: each
 expected value is the correctly rounded quotient, so equality is exact.
 
@@ -454,24 +454,24 @@ shape 3c by lazy knot, health steps:
 exit 124 after 21s
 # (a second run under ps: RSS 715 MB at 4 s, 1.2 GB at 8 s)
 
-$ cd bough-sketch && cargo check --offline --tests
-    Checking bough v0.1.0 (/home/user/bough/bough)
-    Checking loop-shapes-sketch v0.0.0 (.../research-loop-shapes/bough-sketch)
+$ cd portia-sketch && cargo check --offline --tests
+    Checking portia v0.1.0 (/home/user/portia/portia)
+    Checking loop-shapes-sketch v0.0.0 (.../research-loop-shapes/portia-sketch)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.50s
 $ cargo clippy --offline --tests      # no warnings
 $ cargo test --offline                # all four reach the skeleton's todo!()
-thread 'tests::sodium_rust_52_lift_does_not_change_its_inputs' panicked at /home/user/bough/bough/src/graph.rs:44:9:
+thread 'tests::sodium_rust_52_lift_does_not_change_its_inputs' panicked at /home/user/portia/portia/src/graph.rs:44:9:
 not yet implemented
 (and the same for the other three tests)
 ```
 
-The sketch crate depends on `/home/user/bough/bough` by path, with its own
-target directory. `git -C /home/user/bough status` is clean afterwards.
+The sketch crate depends on `/home/user/portia/portia` by path, with its own
+target directory. `git -C /home/user/portia status` is clean afterwards.
 
 ## Files
 
 - `Shapes.hs`: the programs, the fixed-point solver, the knot, and the checks.
 - `shapes.out`: the output above.
-- `bough-sketch/src/lib.rs`: the Bough graph code and the four fixed tests,
+- `portia-sketch/src/lib.rs`: the Portia graph code and the four fixed tests,
   which type-check against the skeleton.
 - `build/`, `shapes`: GHC build products.

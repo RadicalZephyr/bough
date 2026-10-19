@@ -14,7 +14,7 @@ them, so a test that cites the semantics cites this text.
 | File | What it is |
 |---|---|
 | `Oracle/Program.hs` | The program description: inputs, one `Def` per node, the nodes to observe, and the sends of each transaction. Its derived `Read` syntax is the protocol, and `../src/program.rs` prints the same types. |
-| `Oracle/Derived.hs` | Every Bough operation over the constructors of `Denotational.hs`, from the spike's research (research-derived-ops, with its verification's corrections), and the two patches below. |
+| `Oracle/Derived.hs` | Every Portia operation over the constructors of `Denotational.hs`, from the spike's research (research-derived-ops, with its verification's corrections), and the two patches below. |
 | `Oracle/Interpret.hs` | Checks a program, interprets it into terms of the semantics, computes loops by fixed-point iteration, and renders the answer. |
 | `Oracle.hs` | The process: one program per line on standard input, one answer per line on standard output. |
 | `OracleTests.hs` | The HUnit tests of all of the above. |
@@ -79,7 +79,7 @@ as a cell loop, which denotes the same cell.
 
 ## Two patches to the text
 
-The text departs from the two principles Bough holds over it (RFD 1), time
+The text departs from the two principles Portia holds over it (RFD 1), time
 order and existence from creation, and the oracle follows the principles
 there: F6 departs from both, F7 from time order. Both patches live in
 `Oracle/Derived.hs`, in the derived layer, and leave `Denotational.hs`
@@ -119,21 +119,21 @@ every vector.
 
 ## Running it
 
-`cargo test -p bough-oracle` builds `Oracle.hs` with GHC into
-`target/tmp/bough-oracle` and runs every test that needs it, including one
+`cargo test -p portia-oracle` builds `Oracle.hs` with GHC into
+`target/tmp/portia-oracle` and runs every test that needs it, including one
 that builds and runs `OracleTests.hs` and `sodium.hs`. It needs GHC with the
 HUnit package: `apt-get install ghc libghc-hunit-dev`, or GHC through ghcup
-and then `cabal install --lib HUnit`. `BOUGH_GHC` names a GHC other than the
+and then `cabal install --lib HUnit`. `PORTIA_GHC` names a GHC other than the
 `ghc` on the `PATH`. Without GHC those tests panic with that hint;
-`BOUGH_ORACLE=skip` makes each say that it skipped and return instead, as
+`PORTIA_ORACLE=skip` makes each say that it skipped and return instead, as
 continuous integration does.
 
 By hand, from this directory, with the build products kept out of it:
 
 ```sh
 mkdir -p /tmp/oracle /tmp/oracle-tests /tmp/sodium-vectors
-ghc -O1 -threaded -rtsopts -with-rtsopts=-M1g -outputdir /tmp/oracle -o /tmp/oracle/bough-oracle Oracle.hs
-echo 'Program Everything [] [SLit TInt [([0],I 5)],SMap (Add Arg (Lit 1)) (N 0)] [1] []' | /tmp/oracle/bough-oracle
+ghc -O1 -threaded -rtsopts -with-rtsopts=-M1g -outputdir /tmp/oracle -o /tmp/oracle/portia-oracle Oracle.hs
+echo 'Program Everything [] [SLit TInt [([0],I 5)],SMap (Add Arg (Lit 1)) (N 0)] [1] []' | /tmp/oracle/portia-oracle
 
 ghc -outputdir /tmp/oracle-tests -o /tmp/oracle-tests/run OracleTests.hs
 /tmp/oracle-tests/run

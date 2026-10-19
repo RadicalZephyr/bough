@@ -1,9 +1,9 @@
 {-# LANGUAGE GADTs #-}
--- Expected values for bough's stage 4 child-transaction tests, computed over
+-- Expected values for portia's stage 4 child-transaction tests, computed over
 -- an unchanged copy of Reactive.Sodium.Denotational (Sodium 1.1; SHA-256
--- d6772fb8...c822b, the file vendored in bough-oracle/haskell) with the
+-- d6772fb8...c822b, the file vendored in portia-oracle/haskell) with the
 -- oracle's patch F7: Split's output sorted stably by time, exactly
--- bough-oracle's Oracle/Derived.hs `split`. `defer` is Split of a singleton
+-- portia-oracle's Oracle/Derived.hs `split`. `defer` is Split of a singleton
 -- (Operational.java:46), as there.
 --
 -- Loops are solved by explicit fixed-point iteration (fact 2), the method of

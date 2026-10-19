@@ -1,5 +1,5 @@
 [package]
-name = "bough-bench"
+name = "portia-bench"
 description = "The three benchmark shapes, their imperative baselines, and the CI regression gate."
 version.workspace = true
 authors.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-bough.workspace = true
+portia.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

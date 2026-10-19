@@ -17,7 +17,7 @@ mod sealed {
 /// `(cf, ca).lift(b, |f, a| f(a))` with the cell holding `Fn(&A) -> B`.
 ///
 /// ```
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let (price_in, quantity_in, total) = graph.build(|b| {
@@ -40,7 +40,7 @@ mod sealed {
 /// stepped does not exist until commit, so it has no stream view.
 ///
 /// ```compile_fail,E0599
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (names, _names_in) = b.input::<String>();

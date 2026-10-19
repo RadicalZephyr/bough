@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bough::prelude::*;
+use portia::prelude::*;
 
 #[test]
 fn a_threaded_graph_is_send_and_runs_on_another_thread() {

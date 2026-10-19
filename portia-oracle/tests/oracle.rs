@@ -3,7 +3,7 @@
 //! interpreter, loops, the protocol and the pool, and the Haskell tests.
 //!
 //! Every test starts with `let Some(oracle) = oracle() else { return };`.
-//! Without GHC that panics with the install hint; with `BOUGH_ORACLE=skip` it
+//! Without GHC that panics with the install hint; with `PORTIA_ORACLE=skip` it
 //! says the test skipped, and the test returns.
 
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ use Definition::{
 };
 use Expression::{Argument, ArgumentAt, ConstructEvent, Literal, SecondArgument};
 use Reference::{Local, TopLevel};
-use bough_oracle::{
+use portia_oracle::{
     Answer, Body, BodyResult, Definition, Error, Expression, Input, Observation, Oracle, Program,
     Reference, Type, Value, Window,
 };
@@ -29,12 +29,12 @@ use bough_oracle::{
 
 /// The oracle every test shares, or `None` when the tests skip.
 fn oracle() -> Option<&'static Oracle> {
-    bough_oracle::for_tests(directory())
+    portia_oracle::for_tests(directory())
 }
 
 /// Where the oracle and the Haskell tests are built.
 fn directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bough-oracle")
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("portia-oracle")
 }
 
 /// A pool of its own, for the tests that count or kill processes.
@@ -1732,7 +1732,7 @@ fn final_value(observation: &Observation) -> i64 {
         panic!("not a cell: {observation:?}");
     };
     match steps.last().map_or(initial, |(_, value)| value) {
-        bough_oracle::Datum::Integer(value) => *value,
+        portia_oracle::Datum::Integer(value) => *value,
         other => panic!("not an integer: {other:?}"),
     }
 }
@@ -1779,7 +1779,7 @@ fn the_reductions_of_sodium_rust_52() {
         let values: Vec<_> = steps
             .iter()
             .map(|(_, value)| match value {
-                bough_oracle::Datum::Integer(value) => *value,
+                portia_oracle::Datum::Integer(value) => *value,
                 other => panic!("{other:?}"),
             })
             .collect();
@@ -1841,8 +1841,8 @@ fn the_health_and_shield_slice_on_the_long_schedule() {
     let Observation::Cell { initial, steps } = &answer[5] else {
         panic!("{answer:?}");
     };
-    let fraction = |value: &bough_oracle::Datum| match value {
-        bough_oracle::Datum::Integer(value) => (value / 1000) as f64 / (value % 1000) as f64,
+    let fraction = |value: &portia_oracle::Datum| match value {
+        portia_oracle::Datum::Integer(value) => (value / 1000) as f64 / (value % 1000) as f64,
         other => panic!("{other:?}"),
     };
     assert_eq!(fraction(initial), 0.6);
@@ -2146,10 +2146,10 @@ fn without_ghc_a_test_panics_with_the_install_hint_unless_told_to_skip() {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["a_test_that_needs_ghc", "--exact"])
-            .env("BOUGH_GHC", "/nonexistent/bough-oracle-test/ghc")
-            .env_remove("BOUGH_ORACLE");
+            .env("PORTIA_GHC", "/nonexistent/portia-oracle-test/ghc")
+            .env_remove("PORTIA_ORACLE");
         if let Some(setting) = setting {
-            command.env("BOUGH_ORACLE", setting);
+            command.env("PORTIA_ORACLE", setting);
         }
         let output = command.output().unwrap();
         let text = format!(
@@ -2166,16 +2166,16 @@ fn without_ghc_a_test_panics_with_the_install_hint_unless_told_to_skip() {
         text.contains("apt-get install ghc libghc-hunit-dev"),
         "{text}"
     );
-    assert!(text.contains("BOUGH_ORACLE=skip"), "{text}");
+    assert!(text.contains("PORTIA_ORACLE=skip"), "{text}");
     assert!(
-        text.contains("/nonexistent/bough-oracle-test/ghc"),
+        text.contains("/nonexistent/portia-oracle-test/ghc"),
         "{text}"
     );
 
     let (passed, text) = run(Some("skip"));
     assert!(passed, "{text}");
     assert!(
-        text.contains("skipped a_test_that_needs_ghc: BOUGH_ORACLE=skip"),
+        text.contains("skipped a_test_that_needs_ghc: PORTIA_ORACLE=skip"),
         "{text}"
     );
     assert!(text.contains("1 passed"), "{text}");
@@ -2204,7 +2204,7 @@ fn counts(text: &str, from: &str) -> Vec<u64> {
 const HASKELL_GROUPS: &[(&str, usize)] = &[
     ("sodium.hs vectors through Derived", 20),
     ("common-tests SemanticTests.hs, Denotational.hs times", 10),
-    ("Bough operations", 28),
+    ("Portia operations", 28),
     ("loops", 6),
     ("text versus Derived", 5),
     ("verification: creation time", 11),
@@ -2241,7 +2241,7 @@ fn the_haskell_tests_and_the_vendored_vectors_pass() {
     let Some(_) = oracle() else { return };
     let directory = directory();
 
-    let tests = bough_oracle::compile_haskell(&directory, "OracleTests.hs", "oracle-tests", &[])
+    let tests = portia_oracle::compile_haskell(&directory, "OracleTests.hs", "oracle-tests", &[])
         .unwrap_or_else(|error| panic!("{error}"));
     let output = Command::new(&tests).output().unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
@@ -2268,7 +2268,7 @@ fn the_haskell_tests_and_the_vendored_vectors_pass() {
     );
 
     // sodium.hs prints its counts on standard error and exits 0 either way.
-    let vectors = bough_oracle::compile_haskell(&directory, "sodium.hs", "sodium-vectors", &[])
+    let vectors = portia_oracle::compile_haskell(&directory, "sodium.hs", "sodium-vectors", &[])
         .unwrap_or_else(|error| panic!("{error}"));
     let output = Command::new(&vectors).output().unwrap();
     let text = String::from_utf8_lossy(&output.stderr);

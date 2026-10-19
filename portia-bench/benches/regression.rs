@@ -9,7 +9,7 @@ use gungraun::{
 };
 use std::hint::black_box;
 
-use bough_bench::{FanOut, Frame, Shallow};
+use portia_bench::{FanOut, Frame, Shallow};
 
 // A thousand transactions of the shallow shape, build included.
 #[library_benchmark]

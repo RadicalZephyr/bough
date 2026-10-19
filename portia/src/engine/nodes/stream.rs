@@ -35,15 +35,15 @@ where
 {
     let new = new
         .downcast_mut::<Option<A>>()
-        .expect("bough engine: send type")
+        .expect("portia engine: send type")
         .take()
-        .expect("bough engine: a send carries a value");
+        .expect("portia engine: a send carries a value");
     let slot = slot_mut::<M, A>(data);
     // Nothing reads an input's slot before the sends are over, so the first
     // send's event is still there.
     let old = slot
         .take()
-        .expect("bough engine: a fired input holds its event during the sends");
+        .expect("portia engine: a fired input holds its event during the sends");
     *slot = Some(part::<M, F>(&mut parts[0])(old, new));
 }
 
@@ -69,7 +69,7 @@ where
 pub(crate) struct OpenLoopNode;
 
 fn eval_open_loop<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, me: u32) {
-    panic!("bough engine: stream loop {me} ran before it was closed")
+    panic!("portia engine: stream loop {me} ran before it was closed")
 }
 
 impl<M: Mode> NodeOps<M> for OpenLoopNode {
@@ -193,7 +193,7 @@ where
     S::Event: 'static,
 {
     let [left, right, f] = parts else {
-        unreachable!("bough engine: a merge has three parts")
+        unreachable!("portia engine: a merge has three parts")
     };
     let l = part::<M, S>(left).pull(&mut Cx { b: &mut *b });
     let r = part::<M, T>(right).pull(&mut Cx { b: &mut *b });

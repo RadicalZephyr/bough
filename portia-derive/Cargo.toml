@@ -1,6 +1,6 @@
 [package]
-name = "bough-derive"
-description = "Derive macros for bough."
+name = "portia-derive"
+description = "Derive macros for portia."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

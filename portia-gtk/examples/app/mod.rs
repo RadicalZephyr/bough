@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use bough::{Builder, Cell, Input, Io, IoError, Runtime, Shared, Source, Trace};
+use portia::{Builder, Cell, Input, Io, IoError, Runtime, Shared, Source, Trace};
 use gtk::glib::{self, clone};
 use gtk::prelude::*;
 
@@ -120,10 +120,10 @@ impl RowView {
         line.append(&label);
         line.append(&bump);
         line.append(&remove);
-        bough_gtk::bind_label(io, row.label, &label)?;
-        let click = bough_gtk::sender(io, row.clicks_in);
+        portia_gtk::bind_label(io, row.label, &label)?;
+        let click = portia_gtk::sender(io, row.clicks_in);
         bump.connect_clicked(move |_| click(()));
-        let removal = bough_gtk::sender(io, app.remove_in);
+        let removal = portia_gtk::sender(io, app.remove_in);
         remove.connect_clicked(move |_| removal(row));
         Ok(RowView {
             line,

@@ -3,7 +3,7 @@
 
 mod common;
 
-use bough_repl::Repl;
+use portia_repl::Repl;
 use common::{listing, transcript, with_manual_clock};
 
 /// A ticking REPL whose `splash` is defined by `lines`, and what it prints

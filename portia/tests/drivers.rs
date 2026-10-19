@@ -25,8 +25,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use bough::prelude::*;
-use bough::{InputSlot, IoError, RemoteIo};
+use portia::prelude::*;
+use portia::{InputSlot, IoError, RemoteIo};
 
 // ---- begin thread driver
 

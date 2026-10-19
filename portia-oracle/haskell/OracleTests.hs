@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- | The oracle's own tests, run by GHC.
 --
--- * The research's tests of every Bough operation (research-derived-ops,
+-- * The research's tests of every Portia operation (research-derived-ops,
 --   DerivedTests.hs) and of its verification (research-derived-ops-verify,
 --   VerifyTests.hs), unchanged but for their imports, now over
 --   Oracle.Derived.
@@ -47,7 +47,7 @@ tests :: Test
 tests = TestList
     [ TestLabel "sodium.hs vectors through Derived" sodiumVectors
     , TestLabel "common-tests SemanticTests.hs, Denotational.hs times" commonVectors
-    , TestLabel "Bough operations" boughTests
+    , TestLabel "Portia operations" portiaTests
     , TestLabel "loops" loopTests
     , TestLabel "text versus Derived" textTests
     , TestLabel "verification: creation time" creationTests
@@ -65,7 +65,7 @@ tests = TestList
     ]
 
 ------------------------------------------------------------------------------
--- The 20 vectors of denotational/sodium.hs, each through its Bough name.
+-- The 20 vectors of denotational/sodium.hs, each through its Portia name.
 
 sodiumVectors :: Test
 sodiumVectors = test [
@@ -152,7 +152,7 @@ sodiumVectors = test [
 -- The five vectors of common-tests/SemanticTests.hs. Times are the ones
 -- Denotational.hs gives. Each runs verbatim (shift 0) and moved one
 -- transaction later (shift 1), where no input fires in transaction zero, as
--- in Bough.
+-- in Portia.
 
 shiftT :: Int -> T -> T
 shiftT k (h : rest) = (h + k) : rest
@@ -194,17 +194,17 @@ commonAt k = test [
   ]
 
 ------------------------------------------------------------------------------
--- The Bough operations the sodium.hs vectors do not reach.
+-- The Portia operations the sodium.hs vectors do not reach.
 
 ints :: S Int
 ints = [([1], 1), ([2], 2), ([3], 3)]
 
-boughTests :: Test
-boughTests = test [
-    "input: Bough inputs fire at external times only" ~: do
-        assertBool "ints" (B.boughInput ints)
-        assertBool "transaction zero" (not (B.boughInput [([0], 'a')]))
-        assertBool "child time" (not (B.boughInput [([1,0], 'a')])),
+portiaTests :: Test
+portiaTests = test [
+    "input: Portia inputs fire at external times only" ~: do
+        assertBool "ints" (B.portiaInput ints)
+        assertBool "transaction zero" (not (B.portiaInput [([0], 'a')]))
+        assertBool "child time" (not (B.portiaInput [([1,0], 'a')])),
     "input_coalescing: left fold, first send on the left" ~: do
         let sends = [([1],1),([1],2),([1],3),([2],10),([4],7),([4],1)] :: [(T, Int)]
         let expected = [([1],(1-2)-3),([2],10),([4],6)]
@@ -496,7 +496,7 @@ creationTests = test [
         let out = at [2] (B.scan s (0 :: Int) (\a n -> (n, n + 1)))
         assertEqual "o" [([1],0),([2],0)] (D.occs out),
     "input_cell created in a construct at [2] never sees a send before [2]" ~: do
-        -- Bough sends only to existing inputs; the Hold's t0 is then vacuous.
+        -- Portia sends only to existing inputs; the Hold's t0 is then vacuous.
         let c = at [2] (B.inputCell 'a' [([3],'b')])
         assertEqual "c" ('a',[([3],'b')]) (D.steps c)
   ]

@@ -8,7 +8,7 @@
 //! cell's function poisons the runtime: arithmetic wraps, and `div 0` and
 //! `mod 0` are 0.
 
-use bough::{BuildContext, Lift};
+use portia::{BuildContext, Lift};
 
 use crate::ty::{Node, Type};
 

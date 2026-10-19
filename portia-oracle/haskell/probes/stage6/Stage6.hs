@@ -1,10 +1,10 @@
 {-# LANGUAGE GADTs #-}
--- Expected values for bough's stage 6 construct tests, computed over an
+-- Expected values for portia's stage 6 construct tests, computed over an
 -- unchanged copy of Reactive.Sodium.Denotational (Sodium 1.1; SHA-256
--- d6772fb8...c822b, the file vendored in bough-oracle/haskell) with the
+-- d6772fb8...c822b, the file vendored in portia-oracle/haskell) with the
 -- oracle's patches F6 (a switch cell created at t0 switches over its outer
 -- chopped at t0) and F7 (Split's output sorted stably by time), exactly
--- bough-oracle's Oracle/Derived.hs `switchCell` and `split`.
+-- portia-oracle's Oracle/Derived.hs `switchCell` and `split`.
 --
 -- `construct` is Execute over MapS, as Derived.hs `construct`, with a
 -- creation time: the text's Execute has none (F44), so a construct created
@@ -150,7 +150,7 @@ r1 = do
 
 -- 3. R2 and R2b: a stream loop in the body, a hold over the forward built
 --    before the definition, which fires at the body's instant. The two
---    differ only in the order Bough builds them; they denote one program.
+--    differ only in the order Portia builds them; they denote one program.
 r2 :: IO ()
 r2 = do
   let s = ev [(1, 5), (2, 7)]

@@ -295,7 +295,7 @@ impl IoQueue<Threaded> for NoIo {
 /// registration.
 ///
 /// ```
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let (clicks_in, count) = graph.build(|b| {

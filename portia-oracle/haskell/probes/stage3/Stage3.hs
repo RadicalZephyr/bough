@@ -1,5 +1,5 @@
 {-# LANGUAGE GADTs #-}
--- Expected values for bough's stage 3 loop tests, computed over the
+-- Expected values for portia's stage 3 loop tests, computed over the
 -- unchanged Reactive.Sodium.Denotational (Sodium 1.1) by explicit
 -- fixed-point iteration (fact 2; the same method as
 -- research-loop-shapes/Shapes.hs): each forward token is a concrete cell

@@ -1,10 +1,10 @@
 /target
-/bough-gtk/target
-# GHC's build products, should anyone build in bough-oracle/haskell without
+/portia-gtk/target
+# GHC's build products, should anyone build in portia-oracle/haskell without
 # -outputdir. The tests build under target/tmp.
-/bough-oracle/haskell/**/*.o
-/bough-oracle/haskell/**/*.hi
-/bough-oracle/haskell/**/*.dyn_o
-/bough-oracle/haskell/**/*.dyn_hi
-/bough-oracle/haskell/OracleTests
-/bough-oracle/haskell/sodium
+/portia-oracle/haskell/**/*.o
+/portia-oracle/haskell/**/*.hi
+/portia-oracle/haskell/**/*.dyn_o
+/portia-oracle/haskell/**/*.dyn_hi
+/portia-oracle/haskell/OracleTests
+/portia-oracle/haskell/sodium

@@ -37,7 +37,7 @@ where
     Iter<S>: 'static,
 {
     let [chain, stack] = parts else {
-        unreachable!("bough engine: a split capture has two parts")
+        unreachable!("portia engine: a split capture has two parts")
     };
     if let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) {
         part::<M, Vec<Option<Iter<S>>>>(stack).push(Some(event.into_iter()));
@@ -57,7 +57,7 @@ where
 {
     let top = part::<M, Vec<Option<Iter<S>>>>(&mut parts[1])
         .last_mut()
-        .expect("bough engine: a capture in a level has an entry for that level");
+        .expect("portia engine: a capture in a level has an entry for that level");
     match top.as_mut().and_then(Iterator::next) {
         Some(item) => {
             b.fire_child(me, item);
@@ -108,7 +108,7 @@ where
     S::Event: 'static,
 {
     let [chain, stack] = parts else {
-        unreachable!("bough engine: a defer capture has two parts")
+        unreachable!("portia engine: a defer capture has two parts")
     };
     if let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) {
         part::<M, Vec<Option<S::Event>>>(stack).push(Some(event));
@@ -127,7 +127,7 @@ where
 {
     let top = part::<M, Vec<Option<S::Event>>>(&mut parts[1])
         .last_mut()
-        .expect("bough engine: a capture in a level has an entry for that level");
+        .expect("portia engine: a capture in a level has an entry for that level");
     match top.take() {
         Some(event) => {
             b.fire_child(me, event);

@@ -48,10 +48,10 @@ use std::task::{Wake, Waker};
 #[cfg(feature = "std")]
 use std::thread;
 
-use bough::CollectionPolicy;
+use portia::CollectionPolicy;
 #[cfg(feature = "std")]
-use bough::InputSlot;
-use bough::prelude::*;
+use portia::InputSlot;
+use portia::prelude::*;
 
 struct Counting;
 

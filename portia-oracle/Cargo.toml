@@ -1,6 +1,6 @@
 [package]
-name = "bough-oracle"
-description = "The Sodium denotational semantics as an executable oracle, and the property tests that hold bough to it."
+name = "portia-oracle"
+description = "The Sodium denotational semantics as an executable oracle, and the property tests that hold portia to it."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -10,6 +10,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-bough.workspace = true
+portia.workspace = true
 # The strategies of `generate` are library code.
 proptest.workspace = true

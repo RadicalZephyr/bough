@@ -4,7 +4,7 @@
 
 mod common;
 
-use bough_repl::Repl;
+use portia_repl::Repl;
 use common::{TICK, Ticks, listing, ticking, with_manual_clock};
 
 /// The brief's sentinel demo, with ticks between its commands. Each

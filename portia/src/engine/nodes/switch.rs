@@ -145,7 +145,7 @@ fn inner_at(kind: Kind) -> usize {
     match kind {
         Kind::SwitchCell => 1,
         Kind::SwitchStream => 0,
-        k => unreachable!("bough engine: a {k:?} node is not a switch"),
+        k => unreachable!("portia engine: a {k:?} node is not a switch"),
     }
 }
 
@@ -181,7 +181,7 @@ impl<M: Mode> BuildContext<M> {
         if S::AFFINE {
             assert!(
                 !self.has_affine_switch(outer),
-                "bough: a cell holding affine streams may have at most one switch_stream, and \
+                "portia: a cell holding affine streams may have at most one switch_stream, and \
                  this cell, or a cell loop that is the same cell, has one already. An affine \
                  stream has at most one consumer; share the streams to switch to them from several places"
             );
@@ -210,7 +210,7 @@ impl<M: Mode> BuildContext<M> {
         match self.store.hot[n as usize].kind {
             Kind::SwitchCell => self.store.relations[n as usize].deps[0],
             Kind::SwitchStream => self.store.cold[n as usize].partner,
-            k => unreachable!("bough engine: node {n} ({k:?}) is not a switch"),
+            k => unreachable!("portia engine: node {n} ({k:?}) is not a switch"),
         }
     }
 
@@ -250,7 +250,7 @@ impl<M: Mode> BuildContext<M> {
         let consumer = &mut self.store.cold[stream as usize].affine_consumer;
         assert!(
             *consumer == 0 || *consumer == n,
-            "bough: an affine stream selected by a second switch_stream: the switch_stream at \
+            "portia: an affine stream selected by a second switch_stream: the switch_stream at \
              node {n} selected the stream at node {stream}, which the switch_stream at node \
              {other} takes from. A cell holding affine streams may have at most one \
              switch_stream, and a switch_cell selected such a cell for another; share the \
@@ -348,7 +348,7 @@ impl<M: Mode> BuildContext<M> {
         let p = dependents
             .iter()
             .position(|&d| d == n)
-            .expect("bough engine: a switch is a dependent of its inner");
+            .expect("portia engine: a switch is a dependent of its inner");
         dependents.remove(p);
         self.store.relations[new as usize].dependents.push(n);
         self.store.relations[n as usize].deps[at] = new;

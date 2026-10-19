@@ -1,6 +1,6 @@
 //! Lightweight FRP rooted in Rust.
 //!
-//! Bough implements the Sodium FRP denotational semantics with an API that
+//! Portia implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
 //! node-creating operation needs a [`Builder`]: a [`BuildContext`], which
 //! only exists inside a [`Runtime::build`] closure and inside
@@ -8,7 +8,7 @@
 //! listening and sampling from outside live on [`Runtime`], which is made
 //! empty, with [`Runtime::local`] or [`Runtime::threaded`], and built on
 //! between transactions. The design is recorded in the RFDs
-//! at <https://github.com/bough-frp/rfd>.
+//! at <https://github.com/portia-rs/rfd>.
 //!
 //! # Status
 //!
@@ -76,7 +76,7 @@
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
 //!
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! struct Click;
 //!
@@ -134,7 +134,7 @@ mod trace;
 /// Derives [`Trace`](trait@Trace) for a struct or an enum, with
 /// `#[trace(skip)]` for a field that cannot hold tokens.
 #[cfg(feature = "derive")]
-pub use bough_derive::Trace;
+pub use portia_derive::Trace;
 pub use build::{BuildContext, CellLoop, StateLoop, StreamLoop};
 pub use builder::{Builder, Portable, Stores};
 pub use cell::CellRef;

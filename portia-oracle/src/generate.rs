@@ -857,7 +857,7 @@ impl BodyDraft {
     fn scalar(&self, node: usize) -> Scalar {
         match self.slots[node] {
             Slot::Stream { scalar, .. } | Slot::Cell { scalar, .. } => scalar,
-            _ => unreachable!("bough-oracle: body node {node} has no scalar"),
+            _ => unreachable!("portia-oracle: body node {node} has no scalar"),
         }
     }
 
@@ -1144,7 +1144,7 @@ impl Draft {
         match self.slots[node] {
             Slot::Stream { scalar, .. } | Slot::Cell { scalar, .. } => scalar,
             Slot::Lists | Slot::Tokens | Slot::Outer | Slot::Closed => {
-                unreachable!("bough-oracle: node {node} has no scalar")
+                unreachable!("portia-oracle: node {node} has no scalar")
             }
         }
     }
@@ -1734,14 +1734,14 @@ impl Draft {
         let reach = self.reach[definition];
         assert!(
             reach.depends & closing == 0,
-            "bough-oracle: a loop closes only with a definition that does not depend on it"
+            "portia-oracle: a loop closes only with a definition that does not depend on it"
         );
         if let (Slot::Cell { state: meant, .. }, Slot::Cell { state, .. }) =
             (self.slots[forward], self.slots[definition])
         {
             assert_eq!(
                 meant, state,
-                "bough-oracle: a cell loop closes with a definition of the kind it was meant to be"
+                "portia-oracle: a cell loop closes with a definition of the kind it was meant to be"
             );
         }
         self.push(
@@ -1779,7 +1779,7 @@ impl Draft {
         let (want, cell) = match self.slots[forward] {
             Slot::Cell { scalar, state } => ((scalar, state), true),
             Slot::Stream { scalar, .. } => ((scalar, false), false),
-            _ => unreachable!("bough-oracle: node {forward} is a loop"),
+            _ => unreachable!("portia-oracle: node {forward} is a loop"),
         };
         let candidates: Vec<usize> = (forward + 1..self.slots.len())
             .filter(|&node| {
@@ -1811,7 +1811,7 @@ impl Draft {
     fn cell_definition(&mut self, step: &Step, forward: usize) -> usize {
         let (scalar, state) = match self.slots[forward] {
             Slot::Cell { scalar, state } => (scalar, state),
-            _ => unreachable!("bough-oracle: node {forward} is a cell loop"),
+            _ => unreachable!("portia-oracle: node {forward} is a cell loop"),
         };
         let initial = self.initial(step);
         let source = self.stream_avoiding(step.pick(3), None, bit(forward));

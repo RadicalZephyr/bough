@@ -8,7 +8,7 @@
 //! materializer, and using it twice is a compile error.
 //!
 //! ```
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! let mut graph = Runtime::local();
 //! let total = graph.build(|b| {
@@ -25,7 +25,7 @@
 //! A chain used twice does not compile:
 //!
 //! ```compile_fail,E0382
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! let mut graph = Runtime::local();
 //! let _ = graph.build(|b| {
@@ -40,12 +40,12 @@
 //! a context graph code cannot name or construct:
 //!
 //! ```compile_fail,E0433
-//! use bough::prelude::*;
+//! use portia::prelude::*;
 //!
 //! let mut graph = Runtime::local();
 //! let _ = graph.build(|b| {
 //!     let (mut numbers, _in) = b.input::<u32>();
-//!     let _ = numbers.pull(&mut bough::Cx::new(b)); // error: no `Cx` in `bough`
+//!     let _ = numbers.pull(&mut portia::Cx::new(b)); // error: no `Cx` in `portia`
 //! });
 //! ```
 
@@ -141,7 +141,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// [`Leaf`](crate::Leaf); one that is not `Trace` does not compile:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// #[derive(Clone)]
     /// struct Label(&'static str);
@@ -258,7 +258,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Rc` event here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -307,7 +307,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// type; a `Threaded` graph refuses an `Rc` output here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -361,7 +361,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// stream of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -394,7 +394,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Rc`:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -476,7 +476,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (words_in, letters, count) = graph.build(|b| {
@@ -513,7 +513,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// must accept both types; a `Threaded` graph refuses `Rc` elements:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -563,7 +563,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (starts_in, counts) = graph.build(|b| {
@@ -596,7 +596,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// `Threaded` graph refuses `Rc` events:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {
@@ -649,7 +649,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// // Each event opens a counter of its own: an input and a hold over it.
     /// let mut graph = Runtime::local();
@@ -694,7 +694,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// accept its type; a `Threaded` graph refuses a construct of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {

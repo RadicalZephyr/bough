@@ -1,4 +1,4 @@
-//! A [`Program`] built with the Bough API, and its schedule run on it.
+//! A [`Program`] built with the Portia API, and its schedule run on it.
 //!
 //! [`run`] checks that a program is in the subset stages 1 to 6 of the
 //! engine implement, builds it in one build closure the way a user would
@@ -87,7 +87,7 @@
 //! value reaches the token it holds, and a switch its current inner, but a
 //! token no selection has reached yet is reached by nothing else, and
 //! would be collected before the pick selects it, which is then a stale
-//! token. So the builder declares, with `bough::Builder::depends`, that a pick's
+//! token. So the builder declares, with `portia::Builder::depends`, that a pick's
 //! node and a `MapPickCell` keep every token they list.
 //!
 //! # Constructs
@@ -117,7 +117,7 @@
 //! closure's captures (RFD 3). A capture the construct's stream does not
 //! depend on, and that no other root reaches, would be collected before
 //! the closure's next run uses it: the stale token of finding F62. So the
-//! builder declares, with `bough::Builder::depends`, that the construct's node keeps
+//! builder declares, with `portia::Builder::depends`, that the construct's node keeps
 //! every token its closure captured, as a user must. Each kind of capture
 //! needs it: without the declarations of shared streams, of cells, or of
 //! cells of tokens, the random programs fail on a stale token, the
@@ -193,7 +193,7 @@
 //! (finding F23): the bound `M: Accepts<Map<S, {closure}>>` cannot be
 //! written. So every closure here is boxed and `Send`, and every operation
 //! that stores something is a method of [`EngineMode`], implemented by one
-//! macro for [`Local`] and for [`Threaded`](bough::Threaded), where the
+//! macro for [`Local`] and for [`Threaded`](portia::Threaded), where the
 //! bounds hold for every `Send` type. The builder is generic over
 //! `EngineMode`, and a caller picks the mode with `run::<Local>` or
 //! `run::<Threaded>`.
@@ -203,12 +203,12 @@ use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use bough::{
+use portia::{
     BuildContext, Cell, CellLoop, CellRef, InputSlot, Lift, Listener, Local, Node, Runtime, Shared,
     Source, State, StateLoop, Stream, StreamLoop, TokenRef, Trace, Tracer, Transaction,
 };
-// The oracle has a `Builder` of its own; bough's is wanted for its methods.
-use bough::Builder as _;
+// The oracle has a `Builder` of its own; portia's is wanted for its methods.
+use portia::Builder as _;
 
 use crate::program::{
     Body, BodyResult, Definition, Expression, Input, Program, Reference, Type, Value,
@@ -254,32 +254,32 @@ impl<S: Source<Event = i64> + Send> Chain for S {}
 
 // ----- the modes -----
 
-/// The Bough operations the builder uses, at its types, for one mode.
+/// The Portia operations the builder uses, at its types, for one mode.
 ///
-/// Implemented for [`Local`] and [`Threaded`](bough::Threaded) by one macro, so both run the
+/// Implemented for [`Local`] and [`Threaded`](portia::Threaded) by one macro, so both run the
 /// same builder: see the module documentation.
-pub trait EngineMode: bough::Mode {
+pub trait EngineMode: portia::Mode {
     /// `Runtime::local()` or `Runtime::threaded()`: an empty runtime to
     /// build on.
     fn runtime() -> Runtime<Self>;
     /// `b.input()`.
-    fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>);
+    fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, portia::Input<i64>);
     /// `b.input_coalescing(f)`.
     fn input_coalescing(
         b: &mut BuildContext<Self>,
         f: FoldFn<i64>,
-    ) -> (Stream<i64>, bough::Input<i64>);
+    ) -> (Stream<i64>, portia::Input<i64>);
     /// `b.input_cell(initial)`.
     fn input_cell<A: Trace + Send + 'static>(
         b: &mut BuildContext<Self>,
         initial: A,
-    ) -> (Cell<A>, bough::Input<A>);
+    ) -> (Cell<A>, portia::Input<A>);
     /// `b.input_cell_coalescing(initial, f)`.
     fn input_cell_coalescing<A: Trace + Send + 'static>(
         b: &mut BuildContext<Self>,
         initial: A,
         f: FoldFn<A>,
-    ) -> (Cell<A>, bough::Input<A>);
+    ) -> (Cell<A>, portia::Input<A>);
     /// `b.constant(value)`.
     fn constant(b: &mut BuildContext<Self>, value: i64) -> Cell<i64>;
     /// `chain.hold(b, initial)`.
@@ -350,7 +350,7 @@ pub trait EngineMode: bough::Mode {
         f: ConstructFn<Self, B>,
     ) -> Stream<B>;
     /// `b.connect(input, slot, 0)`.
-    fn connect(b: &mut BuildContext<Self>, input: bough::Input<i64>, slot: &'static InputSlot<i64>);
+    fn connect(b: &mut BuildContext<Self>, input: portia::Input<i64>, slot: &'static InputSlot<i64>);
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut BuildContext<Self>,
@@ -391,7 +391,7 @@ pub trait EngineMode: bough::Mode {
         f: CellSink<C::Value>,
     ) -> Listener;
     /// `tx.send(input, value)`.
-    fn send<A: Send + 'static>(tx: &mut Transaction<'_, Self>, input: bough::Input<A>, value: A);
+    fn send<A: Send + 'static>(tx: &mut Transaction<'_, Self>, input: portia::Input<A>, value: A);
 
     /// How many adapters a chain fuses before a `node`: [`MAX_FUSED`] in
     /// `Local`, one in `Threaded`, which so compiles a tenth of the chain
@@ -409,26 +409,26 @@ macro_rules! engine_mode {
             fn runtime() -> Runtime<Self> {
                 Runtime::$new()
             }
-            fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>) {
+            fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, portia::Input<i64>) {
                 b.input()
             }
             fn input_coalescing(
                 b: &mut BuildContext<Self>,
                 f: FoldFn<i64>,
-            ) -> (Stream<i64>, bough::Input<i64>) {
+            ) -> (Stream<i64>, portia::Input<i64>) {
                 b.input_coalescing(f)
             }
             fn input_cell<A: Trace + Send + 'static>(
                 b: &mut BuildContext<Self>,
                 initial: A,
-            ) -> (Cell<A>, bough::Input<A>) {
+            ) -> (Cell<A>, portia::Input<A>) {
                 b.input_cell(initial)
             }
             fn input_cell_coalescing<A: Trace + Send + 'static>(
                 b: &mut BuildContext<Self>,
                 initial: A,
                 f: FoldFn<A>,
-            ) -> (Cell<A>, bough::Input<A>) {
+            ) -> (Cell<A>, portia::Input<A>) {
                 b.input_cell_coalescing(initial, f)
             }
             fn constant(b: &mut BuildContext<Self>, value: i64) -> Cell<i64> {
@@ -544,7 +544,7 @@ macro_rules! engine_mode {
             }
             fn connect(
                 b: &mut BuildContext<Self>,
-                input: bough::Input<i64>,
+                input: portia::Input<i64>,
                 slot: &'static InputSlot<i64>,
             ) {
                 b.connect(input, slot, 0)
@@ -605,7 +605,7 @@ macro_rules! engine_mode {
             }
             fn send<A: Send + 'static>(
                 tx: &mut Transaction<'_, Self>,
-                input: bough::Input<A>,
+                input: portia::Input<A>,
                 value: A,
             ) {
                 tx.send(input, value)
@@ -616,7 +616,7 @@ macro_rules! engine_mode {
 
 engine_mode!(Local, local, MAX_FUSED);
 #[cfg(target_has_atomic = "ptr")]
-engine_mode!(bough::Threaded, threaded, 1);
+engine_mode!(portia::Threaded, threaded, 1);
 
 // ----- expressions -----
 
@@ -653,7 +653,7 @@ pub fn evaluate(expression: &Expression, arguments: &[i64]) -> i64 {
         }
         Expression::ConstructEvent | Expression::Sample(_) => {
             unreachable!(
-                "bough-oracle: {expression} reached evaluation; the builder replaces every CArg \
+                "portia-oracle: {expression} reached evaluation; the builder replaces every CArg \
                  with the construct's event and every Sample with the value it reads"
             )
         }
@@ -1954,7 +1954,7 @@ impl<'a> Scope<'a> {
                 );
             }
             Definition::Construct { .. } => {
-                unreachable!("bough-oracle: Scope::definition checks a construct")
+                unreachable!("portia-oracle: Scope::definition checks a construct")
             }
         };
         Ok(made)
@@ -2596,7 +2596,7 @@ fn lift<M: EngineMode>(
             lift_cells!(M, b, f; [] c0 c1 c2 c3 c4 c5)
         }
         _ => unreachable!(
-            "bough-oracle: check refuses a lift of {} cells",
+            "portia-oracle: check refuses a lift of {} cells",
             cells.len()
         ),
     }
@@ -2656,7 +2656,7 @@ impl Choices {
                     .into_iter()
                     .map(|token| match token {
                         CellToken::IntegerState(state) => state,
-                        _ => unreachable!("bough-oracle: check lists States or Cells, not both"),
+                        _ => unreachable!("portia-oracle: check lists States or Cells, not both"),
                     })
                     .collect(),
             ),
@@ -2665,7 +2665,7 @@ impl Choices {
                     .into_iter()
                     .map(|token| match token {
                         CellToken::Integer(cell) => cell,
-                        _ => unreachable!("bough-oracle: check lists cells of integers"),
+                        _ => unreachable!("portia-oracle: check lists cells of integers"),
                     })
                     .collect(),
             ),
@@ -2735,8 +2735,8 @@ enum Closer {
 /// each `Input` and `InputCell` over it; each send goes to all of them.
 #[derive(Clone, Copy)]
 enum EngineInput {
-    Integer(bough::Input<i64>),
-    Boolean(bough::Input<bool>),
+    Integer(portia::Input<i64>),
+    Boolean(portia::Input<bool>),
 }
 
 /// An observed node, as I/O code listens to it.
@@ -2861,14 +2861,14 @@ impl<M: EngineMode> Builder<'_, M> {
         match mem::replace(slot, Built::Consumed) {
             Built::Stream(chain) => chain,
             Built::Consumed => {
-                unreachable!("bough-oracle: check refuses a second consumer of {reference}")
+                unreachable!("portia-oracle: check refuses a second consumer of {reference}")
             }
             Built::Lists(_)
             | Built::Tokens(_)
             | Built::Cell(_)
             | Built::Outer(_)
             | Built::Closed => {
-                unreachable!("bough-oracle: check refuses {reference} as a stream of the subset")
+                unreachable!("portia-oracle: check refuses {reference} as a stream of the subset")
             }
         }
     }
@@ -2879,7 +2879,7 @@ impl<M: EngineMode> Builder<'_, M> {
         match self.take(reference).materialized(b) {
             Base::Stream(stream) => stream,
             Base::Shared(_) => {
-                unreachable!("bough-oracle: check holds linear streams in a cell of them")
+                unreachable!("portia-oracle: check holds linear streams in a cell of them")
             }
         }
     }
@@ -2888,7 +2888,7 @@ impl<M: EngineMode> Builder<'_, M> {
     fn take_lists(&mut self, reference: &Reference) -> Stream<Vec<i64>> {
         match mem::replace(self.at_mut(reference), Built::Consumed) {
             Built::Lists(lists) => lists,
-            _ => unreachable!("bough-oracle: check lets a split read only a MapList, once"),
+            _ => unreachable!("portia-oracle: check lets a split read only a MapList, once"),
         }
     }
 
@@ -2898,7 +2898,7 @@ impl<M: EngineMode> Builder<'_, M> {
         match mem::replace(self.at_mut(reference), Built::Consumed) {
             Built::Tokens(tokens) => tokens,
             _ => unreachable!(
-                "bough-oracle: check lets a hold of tokens read only a stream of tokens, once"
+                "portia-oracle: check lets a hold of tokens read only a stream of tokens, once"
             ),
         }
     }
@@ -2907,7 +2907,7 @@ impl<M: EngineMode> Builder<'_, M> {
     fn shared(&self, reference: &Reference) -> Shared<i64> {
         match self.at(reference) {
             Built::Stream(Chained::Shared(shared)) => *shared,
-            _ => unreachable!("bough-oracle: check lets a switch follow a Share only"),
+            _ => unreachable!("portia-oracle: check lets a switch follow a Share only"),
         }
     }
 
@@ -2919,14 +2919,14 @@ impl<M: EngineMode> Builder<'_, M> {
     fn outer(&self, reference: &Reference) -> Outer {
         match self.at(reference) {
             Built::Outer(outer) => *outer,
-            _ => unreachable!("bough-oracle: check lets a switch read only a cell of tokens"),
+            _ => unreachable!("portia-oracle: check lets a switch read only a cell of tokens"),
         }
     }
 
     fn cell(&self, reference: &Reference) -> CellToken {
         match self.at(reference) {
             Built::Cell(cell) => *cell,
-            _ => unreachable!("bough-oracle: check refuses a stream as a cell"),
+            _ => unreachable!("portia-oracle: check refuses a stream as a cell"),
         }
     }
 
@@ -2934,7 +2934,7 @@ impl<M: EngineMode> Builder<'_, M> {
         match self.made(reference) {
             NodeType::Stream(scalar) | NodeType::Cell { value: scalar, .. } => scalar,
             NodeType::Lists | NodeType::Tokens(_) | NodeType::Outer(_) | NodeType::Closed => {
-                unreachable!("bough-oracle: check refuses {reference} where a scalar is read")
+                unreachable!("portia-oracle: check refuses {reference} where a scalar is read")
             }
         }
     }
@@ -2950,7 +2950,7 @@ impl<M: EngineMode> Builder<'_, M> {
             Expression::Sample(reference) => Expression::Literal(self.cell(reference).sample(b)),
             Expression::ConstructEvent => match &self.inside {
                 Some(inside) => Expression::Literal(inside.event),
-                None => unreachable!("bough-oracle: check refuses CArg outside a body"),
+                None => unreachable!("portia-oracle: check refuses CArg outside a body"),
             },
             Expression::Add(x, y) => Expression::Add(go(x), go(y)),
             Expression::Subtract(x, y) => Expression::Subtract(go(x), go(y)),
@@ -3060,7 +3060,7 @@ impl<M: EngineMode> Builder<'_, M> {
                 let value = match value {
                     Value::Integer(value) => *value,
                     Value::Boolean(value) => i64::from(*value),
-                    Value::List(_) => unreachable!("bough-oracle: check refuses a list"),
+                    Value::List(_) => unreachable!("portia-oracle: check refuses a list"),
                 };
                 self.adapt(b, source, Adapter::MapTo(value))
             }
@@ -3081,7 +3081,7 @@ impl<M: EngineMode> Builder<'_, M> {
                 let adapter = match self.cell(cell) {
                     CellToken::Boolean(cell) => Adapter::GateCell(cell),
                     CellToken::BooleanState(state) => Adapter::GateState(state),
-                    _ => unreachable!("bough-oracle: check refuses a gate on integers"),
+                    _ => unreachable!("portia-oracle: check refuses a gate on integers"),
                 };
                 self.adapt(b, source, adapter)
             }
@@ -3141,7 +3141,7 @@ impl<M: EngineMode> Builder<'_, M> {
                         };
                         M::node(b, steps.map(boolean_to_integer as fn(bool) -> i64))
                     }
-                    _ => unreachable!("bough-oracle: check refuses a steps view of a State"),
+                    _ => unreachable!("portia-oracle: check refuses a steps view of a State"),
                 };
                 Built::Stream(Chained::Stream(stream))
             }
@@ -3288,7 +3288,7 @@ impl<M: EngineMode> Builder<'_, M> {
                         Outer::Linear(M::hold_tokens(b, tokens, initial))
                     }
                     Tokens::Cells(_) | Tokens::States(_) => {
-                        unreachable!("bough-oracle: check holds streams from a stream of streams")
+                        unreachable!("portia-oracle: check holds streams from a stream of streams")
                     }
                 })
             }
@@ -3300,7 +3300,7 @@ impl<M: EngineMode> Builder<'_, M> {
                     (Tokens::States(tokens), CellToken::IntegerState(state)) => {
                         Outer::States(M::hold_tokens(b, tokens, state))
                     }
-                    _ => unreachable!("bough-oracle: check holds cells of one kind"),
+                    _ => unreachable!("portia-oracle: check holds cells of one kind"),
                 };
                 Built::Outer(outer)
             }
@@ -3316,7 +3316,7 @@ impl<M: EngineMode> Builder<'_, M> {
             Definition::ConstantCell(cell) => Built::Outer(match self.cell(cell) {
                 CellToken::Integer(cell) => Outer::Cells(M::constant_token(b, cell)),
                 CellToken::IntegerState(state) => Outer::States(M::constant_token(b, state)),
-                _ => unreachable!("bough-oracle: check holds cells of integers"),
+                _ => unreachable!("portia-oracle: check holds cells of integers"),
             }),
             Definition::MapPickCell { index, cells, cell } => {
                 let index = self.resolve(b, index);
@@ -3354,13 +3354,13 @@ impl<M: EngineMode> Builder<'_, M> {
                             }),
                         ))
                     }
-                    _ => unreachable!("bough-oracle: check refuses a MapPickCell over a State"),
+                    _ => unreachable!("portia-oracle: check refuses a MapPickCell over a State"),
                 };
                 match outer {
                     Outer::Cells(outer) => listed.declare(b, &outer),
                     Outer::States(outer) => listed.declare(b, &outer),
                     Outer::Streams(_) | Outer::Linear(_) => {
-                        unreachable!("bough-oracle: a MapPickCell lists cells")
+                        unreachable!("portia-oracle: a MapPickCell lists cells")
                     }
                 }
                 Built::Outer(outer)
@@ -3370,7 +3370,7 @@ impl<M: EngineMode> Builder<'_, M> {
                     Outer::Streams(outer) => M::switch_stream(b, outer),
                     Outer::Linear(outer) => M::switch_linear(b, outer),
                     Outer::Cells(_) | Outer::States(_) => {
-                        unreachable!("bough-oracle: check switches streams over a cell of streams")
+                        unreachable!("portia-oracle: check switches streams over a cell of streams")
                     }
                 }))
             }
@@ -3378,20 +3378,20 @@ impl<M: EngineMode> Builder<'_, M> {
                 Outer::Cells(outer) => CellToken::Integer(outer.switch_cell(b)),
                 Outer::States(outer) => CellToken::IntegerState(outer.switch_cell(b)),
                 Outer::Streams(_) | Outer::Linear(_) => {
-                    unreachable!("bough-oracle: check switches cells over a cell of cells")
+                    unreachable!("portia-oracle: check switches cells over a cell of cells")
                 }
             }),
             Definition::Construct { body, source } => {
                 let index = self.nodes.len();
                 let types = self.bodies[index]
                     .clone()
-                    .expect("bough-oracle: check gives every construct its body's types");
+                    .expect("portia-oracle: check gives every construct its body's types");
                 self.construct(b, body, types, source)
             }
             Definition::CellLoop(_) => {
                 let index = self.nodes.len();
                 let NodeType::Cell { value, state } = self.types[index] else {
-                    unreachable!("bough-oracle: check makes a cell loop a cell")
+                    unreachable!("portia-oracle: check makes a cell loop a cell")
                 };
                 let (cell, closer) = match (value, state) {
                     (Scalar::Integer, false) => {
@@ -3426,7 +3426,7 @@ impl<M: EngineMode> Builder<'_, M> {
             } => {
                 let closer = self.closers[*forward]
                     .take()
-                    .expect("bough-oracle: check closes a loop once");
+                    .expect("portia-oracle: check closes a loop once");
                 // check makes a cell loop a State exactly when its definition
                 // is one, and a state loop may close with either.
                 match (closer, Some(self.at(definition))) {
@@ -3455,13 +3455,13 @@ impl<M: EngineMode> Builder<'_, M> {
                         closer.close(b, *cell);
                     }
                     _ => unreachable!(
-                        "bough-oracle: check closes a loop with a node of its type and kind"
+                        "portia-oracle: check closes a loop with a node of its type and kind"
                     ),
                 }
                 Built::Closed
             }
             _ => unreachable!(
-                "bough-oracle: check refuses {}, outside the subset",
+                "portia-oracle: check refuses {}, outside the subset",
                 name(definition)
             ),
         }
@@ -3481,7 +3481,7 @@ impl<M: EngineMode> Builder<'_, M> {
             | Built::Tokens(_)
             | Built::Outer(_)
             | Built::Closed => {
-                unreachable!("bough-oracle: check refuses observing node {node}")
+                unreachable!("portia-oracle: check refuses observing node {node}")
             }
         }
     }
@@ -3493,7 +3493,7 @@ impl<M: EngineMode> Builder<'_, M> {
             Built::Cell(cell) => Captured::Cell(*cell),
             Built::Outer(outer) => Captured::Outer(*outer),
             _ => unreachable!(
-                "bough-oracle: check lets a construct body read a Share, a cell or a cell of \
+                "portia-oracle: check lets a construct body read a Share, a cell or a cell of \
                  tokens of the top level, not N {node}"
             ),
         }
@@ -3554,7 +3554,7 @@ impl<M: EngineMode> Builder<'_, M> {
                 declare_captures(b, &tokens, &run.captured);
                 Built::Tokens(Tokens::States(tokens))
             }
-            made => unreachable!("bough-oracle: check makes no construct of {made}"),
+            made => unreachable!("portia-oracle: check makes no construct of {made}"),
         }
     }
 }
@@ -3611,7 +3611,7 @@ fn emitted(result: &BodyResult) -> &Reference {
     match result {
         BodyResult::Node(node) => node,
         BodyResult::Value(_) => {
-            unreachable!("bough-oracle: check makes a construct of tokens emit a node")
+            unreachable!("portia-oracle: check makes a construct of tokens emit a node")
         }
     }
 }
@@ -3624,7 +3624,7 @@ fn emit_value<M: EngineMode>(
     match result {
         BodyResult::Value(value) => scope.value(b, value),
         BodyResult::Node(_) => {
-            unreachable!("bough-oracle: check makes a construct of values emit a value")
+            unreachable!("portia-oracle: check makes a construct of values emit a value")
         }
     }
 }
@@ -3652,7 +3652,7 @@ fn emit_cell<M: EngineMode>(
 ) -> Cell<i64> {
     match scope.cell(emitted(result)) {
         CellToken::Integer(cell) => cell,
-        _ => unreachable!("bough-oracle: check makes a construct of cells emit one"),
+        _ => unreachable!("portia-oracle: check makes a construct of cells emit one"),
     }
 }
 
@@ -3663,7 +3663,7 @@ fn emit_state<M: EngineMode>(
 ) -> State<i64> {
     match scope.cell(emitted(result)) {
         CellToken::IntegerState(state) => state,
-        _ => unreachable!("bough-oracle: check makes a construct of States emit one"),
+        _ => unreachable!("portia-oracle: check makes a construct of States emit one"),
     }
 }
 
@@ -3721,7 +3721,7 @@ fn build_program<M: EngineMode>(
         match builder.inputs[input].as_slice() {
             [EngineInput::Integer(token)] => M::connect(b, *token, slot),
             _ => unreachable!(
-                "bough-oracle: run_fed checks that a slot feeds one engine input of integers"
+                "portia-oracle: run_fed checks that a slot feeds one engine input of integers"
             ),
         }
     }
@@ -3999,7 +3999,7 @@ impl Recorder {
                 values.push(Vec::new());
                 steps.push(Vec::new());
             }
-            Recorder::Cell { .. } => unreachable!("bough-oracle: a cell records a cell"),
+            Recorder::Cell { .. } => unreachable!("portia-oracle: a cell records a cell"),
         }
     }
 
@@ -4024,7 +4024,7 @@ impl Recorder {
             ) => steps.last_mut(),
             _ => None,
         }
-        .expect("bough-oracle: a call goes to a listener of its node, in a transaction");
+        .expect("portia-oracle: a call goes to a listener of its node, in a transaction");
         list.push(value);
         list.len() - 1
     }
@@ -4080,7 +4080,7 @@ fn engine_sends(
         let value = match value {
             Value::Integer(value) => *value,
             Value::Boolean(value) => i64::from(*value),
-            Value::List(_) => unreachable!("bough-oracle: check refuses a list send"),
+            Value::List(_) => unreachable!("portia-oracle: check refuses a list send"),
         };
         for which in 0..inputs[*input].len() {
             match queues
@@ -4353,7 +4353,7 @@ fn execute<M: EngineMode>(
     for step in script {
         let ran = match step {
             Drive::Write(value) => {
-                let (_, slot) = slot.expect("bough-oracle: a script writes only to a slot");
+                let (_, slot) = slot.expect("portia-oracle: a script writes only to a slot");
                 slot.send(*value);
                 pending = true;
                 false
@@ -4376,7 +4376,7 @@ fn execute<M: EngineMode>(
             let stray = drain(&log);
             assert!(
                 stray.is_empty(),
-                "bough-oracle: a write, or a pump that drained nothing, made listener calls: \
+                "portia-oracle: a write, or a pump that drained nothing, made listener calls: \
                  {stray:?}"
             );
             continue;

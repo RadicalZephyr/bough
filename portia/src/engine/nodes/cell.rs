@@ -75,7 +75,7 @@ where
     F: Fn(S::Event, &St) -> St + 'static,
 {
     let [chain, f] = parts else {
-        unreachable!("bough engine: an accumulator has two parts")
+        unreachable!("portia engine: an accumulator has two parts")
     };
     let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) else {
         return;
@@ -167,7 +167,7 @@ where
     F: Fn(S::Event, &St) -> (B, St) + 'static,
 {
     let [chain, f, state] = parts else {
-        unreachable!("bough engine: a scan has three parts")
+        unreachable!("portia engine: a scan has three parts")
     };
     let Some(event) = part::<M, S>(chain).pull(&mut Cx { b: &mut *b }) else {
         return;
@@ -188,7 +188,7 @@ fn trace_scan<M: Mode, St: Trace + 'static>(
     parts[2]
         .get()
         .downcast_ref::<St>()
-        .expect("bough engine: scan state type")
+        .expect("portia engine: scan state type")
         .trace(tracer);
 }
 

@@ -1,7 +1,7 @@
 -- | The program description the oracle answers. The Rust side prints a
 -- 'Program' as one line in the syntax of the derived 'Read' instances below,
 -- so the constructor names and field orders here are the protocol. Change
--- one only together with @bough-oracle/src/program.rs@.
+-- one only together with @portia-oracle/src/program.rs@.
 --
 -- A program is a list of definitions. Node @i@ is the @i@-th 'Def'. A
 -- definition refers only to nodes defined before it; a loop is the one way

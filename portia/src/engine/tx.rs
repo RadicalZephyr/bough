@@ -94,7 +94,7 @@ impl<M: Mode> BuildContext<M> {
         let h = &mut self.store.hot[me as usize];
         debug_assert!(
             h.fired != tx,
-            "bough engine: a node fired twice in one instant"
+            "portia engine: a node fired twice in one instant"
         );
         h.fired = tx;
         let (kind, flags) = (h.kind, h.flags);
@@ -116,7 +116,7 @@ impl<M: Mode> BuildContext<M> {
     pub(crate) fn begin(&mut self) {
         assert!(
             !self.in_tx,
-            "bough: the graph is poisoned: a panic escaped an earlier transaction"
+            "portia: the graph is poisoned: a panic escaped an earlier transaction"
         );
         self.in_tx = true;
         self.s.depth = 0;
@@ -153,7 +153,7 @@ impl<M: Mode> BuildContext<M> {
             let ops = self.store.ops[n];
             let parts = self.store.parts[n]
                 .as_deref_mut()
-                .expect("bough engine: a node's program is in place");
+                .expect("portia engine: a node's program is in place");
             (ops.coalesce)(parts, &mut self.store.data[n], &mut v);
             // The coalescing function took the value; the default left it.
             return match v {
@@ -265,7 +265,7 @@ impl<M: Mode> BuildContext<M> {
                         // refuse cycles first.
                         assert!(
                             h.flags & ON_STACK == 0,
-                            "bough: a same-instant cycle reached marking at node {d}"
+                            "portia: a same-instant cycle reached marking at node {d}"
                         );
                     }
                 } else {
@@ -339,7 +339,7 @@ impl<M: Mode> BuildContext<M> {
                 let ops = self.store.ops[n as usize];
                 let mut parts = self.store.parts[n as usize]
                     .take()
-                    .expect("bough engine: a node's program is in place");
+                    .expect("portia engine: a node's program is in place");
                 (ops.eval)(&mut parts, self, n);
                 self.store.parts[n as usize] = Some(parts);
             }
@@ -355,7 +355,7 @@ impl<M: Mode> BuildContext<M> {
             for &n in &s.commits {
                 let parts = store.parts[n as usize]
                     .as_deref_mut()
-                    .expect("bough engine: a node's program is in place");
+                    .expect("portia engine: a node's program is in place");
                 (store.ops[n as usize].commit)(parts, &mut store.data[n as usize]);
             }
             for &n in &s.memos {

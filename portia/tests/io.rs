@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use bough::prelude::*;
-use bough::{Io, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
+use portia::prelude::*;
+use portia::{Io, IoError, IoTransactionError, PumpError, RemoteIo, SendError, TokenError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -632,7 +632,7 @@ fn a_queued_unit_whose_send_fails_is_dropped_whole() {
     let (mut graph, (left_in, right_in, merged)) = pair();
     let seen = log(&mut graph, merged);
     let io = graph.io();
-    let double = move |tx: &mut bough::IoTransaction<'_>| {
+    let double = move |tx: &mut portia::IoTransaction<'_>| {
         tx.send(right_in, 1);
         tx.send(left_in, 2);
         tx.send(left_in, 3);

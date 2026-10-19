@@ -4,8 +4,8 @@
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use bough::prelude::*;
-use bough::{PoisonedError, SendError, TransactionSendError};
+use portia::prelude::*;
+use portia::{PoisonedError, SendError, TransactionSendError};
 
 /// The message of a caught panic.
 fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
@@ -150,7 +150,7 @@ fn swapping_the_build_context_for_another_graphs_is_caught() {
 fn statistics_count_instants_and_nothing_else_on_an_unconsumed_input() {
     let mut graph = Runtime::local();
     let a_in = graph.build(|b| b.input::<u32>().1);
-    let built: bough::Statistics = graph.statistics();
+    let built: portia::Statistics = graph.statistics();
     assert_eq!(built.transactions, 1, "transaction zero");
     assert_eq!(built.new_nodes, 1, "the input ran once in transaction zero");
     graph.send(a_in, 1);

@@ -1,16 +1,16 @@
-# **Bough**
+# **Portia**
 
 **Lightweight FRP rooted in Rust.**
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/bough-frp/bough/83b68048089c3a5c9f41215d3db3c2868ccb220b/bough-logo.png" width="280" alt="Bough Logo">
+  <img src="https://raw.githubusercontent.com/portia-rs/portia/83b68048089c3a5c9f41215d3db3c2868ccb220b/portia-logo.png" width="280" alt="Portia Logo">
 </p>
 
 ---
 
 ## Overview
 
-**Bough** is a modern, idiomatic Rust implementation of **Functional
+**Portia** is a modern, idiomatic Rust implementation of **Functional
 Reactive Programming (FRP)** - built to be lightweight, expressive,
 and highly optimized by the compiler.
 
@@ -22,7 +22,7 @@ strengths in mind:
 * Zero-cost abstractions where possible
 * A focus on predictable behavior, clarity, and ergonomics
 
-Bough aims to provide a **feature-complete FRP toolkit** while
+Portia aims to provide a **feature-complete FRP toolkit** while
 embracing Rust’s ownership, lifetimes, and strong typing to create
 reactive systems that feel natural in Rust projects.
 
@@ -33,7 +33,7 @@ port, this library is for you.
 
 ## Status
 
-Bough is in early development while the API and performance model are
+Portia is in early development while the API and performance model are
 refined. Expect rapid iteration, breaking changes, and new modules as
 the design evolves.
 
@@ -41,11 +41,11 @@ the design evolves.
 
 ## Installation
 
-Add Bough to your project using Cargo:
+Add Portia to your project using Cargo:
 
 ```toml
 [dependencies]
-bough = "0.1"
+portia = "0.1"
 ```
 
 ---
@@ -54,14 +54,14 @@ bough = "0.1"
 
 As the API stabilizes, this section will include examples showing
 stream creation, behavior propagation, and composing reactive graphs
-using Bough’s iterator-like combinators.
+using Portia’s iterator-like combinators.
 
 ---
 
 ## Design
 
-The design decisions behind Bough are recorded as RFDs at
-<https://github.com/bough-frp/rfd>: the guiding principles and standing
+The design decisions behind Portia are recorded as RFDs at
+<https://github.com/portia-rs/rfd>: the guiding principles and standing
 policies, the separation of building FRP from driving it, the memory
 model, the value model, the transaction protocol, and the I/O edge.
 
@@ -69,7 +69,7 @@ model, the value model, the transaction protocol, and the I/O edge.
 
 ## Inspiration
 
-Bough draws significant inspiration from the design philosophy and
+Portia draws significant inspiration from the design philosophy and
 structure of the **Sodium FRP** library, while reworking the internals
 and API to better fit Rust’s model of memory, ownership, and zero-cost
 composability.

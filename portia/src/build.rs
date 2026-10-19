@@ -128,7 +128,7 @@ impl<M: Mode> BuildContext<M> {
         self.check(input.token);
         assert!(
             Drain::connect(slot, self.graph_id, self.boundary.waker.as_ref()),
-            "bough: an input slot connected twice: a slot feeds one input of one graph; \
+            "portia: an input slot connected twice: a slot feeds one input of one graph; \
              give a second producer or a second input a slot of its own"
         );
         let slots = &mut self.boundary.slots;
@@ -156,7 +156,7 @@ impl<M: Mode> BuildContext<M> {
 /// Consumed by `close`, so a loop cannot close twice:
 ///
 /// ```compile_fail,E0382
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
@@ -170,7 +170,7 @@ impl<M: Mode> BuildContext<M> {
 /// It cannot be used from inside a `construct` closure either:
 ///
 /// ```compile_fail,E0507
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let _ = graph.build(|b| {
@@ -218,7 +218,7 @@ impl<A: 'static> CellLoop<A> {
 /// Its forward is a [`State`](crate::State), which has no stream view:
 ///
 /// ```compile_fail,E0599
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
@@ -230,7 +230,7 @@ impl<A: 'static> CellLoop<A> {
 /// only with a `Cell`:
 ///
 /// ```compile_fail,E0308
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
@@ -297,7 +297,7 @@ impl<A: 'static> StreamLoop<A> {
     /// `Threaded` graph refuses a loop of `Rc`s here:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {

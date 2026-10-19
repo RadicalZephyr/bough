@@ -4,7 +4,7 @@
 
 mod common;
 
-use bough_repl::Repl;
+use portia_repl::Repl;
 use common::{TICK, listing, ticking, transcript, with_manual_clock};
 
 const WORD_FOR_MOD_N: &str = "(defgraph word-for-mod-n [x n word] (if (eq (mod x n) 0) word \"\"))";

@@ -15,8 +15,8 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{CollectionPolicy, PoisonedError, SendError, TokenError, Tracer, TransactionSendError};
+use portia::prelude::*;
+use portia::{CollectionPolicy, PoisonedError, SendError, TokenError, Tracer, TransactionSendError};
 
 // ----------------------------------------------------------- helpers
 

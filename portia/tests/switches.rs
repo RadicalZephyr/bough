@@ -2,10 +2,10 @@
 //! oracle's patch F6, and `switch_stream`, the semantics' `SwitchS`.
 //!
 //! The expected values are GHC's. The program is
-//! `bough-oracle/haskell/probes/stage5/Stage5.hs`, which runs each test's program over an unchanged
+//! `portia-oracle/haskell/probes/stage5/Stage5.hs`, which runs each test's program over an unchanged
 //! copy of the vendored Denotational.hs with the oracle's patch F6 (a
 //! switch cell created at t0 switches over its outer chopped at t0,
-//! bough-oracle's `switchCell`) and solves each loop by fixed-point
+//! portia-oracle's `switchCell`) and solves each loop by fixed-point
 //! iteration; `Stage5.out` beside it is its output, and each test quotes the
 //! lines it uses. Instant `[0]` is the build and `[k]` the k-th transaction
 //! after it; every switch here is built at `[0]`. GHC prints a cell's steps
@@ -25,8 +25,8 @@ use std::fmt::Debug;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{PoisonedError, SendError, TokenError, Transaction};
+use portia::prelude::*;
+use portia::{PoisonedError, SendError, TokenError, Transaction};
 
 /// The plain order, then seeds for RFD 1's order shuffle.
 const SEEDS: [Option<u64>; 6] = [None, Some(0), Some(1), Some(7), Some(42), Some(1 << 40)];

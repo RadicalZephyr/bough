@@ -340,12 +340,12 @@ pub struct Ops<M: Mode> {
 fn no_eval<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, _: u32) {}
 fn no_commit<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>) {}
 fn no_value<M: Mode>(_: &BuildContext<M>, n: u32, _: Passed) -> &dyn Any {
-    unreachable!("bough engine: node {n} is not a read-through cell")
+    unreachable!("portia engine: node {n} is not a read-through cell")
 }
 fn no_compute_post<M: Mode>(_: &mut BuildContext<M>, _: u32) {}
 fn no_settle_memo<M: Mode>(_: &mut Data<M>) {}
 fn no_inner<M: Mode>(_: &BuildContext<M>, n: u32, _: bool, _: Passed) -> Token {
-    unreachable!("bough engine: node {n} is not a switch")
+    unreachable!("portia engine: node {n} is not a switch")
 }
 fn no_emit_child<M: Mode>(_: &mut [M::Carrier], _: &mut BuildContext<M>, _: u32) -> bool {
     false
@@ -355,7 +355,7 @@ fn no_coalesce<M: Mode>(_: &mut [M::Carrier], _: &mut Data<M>, _: &mut dyn Any) 
 fn no_trace<M: Mode>(_: &Data<M>, _: &[M::Carrier], _: &mut Tracer) {}
 fn no_clear_slot<M: Mode>(_: &mut Data<M>) {}
 fn no_fire<M: Mode>(_: &mut BuildContext<M>, n: u32, _: &mut dyn Any) -> Result<(), DoubleSend> {
-    unreachable!("bough engine: node {n} is not an input")
+    unreachable!("portia engine: node {n} is not an input")
 }
 
 impl<M: Mode> Ops<M> {
@@ -433,8 +433,8 @@ pub(crate) fn slot<M: Mode, A: 'static>(d: &Data<M>) -> &Option<A> {
         Data::Slot(c) => c
             .get()
             .downcast_ref::<Option<A>>()
-            .expect("bough engine: slot type"),
-        _ => panic!("bough engine: not a stream node"),
+            .expect("portia engine: slot type"),
+        _ => panic!("portia engine: not a stream node"),
     }
 }
 
@@ -443,8 +443,8 @@ pub(crate) fn slot_mut<M: Mode, A: 'static>(d: &mut Data<M>) -> &mut Option<A> {
         Data::Slot(c) => c
             .get_mut()
             .downcast_mut::<Option<A>>()
-            .expect("bough engine: slot type"),
-        _ => panic!("bough engine: not a stream node"),
+            .expect("portia engine: slot type"),
+        _ => panic!("portia engine: not a stream node"),
     }
 }
 
@@ -453,8 +453,8 @@ pub(crate) fn cell<M: Mode, A: 'static>(d: &Data<M>) -> &CellValue<A> {
         Data::Cell(c) => c
             .get()
             .downcast_ref::<CellValue<A>>()
-            .expect("bough engine: cell type"),
-        _ => panic!("bough engine: not a stateful cell"),
+            .expect("portia engine: cell type"),
+        _ => panic!("portia engine: not a stateful cell"),
     }
 }
 
@@ -463,8 +463,8 @@ pub(crate) fn cell_mut<M: Mode, A: 'static>(d: &mut Data<M>) -> &mut CellValue<A
         Data::Cell(c) => c
             .get_mut()
             .downcast_mut::<CellValue<A>>()
-            .expect("bough engine: cell type"),
-        _ => panic!("bough engine: not a stateful cell"),
+            .expect("portia engine: cell type"),
+        _ => panic!("portia engine: not a stateful cell"),
     }
 }
 
@@ -473,8 +473,8 @@ pub(crate) fn in_place<M: Mode, S: 'static>(d: &Data<M>) -> &S {
         Data::InPlace { state, .. } => state
             .get()
             .downcast_ref::<S>()
-            .expect("bough engine: state type"),
-        _ => panic!("bough engine: not an in-place accumulator"),
+            .expect("portia engine: state type"),
+        _ => panic!("portia engine: not an in-place accumulator"),
     }
 }
 
@@ -487,13 +487,13 @@ pub(crate) fn in_place_mut<M: Mode, S: 'static, E: 'static>(
             state
                 .get_mut()
                 .downcast_mut::<S>()
-                .expect("bough engine: state type"),
+                .expect("portia engine: state type"),
             pending
                 .get_mut()
                 .downcast_mut::<Option<E>>()
-                .expect("bough engine: pending event type"),
+                .expect("portia engine: pending event type"),
         ),
-        _ => panic!("bough engine: not an in-place accumulator"),
+        _ => panic!("portia engine: not an in-place accumulator"),
     }
 }
 
@@ -502,8 +502,8 @@ pub(crate) fn memo<M: Mode, A: 'static>(d: &Data<M>) -> &Memo<A> {
         Data::ReadThrough { memo, .. } => memo
             .get()
             .downcast_ref::<Memo<A>>()
-            .expect("bough engine: memo type"),
-        _ => panic!("bough engine: not a read-through cell"),
+            .expect("portia engine: memo type"),
+        _ => panic!("portia engine: not a read-through cell"),
     }
 }
 
@@ -512,13 +512,13 @@ pub(crate) fn memo_mut<M: Mode, A: 'static>(d: &mut Data<M>) -> &mut Memo<A> {
         Data::ReadThrough { memo, .. } => memo
             .get_mut()
             .downcast_mut::<Memo<A>>()
-            .expect("bough engine: memo type"),
-        _ => panic!("bough engine: not a read-through cell"),
+            .expect("portia engine: memo type"),
+        _ => panic!("portia engine: not a read-through cell"),
     }
 }
 
 pub(crate) fn part<M: Mode, T: 'static>(c: &mut M::Carrier) -> &mut T {
     c.get_mut()
         .downcast_mut::<T>()
-        .expect("bough engine: part type")
+        .expect("portia engine: part type")
 }

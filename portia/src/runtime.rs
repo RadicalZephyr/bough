@@ -168,7 +168,7 @@ impl Runtime<Threaded> {
     }
 }
 
-const POISONED: &str = "bough: the graph is poisoned: a panic escaped an earlier transaction";
+const POISONED: &str = "portia: the graph is poisoned: a panic escaped an earlier transaction";
 
 /// Why a pump stopped: the error [`Runtime::try_pump`] returns, and what the
 /// refused operation was and where the node its token names was created,
@@ -185,7 +185,7 @@ const LISTEN: &str = "a listener on a collected node";
 const ANCHOR: &str = "an anchor on a collected node";
 
 /// The debug-build panic for a listener tied to a unit that heard nothing.
-const SILENT: &str = "bough: a listener tied to a transaction heard nothing: its stream fired in \
+const SILENT: &str = "portia: a listener tied to a transaction heard nothing: its stream fired in \
                       neither the transaction nor its child transactions. In a release build it \
                       is dropped";
 
@@ -217,7 +217,7 @@ where
     };
     let f = part::<M, Option<F>>(&mut e.f)
         .take()
-        .expect("bough engine: a spent listener is not called");
+        .expect("portia engine: a spent listener is not called");
     b.spend(e);
     f(v);
 }
@@ -273,7 +273,7 @@ impl<M: Mode> Runtime<M> {
     /// the runtime:
     ///
     /// ```compile_fail,E0499
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut runtime = Runtime::local();
     /// let numbers_in = runtime.build(|b| b.input::<u32>().1);
@@ -317,7 +317,7 @@ impl<M: Mode> Runtime<M> {
             // error, caught here.
             assert_eq!(
                 build.graph_id, id,
-                "bough: the build context was swapped for another graph's"
+                "portia: the build context was swapped for another graph's"
             );
             build.pop_scope();
             build.finish();
@@ -394,7 +394,7 @@ impl<M: Mode> Runtime<M> {
     fn checked(&mut self, token: Token, what: &str) -> Option<u32> {
         match self.build.lookup(token) {
             Ok(i) => Some(i),
-            Err(TokenFault::Foreign) => panic!("bough: a token from another graph"),
+            Err(TokenFault::Foreign) => panic!("portia: a token from another graph"),
             Err(TokenFault::Stale) => {
                 self.stale_operation(what, token.created);
                 None
@@ -410,7 +410,7 @@ impl<M: Mode> Runtime<M> {
     fn stale_operation(&mut self, what: &str, created: Created) {
         if cfg!(debug_assertions) {
             panic!(
-                "bough: {what}: its token is stale, and its node, created at {created}, was \
+                "portia: {what}: its token is stale, and its node, created at {created}, was \
                  collected. A node no root reaches is collected; anchor or listen to what I/O \
                  code keeps a token of. In a release build this is a no-op that \
                  `Runtime::stale_operations` counts"
@@ -481,7 +481,7 @@ impl<M: Mode> Runtime<M> {
                 rt.build.begin();
                 rt.build
                     .fire_start(i, value)
-                    .expect("bough engine: the only send of a transaction is not a double send");
+                    .expect("portia engine: the only send of a transaction is not a double send");
                 rt.build.finish();
             }
             rt.collect_if_due();
@@ -507,7 +507,7 @@ impl<M: Mode> Runtime<M> {
             rt.build.begin();
             rt.build
                 .fire_start(i, value)
-                .expect("bough engine: the only send of a transaction is not a double send");
+                .expect("portia engine: the only send of a transaction is not a double send");
             rt.build.finish();
             rt.collect_if_due();
         });
@@ -577,7 +577,7 @@ impl<M: Mode> Runtime<M> {
     /// A chain cannot be listened to:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let events = graph.build(|b| b.input::<u32>().0);
@@ -587,7 +587,7 @@ impl<M: Mode> Runtime<M> {
     /// An affine stream cannot be listened to twice:
     ///
     /// ```compile_fail,E0382
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let events = graph.build(|b| b.input::<u32>().0);
@@ -975,7 +975,7 @@ impl<M: Mode> Runtime<M> {
         let i = self
             .build
             .lookup(cell.token())
-            .expect("bough engine: a unit's cell outlives the unit");
+            .expect("portia engine: a unit's cell outlives the unit");
         f(self.build.value::<C::Value>(i));
     }
 
@@ -1019,8 +1019,8 @@ impl<M: Mode> Runtime<M> {
     /// to keep, then drop the whole:
     ///
     /// ```
-    /// use bough::prelude::*;
-    /// use bough::TokenError;
+    /// use portia::prelude::*;
+    /// use portia::TokenError;
     ///
     /// let mut graph = Runtime::local();
     /// let boundary = graph.build_anchored(|b| {
@@ -1087,7 +1087,7 @@ impl<M: Mode> Runtime<M> {
     /// a send:
     ///
     /// ```compile_fail,E0502
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (numbers_in, latest) = graph.build(|b| {
@@ -1241,10 +1241,10 @@ impl<M: Mode> Runtime<M> {
             match error {
                 PumpError::Stale => self.stale_operation(what, created),
                 PumpError::DoubleSend => {
-                    panic!("bough: a second send to a non-coalescing input in one queued unit")
+                    panic!("portia: a second send to a non-coalescing input in one queued unit")
                 }
-                PumpError::ForeignGraph => panic!("bough: a token from another graph"),
-                PumpError::Poisoned => unreachable!("bough engine: pump checks the poison first"),
+                PumpError::ForeignGraph => panic!("portia: a token from another graph"),
+                PumpError::Poisoned => unreachable!("portia engine: pump checks the poison first"),
             }
         }
     }
@@ -1337,7 +1337,7 @@ impl<M: Mode> Runtime<M> {
                 .build
                 .io
                 .pop()
-                .expect("bough engine: the front call is there to pop");
+                .expect("portia engine: the front call is there to pop");
             call(self, skip_stale)?;
             return Ok(true);
         }
@@ -1359,7 +1359,7 @@ impl<M: Mode> Runtime<M> {
         match self.build.boundary.inbox.pop() {
             Some(RemoteCall::Unit(unit)) => self.run_remote_unit(skip_stale, unit),
             Some(RemoteCall::Register(registration)) => M::register(self, registration, skip_stale),
-            None => unreachable!("bough engine: the front call is there to pop"),
+            None => unreachable!("portia engine: the front call is there to pop"),
         }
     }
 
@@ -1444,7 +1444,7 @@ impl<M: Mode> Runtime<M> {
                 self.build.begin();
                 let fire = self.build.store.ops[i as usize].fire;
                 fire(&mut self.build, i, event)
-                    .expect("bough engine: a slot's event is its transaction's only send");
+                    .expect("portia engine: a slot's event is its transaction's only send");
                 self.build.finish();
                 self.collect_if_due();
             }
@@ -1597,9 +1597,9 @@ impl<M: Mode> Transaction<'_, M> {
         match self.try_send(input, value) {
             Ok(()) => {}
             Err(TransactionSendError::DoubleSend) => {
-                panic!("bough: a second send to a non-coalescing input in one transaction")
+                panic!("portia: a second send to a non-coalescing input in one transaction")
             }
-            Err(TransactionSendError::ForeignGraph) => panic!("bough: a token from another graph"),
+            Err(TransactionSendError::ForeignGraph) => panic!("portia: a token from another graph"),
             Err(TransactionSendError::Stale) => {
                 self.graph.stale_operation(SEND, input.token.created)
             }
@@ -1807,7 +1807,7 @@ impl Drop for Anchor {
 /// across the boundary, but a hold of one doesn't compile:
 ///
 /// ```compile_fail,E0277
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
@@ -1881,7 +1881,7 @@ impl<M: Mode> Drop for Runtime<M> {
         let waiting = waiting + self.build.boundary.inbox.kept_once();
         assert!(
             waiting == 0,
-            "bough: the runtime dropped with {waiting} once-listener(s) kept but never fired. \
+            "portia: the runtime dropped with {waiting} once-listener(s) kept but never fired. \
              Hold the handle of one that may go unheard, or end the runtime with `shutdown`. \
              A release build doesn't check this"
         );
@@ -1917,7 +1917,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// use std::rc::Rc;
 /// use std::thread;
 ///
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let (numbers_in, total) = graph.build(|b| {
@@ -1945,7 +1945,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
 ///
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let shared_in = graph.build(|b| b.input::<Rc<u32>>().1);
@@ -2332,7 +2332,7 @@ impl<M: Mode> Driver for Runtime<M> {
 /// tied to it must be `Send`:
 ///
 /// ```compile_fail,E0277
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 /// use std::rc::Rc;
 ///
 /// let mut graph = Runtime::local();
@@ -2400,7 +2400,7 @@ impl RemoteTransaction<'_> {
         };
         self.runtime
             .register(Box::new(listen))
-            .expect("bough engine: a checked token registers");
+            .expect("portia engine: a checked token registers");
         self.streams.push(flag);
     }
 

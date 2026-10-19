@@ -1,8 +1,8 @@
-# bough-gtk: a spike
+# portia-gtk: a spike
 
 Not API, and not meant to merge. This crate shows what GTK 4 code looks
-like on bough's `Io`, so that the I/O edge can be judged from real
-widgets. The `Io` is on this branch, in `bough/src/io.rs`.
+like on portia's `Io`, so that the I/O edge can be judged from real
+widgets. The `Io` is on this branch, in `portia/src/io.rs`.
 
 ## Why the `Io`
 
@@ -22,7 +22,7 @@ so none of them borrows the runtime.
 
 ## What is here
 
-- `src/lib.rs`: the helpers a `bough-gtk` crate would offer:
+- `src/lib.rs`: the helpers a `portia-gtk` crate would offer:
   - `send` and `sender`, for signal handlers;
   - `bind_label`;
   - `bind_entry`, which blocks its own handler while it writes;
@@ -40,11 +40,11 @@ so none of them borrows the runtime.
 ## Running it
 
 It needs GTK 4.14 or later and its development files, such as
-`libgtk-4-dev` on Ubuntu 24.04. The crate is outside the bough
+`libgtk-4-dev` on Ubuntu 24.04. The crate is outside the portia
 workspace, so the workspace builds without GTK.
 
 ```sh
-cd bough-gtk
+cd portia-gtk
 cargo run --example demo
 xvfb-run -a cargo test   # the scenarios, headless
 ```

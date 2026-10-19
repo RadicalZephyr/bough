@@ -6,8 +6,8 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
-use bough::CollectionPolicy;
-use bough::prelude::*;
+use portia::CollectionPolicy;
+use portia::prelude::*;
 
 /// Everything one run observed: each listener's events in order, the
 /// cells' final values, and the global interleaving of listener calls.

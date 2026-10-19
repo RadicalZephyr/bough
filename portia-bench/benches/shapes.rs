@@ -1,11 +1,11 @@
-//! Wall-clock benchmarks, run by hand with `cargo bench -p bough-bench --bench shapes`.
+//! Wall-clock benchmarks, run by hand with `cargo bench -p portia-bench --bench shapes`.
 //!
 //! The bar is a factor of three against the baseline with a realistic
 //! payload; the trivial-payload numbers are information.
 
 use std::hint::black_box;
 
-use bough_bench::{
+use portia_bench::{
     FanOut, FanOutBaseline, Frame, FrameBaseline, Shallow, ShallowBaseline, payload,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -22,7 +22,7 @@ fn shallow(c: &mut Criterion) {
         ("plain_payload", false, true),
         ("share_payload", true, true),
     ] {
-        group.bench_function(BenchmarkId::new("bough", name), |b| {
+        group.bench_function(BenchmarkId::new("portia", name), |b| {
             let mut shape = Shallow::new(share, heavy);
             let mut k = 0u64;
             b.iter(|| {
@@ -48,7 +48,7 @@ fn shallow(c: &mut Criterion) {
 
 fn frame(c: &mut Criterion) {
     let mut group = c.benchmark_group("frame");
-    group.bench_function("bough", |b| {
+    group.bench_function("portia", |b| {
         let mut shape = Frame::new();
         let mut k = 0u64;
         b.iter(|| {
@@ -71,7 +71,7 @@ fn frame(c: &mut Criterion) {
 
 fn fan_out(c: &mut Criterion) {
     let mut group = c.benchmark_group("fan_out");
-    group.bench_function("bough", |b| {
+    group.bench_function("portia", |b| {
         let mut shape = FanOut::new();
         let mut k = 0u64;
         b.iter(|| {

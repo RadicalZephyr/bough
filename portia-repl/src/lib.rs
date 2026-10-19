@@ -1,6 +1,6 @@
-//! A typed binding REPL over one running Bough graph.
+//! A typed binding REPL over one running Portia graph.
 //!
-//! Its job is to be a probe: can `construct`, Bough's counterpart of
+//! Its job is to be a probe: can `construct`, Portia's counterpart of
 //! Sodium's `execute`, carry live rewiring of a running, strongly typed
 //! graph, and is it ergonomic to do so? The REPL keeps the types on
 //! purpose, so the friction shows. The findings are a note in the RFD

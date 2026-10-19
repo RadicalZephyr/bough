@@ -4,7 +4,7 @@ A throwaway GTK 4 probe for one question in the RFD revision. Say every
 `Io` call waited for the driver's next pump, as a `Remote` call does.
 Would GTK ever paint a widget without its text?
 
-It doesn't use Bough. It emulates the driver instead: one
+It doesn't use Portia. It emulates the driver instead: one
 `glib::spawn_future_local` future holds a queue of closures, and each
 time it's polled it runs the ones queued before that poll. Each scenario
 runs twice. In **control**, the text is written the moment it's known. In

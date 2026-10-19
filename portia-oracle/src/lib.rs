@@ -24,14 +24,14 @@
 //! Every test that needs GHC is in `tests/oracle.rs`, one test binary, and
 //! `cargo test` runs them. They need GHC with the HUnit package: `apt-get
 //! install ghc libghc-hunit-dev`, or GHC through ghcup and then `cabal
-//! install --lib HUnit`. `BOUGH_GHC` names a GHC other than the `ghc` on
+//! install --lib HUnit`. `PORTIA_GHC` names a GHC other than the `ghc` on
 //! the `PATH`.
 //!
 //! Each such test starts from [`for_tests`]. The first call builds
 //! `Oracle.hs` into a directory under `CARGO_TARGET_TMPDIR`, once per
 //! process and under a lock file, and GHC's recompilation check makes a
 //! later build quick. Without GHC every such test panics with the install
-//! hint. With `BOUGH_ORACLE=skip` each says that it skipped and returns
+//! hint. With `PORTIA_ORACLE=skip` each says that it skipped and returns
 //! instead; continuous integration sets it, because GHC does not run there
 //! (RFD 1).
 //!
@@ -79,7 +79,7 @@
 //!
 //! # Two patches to the text
 //!
-//! The text departs from the two principles Bough holds over it (RFD 1),
+//! The text departs from the two principles Portia holds over it (RFD 1),
 //! time order and existence from creation, and the oracle follows the
 //! principles there: F6 departs from both, F7 from time order. Both
 //! patches live in `haskell/Oracle/Derived.hs`, in the derived layer; the

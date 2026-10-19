@@ -63,7 +63,7 @@ pub trait TokenRef: sealed::Sealed {}
 ///
 /// A `Stream` has at most one consumer: every constructor takes it by value,
 /// and using it twice is a compile error. To give it more than one consumer,
-/// [`share`](crate::Source::share) it. A toolkit's event becomes a Bough
+/// [`share`](crate::Source::share) it. A toolkit's event becomes a Portia
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
 /// token `Send` and `Sync` whatever `A` is; a token is three integers and
 /// a `&'static` source location.
@@ -109,7 +109,7 @@ pub struct Cell<A> {
 /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) work on a `State`.
 ///
 /// ```compile_fail,E0599
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let _ = Runtime::local().build(|b| {
 ///     let (names, _names_in) = b.input::<String>();

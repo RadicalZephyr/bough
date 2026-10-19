@@ -72,10 +72,10 @@ impl<M: Mode> BuildContext<M> {
     /// which poisons the graph: the build closure's scope and a construct
     /// closure's each end inside a transaction.
     pub(crate) fn pop_scope(&mut self) {
-        let start = self.s.scopes.pop().expect("bough engine: a scope is open");
+        let start = self.s.scopes.pop().expect("portia engine: a scope is open");
         assert!(
             self.s.open_loops.len() == start,
-            "bough: a loop declared in this scope was never closed"
+            "portia: a loop declared in this scope was never closed"
         );
     }
 
@@ -111,7 +111,7 @@ impl<M: Mode> BuildContext<M> {
         self.refuse_cycle(l, d);
         assert!(
             !(self.has_affine_switch(l) && self.has_affine_switch(d)),
-            "bough: closing this loop gives a cell holding affine streams two switch_streams, \
+            "portia: closing this loop gives a cell holding affine streams two switch_streams, \
              one over the forward and one over the definition. An affine stream has at most \
              one consumer; share the streams to switch to them from several places"
         );
@@ -164,13 +164,13 @@ impl<M: Mode> BuildContext<M> {
     /// Takes a forward's node off the current scope's open loops. A loop
     /// declared in another scope, or already closed, is not there.
     pub(crate) fn close_in_scope(&mut self, forward: u32) {
-        let start = *self.s.scopes.last().expect("bough engine: a scope is open");
+        let start = *self.s.scopes.last().expect("portia engine: a scope is open");
         // The current scope is the innermost, so its loops run to the end
         // of the list and a swap_remove keeps every scope's offset.
         let at = self.s.open_loops[start..]
             .iter()
             .position(|&l| l == forward)
-            .expect("bough: a loop must close in the scope that declared it");
+            .expect("portia: a loop must close in the scope that declared it");
         self.s.open_loops.swap_remove(start + at);
     }
 
@@ -185,7 +185,7 @@ impl<M: Mode> BuildContext<M> {
                     .collect(),
             );
             panic!(
-                "bough: closing this loop makes a same-instant cycle: {cycle}. A definition \
+                "portia: closing this loop makes a same-instant cycle: {cycle}. A definition \
                  may reach its own forward token only through a read of a cell's value \
                  (snapshot, gate, sample), a switch_stream's selection, or a split or defer"
             );
@@ -206,7 +206,7 @@ impl<M: Mode> BuildContext<M> {
                     .collect(),
             );
             panic!(
-                "bough: switching closes a same-instant cycle: {cycle}. The cell a switch \
+                "portia: switching closes a same-instant cycle: {cycle}. The cell a switch \
                  selects may not depend on the switch at the same instant"
             );
         }
@@ -256,7 +256,7 @@ impl<M: Mode> BuildContext<M> {
         *self.store.relations[forward as usize]
             .deps
             .first()
-            .expect("bough: a cell loop sampled before it is closed")
+            .expect("portia: a cell loop sampled before it is closed")
     }
 }
 

@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use bough::prelude::*;
-use bough::{CollectionPolicy, Tracer};
+use portia::prelude::*;
+use portia::{CollectionPolicy, Tracer};
 
 // ----------------------------------------------------------- the smallest core
 

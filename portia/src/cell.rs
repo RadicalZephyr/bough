@@ -28,7 +28,7 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 /// types are the only [`TokenRef`]s.
 ///
 /// ```
-/// use bough::prelude::*;
+/// use portia::prelude::*;
 ///
 /// let mut graph = Runtime::local();
 /// let (joins_in, members) = graph.build(|b| {
@@ -150,7 +150,7 @@ impl<A: 'static> State<A> {
     /// does not exist until commit either, so it has no stream view.
     ///
     /// ```compile_fail,E0599
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let _ = Runtime::local().build(|b| {
     ///     let (names, _names_in) = b.input::<String>();
@@ -179,7 +179,7 @@ impl<A: 'static> Cell<A> {
     /// expression, and a caller that wants to keep a value clones it:
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let _ = graph.build(|b| {
@@ -303,7 +303,7 @@ impl<A: 'static> Cell<Cell<A>> {
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (english_in, choose_in, shown) = graph.build(|b| {
@@ -356,7 +356,7 @@ impl<A: 'static> Cell<State<A>> {
     /// step, and every cell reader accepts it.
     ///
     /// ```
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (names_in, pick_in, current) = graph.build(|b| {
@@ -401,7 +401,7 @@ where
     /// use std::cell::RefCell;
     /// use std::rc::Rc;
     ///
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let mut graph = Runtime::local();
     /// let (keys_in, mouse_in, focus_in, events) = graph.build(|b| {
@@ -454,7 +454,7 @@ where
     /// stream from several places, [`share`](crate::Source::share) it.
     ///
     /// ```should_panic
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     ///
     /// let _ = Runtime::local().build(|b| {
     ///     let (clicks, _clicks_in) = b.input::<u32>();
@@ -469,7 +469,7 @@ where
     /// graph refuses a switch between streams of `Rc`s:
     ///
     /// ```compile_fail,E0277
-    /// use bough::prelude::*;
+    /// use portia::prelude::*;
     /// use std::rc::Rc;
     ///
     /// let _ = Runtime::threaded().build(|b| {

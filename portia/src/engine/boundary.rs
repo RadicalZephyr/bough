@@ -480,8 +480,8 @@ pub(crate) fn fire_input<M: Mode, A: 'static>(
 ) -> Result<(), DoubleSend> {
     let event = event
         .downcast_mut::<Option<A>>()
-        .expect("bough engine: send type")
+        .expect("portia engine: send type")
         .take()
-        .expect("bough engine: a send carries a value");
+        .expect("portia engine: a send carries a value");
     b.fire_start(input, event)
 }

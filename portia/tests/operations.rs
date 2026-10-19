@@ -4,8 +4,8 @@
 use std::cell::Cell as StdCell;
 use std::rc::Rc;
 
-use bough::prelude::*;
-use bough::{Leaf, Tracer};
+use portia::prelude::*;
+use portia::{Leaf, Tracer};
 
 /// A counter a closure can share with the test.
 fn counter() -> (Rc<StdCell<u32>>, Rc<StdCell<u32>>) {

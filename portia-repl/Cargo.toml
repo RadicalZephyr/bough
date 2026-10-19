@@ -1,6 +1,6 @@
 [package]
-name = "bough-repl"
-description = "A typed binding REPL over one running bough graph: a probe of live rewiring through construct."
+name = "portia-repl"
+description = "A typed binding REPL over one running portia graph: a probe of live rewiring through construct."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -10,5 +10,5 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-bough = { workspace = true, features = ["derive"] }
+portia = { workspace = true, features = ["derive"] }
 rustyline.workspace = true

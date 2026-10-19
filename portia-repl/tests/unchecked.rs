@@ -7,9 +7,9 @@ mod common;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use bough::SendError;
-use bough_repl::graph::{Def, Graph};
-use bough_repl::ty::Literal;
+use portia::SendError;
+use portia_repl::graph::{Def, Graph};
+use portia_repl::ty::Literal;
 use common::{apply, define, int_input};
 
 fn panic_message(f: impl FnOnce()) -> String {
