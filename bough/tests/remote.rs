@@ -55,13 +55,13 @@ fn a_remote_is_send_sync_and_clone() {
 type Pair = (Input<u32>, Input<u32>, Stream<u32>);
 
 fn pair() -> (Runtime, Pair) {
-    let (graph, edge) = Runtime::build(|b| {
+    let (graph, boundary) = Runtime::build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left.merge(b, right, |l, r| l * 1000 + r);
         (left_in, right_in, merged)
     });
-    (graph, edge.keep())
+    (graph, boundary.keep())
 }
 
 #[test]
@@ -105,11 +105,11 @@ fn a_remote_transaction_is_one_unit_whose_sends_are_simultaneous() {
 /// function folds them, first send on the left, as in a local transaction.
 #[test]
 fn a_unit_coalesces_what_its_input_coalesces() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (words, words_in) = b.input_coalescing(|a: String, w: String| a + " " + &w);
         (words_in, words.node(b))
     });
-    let (words_in, words) = edge.keep();
+    let (words_in, words) = boundary.keep();
     let seen = log(&mut graph, words);
     graph
         .remote_io()
@@ -127,12 +127,12 @@ fn a_unit_coalesces_what_its_input_coalesces() {
 #[test]
 fn slots_drain_before_units() {
     static SENSOR: InputSlot<u32> = InputSlot::keep_latest();
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &SENSOR, 0);
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let seen = log(&mut graph, numbers);
     let remote = graph.remote_io();
     remote.send(numbers_in, 1).unwrap();
@@ -148,11 +148,11 @@ fn slots_drain_before_units() {
 /// arrival.
 #[test]
 fn a_local_graph_takes_units_from_several_threads() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<(u32, u32)>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let seen = log(&mut graph, numbers);
     let remote = graph.remote_io();
     let senders: Vec<_> = (0..4u32)
@@ -182,11 +182,11 @@ fn a_local_graph_takes_units_from_several_threads() {
 /// has returned.
 #[test]
 fn a_remote_send_never_blocks_on_the_graph() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let remote = graph.remote_io();
     let (sent, has_sent) = mpsc::channel::<()>();
     let start = Arc::new(Barrier::new(2));
@@ -223,11 +223,11 @@ fn a_remote_send_never_blocks_on_the_graph() {
 /// it. The listener runs while the pump holds no lock.
 #[test]
 fn a_remote_send_from_a_listener_is_a_later_transaction() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let remote = graph.remote_io();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
@@ -257,11 +257,11 @@ fn a_remote_send_from_a_listener_is_a_later_transaction() {
 /// there: a remote send from it queues a later unit.
 #[test]
 fn a_remote_transaction_runs_on_the_driver() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let seen = log(&mut graph, numbers);
     let remote = graph.remote_io();
     let (ran_on, ran) = mpsc::channel();
@@ -302,11 +302,11 @@ impl Wake for Counter {
 /// any waker was registered wakes nothing.
 #[test]
 fn a_remote_call_wakes_the_driver_once_per_burst() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, _numbers) = edge.keep();
+    let (numbers_in, _numbers) = boundary.keep();
     let remote = graph.remote_io();
     remote.send(numbers_in, 1).unwrap();
     let counter = Arc::new(Counter::default());
@@ -341,11 +341,11 @@ fn a_remote_call_wakes_the_driver_once_per_burst() {
 /// listener registered before it hears.
 #[test]
 fn calls_through_both_handles_run_in_the_order_they_were_made() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     graph
@@ -375,13 +375,13 @@ fn calls_through_both_handles_run_in_the_order_they_were_made() {
 #[test]
 fn a_remote_call_made_after_the_pump_began_waits_for_the_next_pump() {
     static TICKS: InputSlot<u32> = InputSlot::keep_latest();
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (ticks, ticks_in) = b.input::<u32>();
         b.connect(ticks_in, &TICKS, 0);
         let (echoes, echoes_in) = b.input::<u32>();
         (ticks, echoes_in, echoes.hold(b, 0u32))
     });
-    let (ticks, echoes_in, echoes) = edge.keep();
+    let (ticks, echoes_in, echoes) = boundary.keep();
     let remote = graph.remote_io();
     graph
         .listen(ticks, move |t| remote.send(echoes_in, t).unwrap())
@@ -432,13 +432,13 @@ fn a_double_send_inside_a_unit_drops_the_unit_whole() {
 /// runs on the driver, so its foreign token is found at `pump`.
 #[test]
 fn a_foreign_token_is_refused_when_queued_or_at_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, numbers) = edge.keep();
-    let (_other, edge) = Runtime::build(|b| b.input::<u32>().1);
-    let foreign_in = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
+    let (_other, boundary) = Runtime::build(|b| b.input::<u32>().1);
+    let foreign_in = boundary.keep();
     let seen = log(&mut graph, numbers);
     let remote = graph.remote_io();
     assert_eq!(remote.send(foreign_in, 1), Err(IoError::ForeignGraph));
@@ -470,14 +470,14 @@ fn a_remote_send_to_an_input_collected_before_the_pump_is_stale() {
     // The lost input's token leaves the build closure by a side door, so
     // that the return value does not root it.
     let mut lost = None;
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let _unrooted = numbers.hold(b, 0u32);
         lost = Some(numbers_in);
         let (kept, kept_in) = b.input::<u32>();
         (kept_in, kept.node(b))
     });
-    let (kept_in, kept) = edge.keep();
+    let (kept_in, kept) = boundary.keep();
     let lost_in = lost.unwrap();
     let seen = log(&mut graph, kept);
     let remote = graph.remote_io();
@@ -526,8 +526,8 @@ fn a_dropped_graph_refuses_remote_sends() {
         }
     }
     let drops = Arc::new(AtomicUsize::new(0));
-    let (graph, edge) = Runtime::build(|b| b.input::<Counted>().1);
-    let things_in = edge.keep();
+    let (graph, boundary) = Runtime::build(|b| b.input::<Counted>().1);
+    let things_in = boundary.keep();
     let remote = graph.remote_io();
     remote.send(things_in, Counted(drops.clone())).unwrap();
     drop(graph);
@@ -552,11 +552,11 @@ fn a_dropped_graph_refuses_remote_sends() {
 /// runs, escapes the transaction and poisons the graph, as through `send`.
 #[test]
 fn a_panic_in_a_unit_poisons_the_graph() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
-    let (numbers_in, _numbers) = edge.keep();
+    let (numbers_in, _numbers) = boundary.keep();
     let remote = graph.remote_io();
     remote
         .transaction(move |tx| {
@@ -575,11 +575,11 @@ fn a_panic_in_a_unit_poisons_the_graph() {
 /// that pump is never registered.
 #[test]
 fn a_listener_registered_from_another_thread_runs_on_the_driver() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let remote = graph.remote_io();
     let (heard, hearing) = mpsc::channel();
     let listener = thread::spawn(move || {
@@ -614,11 +614,11 @@ fn a_listener_registered_from_another_thread_runs_on_the_driver() {
 /// then; a remote `listen_steps` makes none.
 #[test]
 fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = edge.keep();
+    let (numbers_in, latest) = boundary.keep();
     let remote = graph.remote_io();
     let (cells, cells_heard) = mpsc::channel();
     let (steps, steps_heard) = mpsc::channel();
@@ -646,11 +646,11 @@ fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
 /// listen, then two sends, from another thread.
 #[test]
 fn a_remote_listen_once_hears_the_first_event_after_the_pump_registers_it() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let remote = graph.remote_io();
     let (heard, hearing) = mpsc::channel();
     thread::spawn(move || {
@@ -677,11 +677,11 @@ fn a_remote_listen_once_hears_the_first_event_after_the_pump_registers_it() {
 /// value then, and never again, into a `Threaded` runtime too.
 #[test]
 fn a_remote_listen_cell_once_fires_at_the_pump_with_the_value_then() {
-    let (mut graph, edge) = Runtime::build_threaded(|b| {
+    let (mut graph, boundary) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = edge.keep();
+    let (numbers_in, latest) = boundary.keep();
     let remote = graph.remote_io();
     let (cells, cells_heard) = mpsc::channel();
     thread::spawn(move || {
@@ -703,13 +703,13 @@ fn a_remote_listen_cell_once_fires_at_the_pump_with_the_value_then() {
 /// pump, and a cell's until the pump.
 #[test]
 fn a_remote_once_listener_is_a_root_until_it_fires() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let tens = numbers.map(|n| n * 10).share(b);
         (numbers_in, (tens, numbers.hold(b, 0u32)))
     });
-    let ((numbers_in, (tens, latest)), edge) = edge.into_parts();
+    let ((numbers_in, (tens, latest)), boundary) = boundary.into_parts();
     let numbers_in = graph.anchor(numbers_in).keep();
     let remote = graph.remote_io();
     let (heard, hearing) = mpsc::channel();
@@ -722,7 +722,7 @@ fn a_remote_once_listener_is_a_root_until_it_fires() {
         .listen_cell_once(latest, move |n| cell_heard.send(*n).unwrap())
         .unwrap()
         .keep();
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     graph.pump();
     assert_eq!(hearing.try_iter().collect::<Vec<_>>(), [0], "at the pump");
@@ -742,12 +742,12 @@ fn a_remote_once_listener_is_a_root_until_it_fires() {
 /// unit is done. Into a `Threaded` runtime too.
 #[test]
 fn a_listener_tied_to_a_remote_unit_hears_its_children_on_the_driver() {
-    let (mut graph, edge) = Runtime::build_threaded(|b| {
+    let (mut graph, boundary) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let later = numbers.defer(b).share(b);
         (numbers_in, later, later.hold(b, 0u32))
     });
-    let (numbers_in, later, latest) = edge.keep();
+    let (numbers_in, later, latest) = boundary.keep();
     let remote = graph.remote_io();
     let (heard, hearing) = mpsc::channel();
     let cell_heard = heard.clone();
@@ -772,11 +772,11 @@ fn a_listener_tied_to_a_remote_unit_hears_its_children_on_the_driver() {
 /// release build.
 #[test]
 fn a_listener_tied_to_a_remote_unit_that_heard_nothing_ends_with_it() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.filter(|n| *n > 5).share(b))
     });
-    let (numbers_in, big) = edge.keep();
+    let (numbers_in, big) = boundary.keep();
     let remote = graph.remote_io();
     let (heard, hearing) = mpsc::channel();
     remote
@@ -819,17 +819,17 @@ fn a_remote_unit_whose_tied_listen_fails_is_dropped_whole() {
 /// the `Anchored` can come back from the thread that asked for it.
 #[test]
 fn a_remote_anchor_keeps_its_value_alive_until_it_drops() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = *edge;
+    let (numbers_in, latest) = *boundary;
     let remote = graph.remote_io();
     let kept = thread::spawn(move || remote.anchor((numbers_in, latest)).unwrap())
         .join()
         .unwrap();
     graph.pump();
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     graph.send(kept.0, 3);
     assert_eq!(*graph.sample(kept.1), 3, "the remote anchor kept both");
@@ -842,13 +842,13 @@ fn a_remote_anchor_keeps_its_value_alive_until_it_drops() {
 /// a stale one is found at the pump.
 #[test]
 fn a_remote_registrations_foreign_token_is_refused_and_a_stale_one_found_at_the_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = *edge;
+    let (numbers_in, latest) = *boundary;
     let _input = graph.anchor(numbers_in);
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     let (_other, other_edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
@@ -869,11 +869,11 @@ fn a_remote_registrations_foreign_token_is_refused_and_a_stale_one_found_at_the_
 /// moves to another thread, and its listener runs there at the pump.
 #[test]
 fn a_threaded_runtime_registers_through_remote_io_and_pumps_elsewhere() {
-    let (mut graph, edge) = Runtime::build_threaded(|b| {
+    let (mut graph, boundary) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
-    let (numbers_in, total) = edge.keep();
+    let (numbers_in, total) = boundary.keep();
     let remote = graph.remote_io();
     let (report, reports) = mpsc::channel();
     remote
@@ -901,7 +901,7 @@ type Row = (Input<u32>, Cell<u32>);
 fn open_a_row(
     mut on_row: impl FnMut(&RemoteIo, Row) + Send + 'static,
 ) -> (Runtime<bough::Threaded>, Row) {
-    let (mut graph, edge) = Runtime::build_threaded(|b| {
+    let (mut graph, boundary) = Runtime::build_threaded(|b| {
         let (open, open_in) = b.input::<u32>();
         let rows = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -909,7 +909,7 @@ fn open_a_row(
         });
         (open_in, rows)
     });
-    let (open_in, rows) = edge.keep();
+    let (open_in, rows) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     let remote = graph.remote_io();
     let seen = Arc::new(Mutex::new(None));

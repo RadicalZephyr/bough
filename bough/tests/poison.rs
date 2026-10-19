@@ -43,7 +43,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     let armed = Rc::new(Cell::new(false));
     let bomb = Bomb(armed.clone());
-    let (mut graph, edge) = Runtime::build(move |b| {
+    let (mut graph, boundary) = Runtime::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers
             .map(|n: u32| {
@@ -54,10 +54,10 @@ fn fixture() -> Fixture {
         let held = checked.hold(b, 0u32);
         (numbers_in, checked, held, b.constant(bomb))
     });
-    let ((numbers_in, checked, held, bomb), edge) = edge.into_parts();
+    let ((numbers_in, checked, held, bomb), boundary) = boundary.into_parts();
     let (numbers_in, held) = graph.anchor((numbers_in, held)).keep();
     let (_, bomb) = graph.anchor(bomb).into_parts();
-    drop(edge);
+    drop(boundary);
     graph
         .listen(checked, |n: u32| assert_ne!(n, 7, "a listener"))
         .keep();
