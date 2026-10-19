@@ -4,16 +4,16 @@
 //! A materializer takes `&mut C` for any [`Builder`] `C`, and asks
 //! [`Stores<T>`] of `C` for each value and closure it keeps. A
 //! [`BuildContext<M>`](crate::BuildContext) stores what its mode [`Accepts`]; a
-//! [`Portable`] stores what is `Send`, whichever builder it borrows. So
+//! [`Portable`] stores what is `Send`, whichever build context it borrows. So
 //! `stream.hold(b, x)` reads the same with all three, and a portable core
 //! can store a closure it writes itself, since the bound names `Portable`,
 //! not the closure.
 //!
 //! The hidden methods are the engine's primitives, each typed by the node
 //! it makes rather than by the mode: a `BuildContext<M>` takes its mode's
-//! functions, and a `Portable` matches on the builder it borrows and takes
-//! that one's. A portable chain is monomorphized once per mode it may run
-//! in, because the node functions stay per mode.
+//! functions, and a `Portable` matches on the build context it borrows
+//! and takes that one's. A portable chain is monomorphized once per mode it
+//! may run in, because the node functions stay per mode.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -42,7 +42,7 @@ pub(crate) mod sealed {
 }
 
 /// A node type with functions for every mode the target has, so a builder
-/// that is not one mode can take whichever the context it borrows needs.
+/// that is not one mode can take whichever the build context it borrows needs.
 #[doc(hidden)]
 #[cfg(target_has_atomic = "ptr")]
 pub trait AllOps: NodeOps<Local> + NodeOps<Threaded> {}
@@ -103,9 +103,9 @@ impl<E> Plane<E> {
 }
 
 /// What every node-creating operation takes: a [`BuildContext`] of either mode,
-/// or a [`Portable`] view of one. Sealed.
+/// or a [`Portable`] lent by one. Sealed.
 ///
-/// Its public methods are the build context's own operations, `input`,
+/// Its public methods are the builder's own operations, `input`,
 /// `constant`, the loops, `depends` and `anchor`, defined once here for
 /// every builder; the rest are hidden. [`prelude`](crate::prelude) brings
 /// it into scope.
@@ -688,8 +688,9 @@ impl<M: Mode> Builder for BuildContext<M> {
     }
 }
 
-/// The builder a mode-agnostic core is written against: a view of a
-/// `BuildContext<Local>` or a `BuildContext<Threaded>` that stores only what is `Send`.
+/// The builder a core is written against, so that it builds under both
+/// modes: it borrows a `BuildContext<Local>` or a `BuildContext<Threaded>`,
+/// and stores only what is `Send`.
 ///
 /// A core takes `&mut Portable<'_>`, which has no type parameter, so a
 /// closure it writes itself needs no bound to name it: the compiler checks
@@ -762,16 +763,16 @@ pub struct Portable<'a> {
     arm: Arm<'a>,
 }
 
-/// The builder a `Portable` borrows.
+/// The build context a `Portable` borrows.
 enum Arm<'a> {
     Local(&'a mut BuildContext<Local>),
     #[cfg(target_has_atomic = "ptr")]
     Threaded(&'a mut BuildContext<Threaded>),
 }
 
-/// Runs `$e` with `$b` bound to the borrowed builder, whichever mode it is,
-/// and `$into` to the function that takes a `Portable`'s erased value into
-/// that builder's carrier.
+/// Runs `$e` with `$b` bound to the borrowed build context, whichever mode
+/// it is, and `$into` to the function that takes a `Portable`'s erased
+/// value into that build context's carrier.
 macro_rules! dispatch {
     ($self:expr, |$b:ident, $into:ident| $e:expr) => {
         match $self {
@@ -809,9 +810,9 @@ fn parts_into<C>(
 }
 
 impl BuildContext<Local> {
-    /// A [`Portable`] view of this builder, for a core that runs in both
-    /// modes. It stores only what is `Send`; the graph it builds is this
-    /// one, so its tokens and this builder's mix freely.
+    /// A [`Portable`] that borrows this build context, for a core that runs
+    /// in both modes. It stores only what is `Send`; the graph it builds is
+    /// this one, so its tokens and this build context's mix freely.
     pub fn portable(&mut self) -> Portable<'_> {
         Portable {
             arm: Arm::Local(self),
@@ -821,8 +822,8 @@ impl BuildContext<Local> {
 
 #[cfg(target_has_atomic = "ptr")]
 impl BuildContext<Threaded> {
-    /// A [`Portable`] view of this builder, for a core that runs in both
-    /// modes.
+    /// A [`Portable`] that borrows this build context, for a core that runs
+    /// in both modes.
     pub fn portable(&mut self) -> Portable<'_> {
         Portable {
             arm: Arm::Threaded(self),

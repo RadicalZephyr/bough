@@ -1,6 +1,6 @@
 //! `construct` (RFD 2), the semantics' `Execute`: a closure that runs at
 //! each event of a stream, in the middle of that event's transaction, with
-//! the build context, so that logic is added after build.
+//! a builder, so that logic is added after build.
 //!
 //! The expected values are GHC's. The program is
 //! `bough-oracle/haskell/probes/stage6/Stage6.hs`, which runs each test's program over an unchanged

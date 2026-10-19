@@ -40,13 +40,14 @@ fn next_graph_id() -> u32 {
     id
 }
 
-/// The context every node-creating operation requires.
+/// The engine's own builder, for a runtime in mode `M`: it stores
+/// whatever that mode accepts.
 ///
 /// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
 /// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///
-/// It is the engine's core itself: a `Runtime` owns one, and the build closure
+/// It holds the whole graph: a `Runtime` owns one, and the build closure
 /// borrows it. So it has no lifetime parameter and no public constructor.
 pub struct BuildContext<M: Mode = Local> {
     pub(crate) graph_id: u32,

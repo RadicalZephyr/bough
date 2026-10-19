@@ -2,10 +2,11 @@
 //!
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
-//! node-creating operation needs a [`BuildContext`], which only exists
-//! inside [`Runtime::build`] and inside [`Source::construct`] closures; sending,
-//! listening and sampling from outside live on [`Runtime`], which only exists
-//! once the build closure has returned. The design is recorded in the RFDs
+//! node-creating operation needs a [`Builder`]: a [`BuildContext`], which
+//! only exists inside [`Runtime::build`] and inside [`Source::construct`]
+//! closures, or the [`Portable`] one lends; sending, listening and sampling
+//! from outside live on [`Runtime`], which only exists once the build
+//! closure has returned. The design is recorded in the RFDs
 //! at <https://github.com/bough-frp/rfd>.
 //!
 //! # Status
@@ -28,8 +29,8 @@
 //! returns. Stage 5 adds the switches, `switch_cell`, over cells and over
 //! states, and `switch_stream`, whose selection is not a dependency; each
 //! follows the inner its outer selects and moves at commit. Stage 6 adds
-//! [`construct`](Source::construct), which runs a closure with the build
-//! context at each event of a stream, in the middle of its transaction:
+//! [`construct`](Source::construct), which runs a closure with a builder
+//! at each event of a stream, in the middle of its transaction:
 //! what the closure builds exists from that instant on, and each run is a
 //! scope that must close the loops it declares. Stage 7 adds collection
 //! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or

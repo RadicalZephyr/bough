@@ -174,7 +174,7 @@ impl<A: 'static> Cell<A> {
     /// The value the cell has at the start of the current transaction, or its
     /// current value between transactions.
     ///
-    /// The context is borrowed shared, so several samples compose in one
+    /// The builder is borrowed shared, so several samples compose in one
     /// expression, and a caller that wants to keep a value clones it:
     ///
     /// ```

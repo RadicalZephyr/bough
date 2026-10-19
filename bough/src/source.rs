@@ -1,8 +1,8 @@
 //! Streams as chains and nodes (RFD 4).
 //!
-//! Adapters transform events and take no context; each returns its adapter
+//! Adapters transform events and take no builder; each returns its adapter
 //! type, which is itself a [`Source`]. A chain is a sequence of
-//! adapters with no materializer. Materializers take the build context and
+//! adapters with no materializer. Materializers take a builder and
 //! create exactly one node from a chain, fusing its adapters into that
 //! node's closure. A chain is affine: it is consumed by the first
 //! materializer, and using it twice is a compile error.
@@ -14,7 +14,7 @@
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (limit, _limit_in) = b.input_cell(10u32);
 //!     numbers
-//!         .map(|n| n * 2)                 // an adapter: no node, no context
+//!         .map(|n| n * 2)                 // an adapter: no node, no builder
 //!         .filter(|n| *n > 2)             // another adapter
 //!         .snapshot(limit, |n, l| n.min(*l))
 //!         .hold(b, 0u32)                  // one node for the whole chain
@@ -102,7 +102,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     #[doc(hidden)]
     fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<Self::Event>;
 
-    // ----- adapters: no node, no context -----
+    // ----- adapters: no node, no builder -----
 
     /// Transforms each event, taking it by value.
     fn map<B, F>(self, f: F) -> Map<Self, F>
@@ -197,7 +197,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         }
     }
 
-    // ----- materializers: one node, build context -----
+    // ----- materializers: one node, a builder -----
 
     /// A cell that holds the latest event, starting at `initial`.
     ///
@@ -610,8 +610,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Stream::from_token(build.token_of(output))
     }
 
-    /// The semantics' `Execute`: runs `f` at each event with a fresh
-    /// build context, so graph can be constructed at runtime. Its results
+    /// The semantics' `Execute`: runs `f` at each event with a builder of
+    /// the kind `build` is, so graph can be constructed during a
+    /// transaction. Its results
     /// are ordinary events: tokens on their way to a hold and a
     /// [`Cell::switch_stream`] or [`Cell::switch_cell`], or plain values.
     ///

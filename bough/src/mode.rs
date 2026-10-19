@@ -12,7 +12,7 @@
 //! carrier: `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
 //! Exactly three functions build a carrier: [`Accepts::erase`], whose
 //! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send` and the
-//! erasure of a [`Portable`](crate::Portable) view, which require `T: Send`
+//! erasure of a [`Portable`](crate::Portable), which require `T: Send`
 //! themselves; a `Portable`'s `Send` box becomes a `Local` carrier by
 //! forgetting it is `Send`. So `Runtime<Threaded>: Send` is derived by the
 //! compiler from the field types, with no `unsafe impl`, and a materializer
@@ -94,7 +94,7 @@ pub trait Mode: sealed::Sealed + Sized + 'static {
     #[doc(hidden)]
     fn ops_of<N: AllOps>() -> &'static Ops<Self>;
 
-    /// A [`Portable`] view of a builder of this mode, for a portable
+    /// A [`Portable`] borrowing a build context of this mode, for a portable
     /// core's `construct` closure.
     #[doc(hidden)]
     fn portable(build: &mut BuildContext<Self>) -> Portable<'_>;

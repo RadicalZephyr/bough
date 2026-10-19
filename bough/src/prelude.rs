@@ -21,7 +21,7 @@
 //! Errors, I/O handles and adapter types stay at the crate root.
 //!
 //! A `Builder` of your own shadows the glob-imported name, but the build
-//! context's methods stay in scope:
+//! builder's methods stay in scope:
 //!
 //! ```
 //! use bough::prelude::*;
