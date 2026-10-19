@@ -373,7 +373,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// in terms of itself at that instant. The panic names the nodes of the
     /// cycle.
     ///
-    /// A loop must close in the scope that declared it: the build closure,
+    /// A loop must close in the scope that declared it: a build closure,
     /// or one run of a `construct` closure. A loop still open when that
     /// scope ends is a panic there, and so is sampling the forward token
     /// before the loop is closed, since there is no value to return. A
@@ -460,8 +460,8 @@ pub trait Builder: sealed::Sealed + Sized {
     /// heterogeneous, and takes references, so an affine stream is not
     /// consumed.
     ///
-    /// A node is alive while a root reaches it: the build closure's return
-    /// value, a live listener, or a live [`Anchor`](crate::Anchor). What a
+    /// A node is alive while a root reaches it: what a build returned, a
+    /// live listener, or a live [`Anchor`](crate::Anchor). What a
     /// node reaches is what it depends on, the tokens in a stateful cell's
     /// committed value and in its chain, and what this declares. A closure
     /// is the one thing the collector cannot look inside, so every value a

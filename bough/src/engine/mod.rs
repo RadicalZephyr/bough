@@ -64,8 +64,9 @@ pub(crate) use tx::DoubleSend;
 
 /// A transaction serial: one per instant, child instants included, so a
 /// stamp equal to the current serial means "in this instant". `u64`, so it
-/// never wraps and needs no renormalization. Serial 0 is "never"; the build
-/// closure, transaction zero, runs as serial 1.
+/// never wraps and needs no renormalization. Serial 0 is "never"; the first
+/// build, transaction zero, runs as serial 1, and a later build takes the
+/// next serial, as a send does.
 pub(crate) type Tx = u64;
 
 /// The no-op node at index 0. A node pulled out of order has its order

@@ -59,8 +59,10 @@ use crate::source::Node;
 use crate::token::{Input, Token};
 use crate::trace::{Trace, Tracer};
 
-/// A built graph: the only place transactions run, and the only holder of
-/// the I/O API.
+/// A graph: the only place transactions run, and the only holder of the
+/// I/O API. It is made empty, with [`local`](Runtime::local) or
+/// [`threaded`](Runtime::threaded), and [`build`](Runtime::build) adds
+/// to it, the first time and between any two transactions after.
 ///
 /// The graph is entered from exactly one place at a time. Graph code never
 /// holds a `Runtime`; every public entry point checks the
@@ -80,8 +82,10 @@ use crate::trace::{Trace, Tracer};
 /// reaches it (RFD 3). There are two kinds of root: a live guard, a
 /// [`Listener`] or an [`Anchor`], which an [`Anchored`] holds; and a
 /// registration waiting in a handle's queue, which keeps the tokens it
-/// names until the pump runs it. What the build closure returned comes back anchored, like
-/// anything else.
+/// names until the pump runs it. What [`build`](Runtime::build) returns is
+/// rooted for the runtime's life; what
+/// [`build_anchored`](Runtime::build_anchored) returns comes back anchored,
+/// like anything else.
 /// A node reaches what it depends on, the tokens in a stateful cell's
 /// committed value (found through [`Trace`]), a switch's current inner,
 /// the cells a chain snapshots or gates on, and what
@@ -1002,8 +1006,9 @@ impl<M: Mode> Runtime<M> {
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
     ///
-    /// The build's boundary is anchored as a whole. To let part of it go and
-    /// keep the rest, anchor the part to keep, then drop the boundary:
+    /// What [`build_anchored`](Runtime::build_anchored) returns is anchored
+    /// as a whole. To let part of it go and keep the rest, anchor the part
+    /// to keep, then drop the whole:
     ///
     /// ```
     /// use bough::prelude::*;

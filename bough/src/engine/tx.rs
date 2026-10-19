@@ -306,7 +306,7 @@ impl<M: Mode> BuildContext<M> {
     /// runs once, after its dependencies, by memoized pull, never in
     /// creation order, since a loop's forward is created before its
     /// definition. The list grows while it is walked when a construct in it
-    /// fires. Transaction zero has no started nodes, so this phase runs
+    /// fires. A build's transaction has no started nodes, so this phase runs
     /// everything the build closure created.
     fn new_nodes(&mut self) {
         let mut j = 0;

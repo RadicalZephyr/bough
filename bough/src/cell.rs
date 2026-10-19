@@ -246,8 +246,8 @@ impl<A: Clone + 'static> Cell<A> {
     /// with the same warning. From I/O code,
     /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) is the same view.
     ///
-    /// Built in the build closure, it fires in transaction zero, so a hold
-    /// built there over it starts the graph at the cell's value. A creation
+    /// Built in a build closure, it fires in the build's transaction, so a
+    /// hold built there over it starts at the cell's value. A creation
     /// and a step in one instant are one event, carrying the value after
     /// the step.
     pub fn steps_with_current<C>(self, builder: &mut C) -> Stream<A>

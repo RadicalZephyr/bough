@@ -3,10 +3,11 @@
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
 //! node-creating operation needs a [`Builder`]: a [`BuildContext`], which
-//! only exists inside [`Runtime::build`] and inside [`Source::construct`]
-//! closures, or the [`Portable`] one lends; sending, listening and sampling
-//! from outside live on [`Runtime`], which only exists once the build
-//! closure has returned. The design is recorded in the RFDs
+//! only exists inside a [`Runtime::build`] closure and inside
+//! [`Source::construct`] closures, or the [`Portable`] one lends; sending,
+//! listening and sampling from outside live on [`Runtime`], which is made
+//! empty, with [`Runtime::local`] or [`Runtime::threaded`], and built on
+//! between transactions. The design is recorded in the RFDs
 //! at <https://github.com/bough-frp/rfd>.
 //!
 //! # Status
@@ -35,11 +36,13 @@
 //! scope that must close the loops it declares. Stage 7 adds collection
 //! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
 //! [`Anchor`], or a registration waiting in a handle's queue, and
-//! [`Runtime::build`] anchors what its closure returns; what it reaches is
-//! its dependencies, the tokens [`Trace`] finds in a stateful cell's
-//! value, and what [`Builder::depends`] declares; and collection, automatic
-//! by default and never inside a transaction, frees the rest, so that a
-//! stale token is an error. Stage 8 adds the I/O boundary (RFD 6, RFD 7): an
+//! [`Runtime::build`] roots what its closure returns for the runtime's
+//! life, or [`Runtime::build_anchored`] until the [`Anchored`] it returns
+//! drops; what a node reaches is its dependencies, the tokens [`Trace`]
+//! finds in a stateful cell's value, and what [`Builder::depends`]
+//! declares; and collection, automatic by default and never inside a
+//! transaction, frees the rest, so that a stale token is an error. Stage 8
+//! adds the I/O boundary (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, higher priority first; two handles queue calls, an [`Io`] on the
@@ -82,8 +85,8 @@
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
-//!     (clicks_in, label) // whatever build returns is the boundary, anchored
-//! }); // kept for the graph's life
+//!     (clicks_in, label) // whatever build returns is rooted for the runtime's life
+//! });
 //!
 //! let shown = Rc::new(RefCell::new(Vec::new()));
 //! let _listener = graph.listen_cell(label, {
