@@ -116,8 +116,8 @@ struct Screen {
 }
 ```
 
-A `Trace` type can't hold an `Anchored`, the guard a row takes to the
-edge, even in a skipped field; that's the common way to hide one. The
+A `Trace` type can't hold an `Anchored`, the guard a row takes across the
+boundary, even in a skipped field; that's the common way to hide one. The
 derive goes by name, since it can't see types, so a type alias or a type
 parameter gets past it:
 

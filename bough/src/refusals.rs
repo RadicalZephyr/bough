@@ -17,7 +17,7 @@
 //! materializer. A listener's event is refused where its stream was made,
 //! so the listener examples are captures.
 //!
-//! The build's return value, which the graph keeps as its edge:
+//! The build's return value, which the graph keeps as its boundary:
 //!
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;

@@ -272,7 +272,7 @@ macro_rules! smoke_graph {
     }};
 }
 
-/// Stage 8, the I/O edge, in one mode: a slot connected to an input and a
+/// Stage 8, the I/O boundary, in one mode: a slot connected to an input and a
 /// burst folded into one event, a pump and a waker; and where the target
 /// has a `RemoteIo`, remote sends and remote transactions, pumped after
 /// the slot. Each expansion has a slot of its own.

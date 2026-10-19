@@ -147,10 +147,10 @@ fn build_graph<M: Mode, R: Trace>(
 
 impl Runtime<Local> {
     /// Builds a `Local` graph. The closure gets the only [`BuildContext`];
-    /// whatever it returns is the edge of the graph, which comes back
+    /// whatever it returns is the graph's boundary, which comes back
     /// [`Anchored`], so `R: Trace`. [`keep`](Anchored::keep) it to hold the
-    /// edge for the graph's life, or drop it to let collection free what
-    /// only the edge reached.
+    /// boundary for the graph's life, or drop it to let collection free what
+    /// only the boundary reached.
     ///
     /// The build closure runs as transaction zero. Its child transactions,
     /// which a [`split`](crate::Source::split) or a
@@ -379,7 +379,7 @@ impl<M: Mode> Runtime<M> {
     /// guards released since the last collection exceed the live count it
     /// left, and always under the stress setting. After the unit rather than
     /// before the next one, so that what a unit made and nothing anchored is
-    /// gone by the time I/O code sees it (RFD 3: anchor it at the edge).
+    /// gone by the time I/O code sees it (RFD 3: anchor it at the boundary).
     pub(crate) fn collect_if_due(&mut self) {
         let due = self.stress
             || (self.policy == CollectionPolicy::Automatic
@@ -961,8 +961,8 @@ impl<M: Mode> Runtime<M> {
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
     ///
-    /// The build's edge is anchored as a whole. To let part of it go and keep
-    /// the rest, anchor the part to keep, then drop the edge:
+    /// The build's boundary is anchored as a whole. To let part of it go and
+    /// keep the rest, anchor the part to keep, then drop the boundary:
     ///
     /// ```
     /// use bough::prelude::*;
@@ -976,7 +976,7 @@ impl<M: Mode> Runtime<M> {
     /// let (n_in, latest, doubled) = *edge;
     /// let _kept = graph.anchor((n_in, latest)); // the part to keep
     /// drop(edge);
-    /// graph.collect_garbage(); // what only the edge reached goes
+    /// graph.collect_garbage(); // what only the boundary reached goes
     /// graph.send(n_in, 1);
     /// assert_eq!(*graph.sample(latest), 1);
     /// assert_eq!(graph.try_sample(doubled).err(), Some(TokenError::Stale));
@@ -1746,8 +1746,8 @@ impl Drop for Anchor {
 /// and returns the value.
 ///
 /// It isn't [`Trace`], so graph state can't hold one: a root inside graph
-/// state could keep itself alive through a cycle. A stream can carry one to
-/// the edge, but a hold of one doesn't compile:
+/// state could keep itself alive through a cycle. A stream can carry one
+/// across the boundary, but a hold of one doesn't compile:
 ///
 /// ```compile_fail,E0277
 /// use bough::prelude::*;

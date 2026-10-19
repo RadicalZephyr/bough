@@ -38,7 +38,7 @@
 //! its dependencies, the tokens [`Trace`] finds in a stateful cell's
 //! value, and what [`Builder::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a
-//! stale token is an error. Stage 8 adds the I/O edge (RFD 6, RFD 7): an
+//! stale token is an error. Stage 8 adds the I/O boundary (RFD 6, RFD 7): an
 //! [`InputSlot`] holds one pending event folded in place, and
 //! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
 //! own, higher priority first; two handles queue calls, an [`Io`] on the
@@ -80,7 +80,7 @@
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
-//!     (clicks_in, label) // whatever build returns is the edge, anchored
+//!     (clicks_in, label) // whatever build returns is the boundary, anchored
 //! });
 //! let (clicks_in, label) = edge.keep(); // kept for the graph's life
 //!

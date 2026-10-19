@@ -222,7 +222,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
     /// [`Anchored`] it returns carries the value, and roots every token its
     /// [`Trace`] finds until the last of its clones drops. A construct that
-    /// returns one sends its row to the edge already rooted, so the I/O code
+    /// returns one sends its row across the boundary already rooted, so the I/O code
     /// that receives it needn't anchor it.
     ///
     /// ```

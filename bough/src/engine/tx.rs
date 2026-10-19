@@ -183,8 +183,8 @@ impl<M: Mode> BuildContext<M> {
     }
 
     /// The phases of one instant, a transaction or a child transaction,
-    /// after its started nodes fired. The edge's guard is armed while graph
-    /// code runs, evaluation and commit, and disarmed before the listeners
+    /// after its started nodes fired. The graph code re-entrancy check is armed while
+    /// graph code runs, evaluation and commit, and disarmed before the listeners
     /// (RFD 6); the sends before the instant are I/O code.
     pub(super) fn instant(&mut self) {
         count!(self.s, transactions);
@@ -370,7 +370,7 @@ impl<M: Mode> BuildContext<M> {
     /// so that the outcome does not depend on the order the switches were
     /// queued in, which the shuffle moves: every switch moves first, and
     /// then each move is checked on the graph they made together. A check
-    /// after each move could see a cycle through an edge that a later move
+    /// after each move could see a cycle through a dependency that a later move
     /// of the same instant removes.
     fn relink(&mut self) {
         let mut moved = 0;

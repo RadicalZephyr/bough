@@ -631,7 +631,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// so `f` anchors what it sends out with
     /// [`Builder::anchor`](crate::Builder::anchor). Since a listener has no graph
     /// access, I/O code attaches listeners and sends to the input after
-    /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the edge.
+    /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the boundary.
     ///
     /// ```
     /// use std::cell::RefCell;
