@@ -43,23 +43,23 @@ fn log<A: Clone + 'static>(graph: &mut Runtime, stream: Stream<A>) -> Rc<RefCell
 type Pair = (Input<u32>, Input<u32>, Stream<u32>);
 
 fn pair() -> (Runtime, Pair) {
-    let (graph, edge) = Runtime::build(|b| {
+    let (graph, boundary) = Runtime::build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left.merge(b, right, |l, r| l * 1000 + r);
         (left_in, right_in, merged)
     });
-    (graph, edge.keep())
+    (graph, boundary.keep())
 }
 
 /// Test 1.
 #[test]
 fn a_call_waits_for_the_next_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = edge.keep();
+    let (numbers_in, latest) = boundary.keep();
     let io = graph.io();
     io.send(numbers_in, 1).unwrap();
     assert_eq!(*graph.sample(latest), 0, "a call only queues");
@@ -73,12 +73,12 @@ fn a_call_waits_for_the_next_pump() {
 /// listener that always sends, so the pump returns.
 #[test]
 fn a_call_a_listener_makes_during_a_pump_waits_for_the_next_one() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
     });
-    let (numbers_in, numbers, latest) = edge.keep();
+    let (numbers_in, numbers, latest) = boundary.keep();
     let io = graph.io();
     let feedback = io.clone();
     graph
@@ -96,13 +96,13 @@ fn a_call_a_listener_makes_during_a_pump_waits_for_the_next_one() {
 #[cfg(feature = "std")]
 #[test]
 fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (first, first_in) = b.input::<u32>();
         let (second, second_in) = b.input::<u32>();
         let first = first.share(b);
         (first_in, second_in, first, second.hold(b, 0u32))
     });
-    let (first_in, second_in, first, second) = edge.keep();
+    let (first_in, second_in, first, second) = boundary.keep();
     let io = graph.io();
     graph
         .listen(first, move |n| io.send(second_in, n).unwrap())
@@ -118,11 +118,11 @@ fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
 /// second send.
 #[test]
 fn calls_run_in_the_order_they_were_made() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let sink = heard.clone();
@@ -148,12 +148,12 @@ fn calls_run_in_the_order_they_were_made() {
 /// looked up.
 #[test]
 fn dropping_a_guard_before_the_pump_cancels_its_registration() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
     });
-    let (numbers_in, numbers, latest) = *edge;
+    let (numbers_in, numbers, latest) = *boundary;
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let sink = heard.clone();
@@ -172,7 +172,7 @@ fn dropping_a_guard_before_the_pump_cancels_its_registration() {
     graph.send(numbers_in, 1);
     assert!(heard.borrow().is_empty(), "the registration never ran");
     let _kept = graph.anchor(numbers_in);
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     assert_eq!(graph.try_sample(latest).err(), Some(TokenError::Stale));
 
@@ -185,11 +185,11 @@ fn dropping_a_guard_before_the_pump_cancels_its_registration() {
 /// `listen_steps` makes none.
 #[test]
 fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = edge.keep();
+    let (numbers_in, latest) = boundary.keep();
     let io = graph.io();
     let cells = Rc::new(RefCell::new(Vec::new()));
     let steps = Rc::new(RefCell::new(Vec::new()));
@@ -215,11 +215,11 @@ fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
 /// the listen, then two sends.
 #[test]
 fn a_queued_listen_once_hears_the_first_event_after_the_pump_registers_it() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = edge.keep();
+    let (numbers_in, numbers) = boundary.keep();
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let sink = heard.clone();
@@ -238,12 +238,12 @@ fn a_queued_listen_once_hears_the_first_event_after_the_pump_registers_it() {
 /// it, as for any registration.
 #[test]
 fn a_queued_listen_cell_once_fires_at_the_pump_with_the_value_then() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
     });
-    let (numbers_in, numbers, latest) = edge.keep();
+    let (numbers_in, numbers, latest) = boundary.keep();
     let io = graph.io();
     let cells = Rc::new(RefCell::new(Vec::new()));
     let sink = cells.clone();
@@ -270,13 +270,13 @@ fn a_queued_listen_cell_once_fires_at_the_pump_with_the_value_then() {
 /// cell's until the pump.
 #[test]
 fn a_queued_once_listener_is_a_root_until_it_fires() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let tens = numbers.map(|n| n * 10).share(b);
         (numbers_in, (tens, numbers.hold(b, 0u32)))
     });
-    let ((numbers_in, (tens, latest)), edge) = edge.into_parts();
+    let ((numbers_in, (tens, latest)), boundary) = boundary.into_parts();
     let numbers_in = graph.anchor(numbers_in).keep();
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
@@ -287,7 +287,7 @@ fn a_queued_once_listener_is_a_root_until_it_fires() {
     io.listen_cell_once(latest, move |n| cell_sink.borrow_mut().push(*n))
         .unwrap()
         .keep();
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     graph.pump();
     assert_eq!(*heard.borrow(), [0], "the cell's value, at the pump");
@@ -308,7 +308,7 @@ fn a_queued_once_listener_is_a_root_until_it_fires() {
 /// them ends with a collection.
 #[test]
 fn the_automatic_policy_counts_a_queued_cell_once_released_at_the_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let cells: Vec<Cell<u32>> = (0..4)
@@ -316,13 +316,13 @@ fn the_automatic_policy_counts_a_queued_cell_once_released_at_the_pump() {
             .collect();
         (n_in, cells)
     });
-    let ((n_in, cells), edge) = edge.into_parts();
+    let ((n_in, cells), boundary) = boundary.into_parts();
     let n_in = graph.anchor(n_in).keep();
     let io = graph.io();
     for k in 0..7 {
         io.listen_cell_once(cells[k % 4], |_| ()).unwrap().keep();
     }
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage(); // count from here; the waiting calls root the cells
     assert_eq!(graph.live_nodes(), 6);
     io.send(n_in, 1).unwrap();
@@ -334,16 +334,16 @@ fn the_automatic_policy_counts_a_queued_cell_once_released_at_the_pump() {
 /// drops, and the `Anchored` carries the value from the start.
 #[test]
 fn a_queued_anchor_keeps_its_value_alive_until_it_drops() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = *edge;
+    let (numbers_in, latest) = *boundary;
     let io = graph.io();
     let kept = io.anchor((numbers_in, latest)).unwrap();
     assert_eq!(*kept, (numbers_in, latest));
     graph.pump();
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     graph.send(kept.0, 3);
     assert_eq!(*graph.sample(kept.1), 3, "the Io's anchor kept both");
@@ -358,15 +358,15 @@ fn a_queued_anchor_keeps_its_value_alive_until_it_drops() {
 /// for, where a release build counts it.
 #[test]
 fn a_queued_registration_with_a_stale_token_is_found_at_the_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
     });
-    let (numbers_in, numbers, latest) = *edge;
+    let (numbers_in, numbers, latest) = *boundary;
     let _input = graph.anchor(numbers_in);
     let shared = graph.anchor(numbers);
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     let io = graph.io();
 
@@ -397,7 +397,7 @@ type Row = (Input<u32>, Cell<u32>);
 /// returns it once its unit has run. The runtime collects after every
 /// transaction, so a row nothing keeps is gone by then.
 fn open_a_row(mut on_row: impl FnMut(&Io, Row) + 'static) -> (Runtime, Row) {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (open, open_in) = b.input::<u32>();
         let rows = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -405,7 +405,7 @@ fn open_a_row(mut on_row: impl FnMut(&Io, Row) + 'static) -> (Runtime, Row) {
         });
         (open_in, rows)
     });
-    let (open_in, rows) = edge.keep();
+    let (open_in, rows) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     let io = graph.io();
     let seen = Rc::new(RefCell::new(None));
@@ -518,12 +518,12 @@ fn a_queued_transactions_sends_are_simultaneous() {
 /// an `Rc`.
 #[test]
 fn a_listener_tied_to_a_queued_unit_hears_its_children_and_needn_t_be_send() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let later = numbers.defer(b).share(b);
         (numbers_in, later, later.hold(b, 0u32))
     });
-    let (numbers_in, later, latest) = edge.keep();
+    let (numbers_in, later, latest) = boundary.keep();
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let (stream_sink, cell_sink) = (heard.clone(), heard.clone());
@@ -547,11 +547,11 @@ fn a_listener_tied_to_a_queued_unit_hears_its_children_and_needn_t_be_send() {
 /// way it ends with its unit, and the pump stays usable.
 #[test]
 fn a_listener_tied_to_a_queued_unit_that_heard_nothing_ends_with_it() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.filter(|n| *n > 5).share(b))
     });
-    let (numbers_in, big) = edge.keep();
+    let (numbers_in, big) = boundary.keep();
     let io = graph.io();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let sink = heard.clone();
@@ -593,13 +593,13 @@ fn a_dropped_unit_takes_its_tied_listeners_and_a_stale_one_drops_it() {
     graph.pump();
     assert!(heard.borrow().is_empty(), "nothing of the unit ran");
 
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
-    let (numbers_in, numbers) = *edge;
+    let (numbers_in, numbers) = *boundary;
     let _input = graph.anchor(numbers_in);
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     let io = graph.io();
     io.transaction(move |tx| tx.listen_once(numbers, |_| ()))
@@ -650,14 +650,14 @@ fn a_queued_unit_whose_send_fails_is_dropped_whole() {
 /// build counts it.
 #[test]
 fn a_stale_token_is_found_at_the_pump() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (kept, kept_in) = b.input::<u32>();
         let (_lost, lost_in) = b.input::<u32>();
         (kept_in, lost_in, kept.hold(b, 0u32))
     });
-    let (kept_in, lost_in, latest) = *edge;
+    let (kept_in, lost_in, latest) = *boundary;
     let _kept = graph.anchor((kept_in, latest));
-    drop(edge);
+    drop(boundary);
     graph.collect_garbage();
     let io = graph.io();
 
@@ -683,8 +683,8 @@ fn a_stale_token_is_found_at_the_pump() {
 /// both builds.
 #[test]
 fn a_foreign_token_is_refused_when_queued_or_found_at_the_pump() {
-    let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().1);
-    let _numbers_in = edge.keep();
+    let (mut graph, boundary) = Runtime::build(|b| b.input::<u32>().1);
+    let _numbers_in = boundary.keep();
     let (_other, other_edge) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
@@ -714,7 +714,7 @@ fn a_foreign_token_is_refused_when_queued_or_found_at_the_pump() {
 fn a_call_from_graph_code_is_refused() {
     let io_cell: Rc<RefCell<Option<Io>>> = Rc::new(RefCell::new(None));
     let refused = Rc::new(RefCell::new(Vec::new()));
-    let (mut graph, edge) = Runtime::build({
+    let (mut graph, boundary) = Runtime::build({
         let io_cell = io_cell.clone();
         let refused = refused.clone();
         move |b| {
@@ -731,7 +731,7 @@ fn a_call_from_graph_code_is_refused() {
             (numbers_in, echoes_in, mapped, echoes.hold(b, 0u32))
         }
     });
-    let (numbers_in, echoes_in, mapped, echoes) = edge.keep();
+    let (numbers_in, echoes_in, mapped, echoes) = boundary.keep();
     *io_cell.borrow_mut() = Some(graph.io());
     let io = graph.io();
     graph
@@ -748,8 +748,8 @@ fn a_call_from_graph_code_is_refused() {
 /// left waiting are dropped with it.
 #[test]
 fn a_call_after_the_runtime_drops_is_gone() {
-    let (graph, edge) = Runtime::build(|b| b.input::<Rc<u32>>().1);
-    let numbers_in = edge.keep();
+    let (graph, boundary) = Runtime::build(|b| b.input::<Rc<u32>>().1);
+    let numbers_in = boundary.keep();
     let io = graph.io();
     let value = Rc::new(1u32);
     io.send(numbers_in, value.clone()).unwrap();
@@ -764,7 +764,7 @@ fn a_call_after_the_runtime_drops_is_gone() {
 /// and still does once an entry on the runtime finds the poison.
 #[test]
 fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers.map(|n: u32| {
             assert_ne!(n, 13, "unlucky");
@@ -772,7 +772,7 @@ fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
         });
         (numbers_in, checked.hold(b, 0u32))
     });
-    let (numbers_in, _checked) = edge.keep();
+    let (numbers_in, _checked) = boundary.keep();
     let io = graph.io();
     let text = panic_text(catch_unwind(AssertUnwindSafe(|| {
         graph.send(numbers_in, 13)
@@ -805,7 +805,7 @@ fn a_handle_transaction_reports_each_of_its_three_failures() {
     type Handles = Rc<RefCell<Option<(Io, RemoteIo)>>>;
     let handles: Handles = Rc::new(RefCell::new(None));
     let refused = Rc::new(RefCell::new(Vec::new()));
-    let (mut graph, edge) = Runtime::build({
+    let (mut graph, boundary) = Runtime::build({
         let (handles, refused) = (handles.clone(), refused.clone());
         move |b| {
             let (numbers, numbers_in) = b.input::<u32>();
@@ -821,7 +821,7 @@ fn a_handle_transaction_reports_each_of_its_three_failures() {
             (numbers_in, checked.hold(b, 0u32))
         }
     });
-    let (numbers_in, _checked) = edge.keep();
+    let (numbers_in, _checked) = boundary.keep();
     let (io, remote) = (graph.io(), graph.remote_io());
     *handles.borrow_mut() = Some((io.clone(), remote.clone()));
     graph.send(numbers_in, 1);
@@ -848,7 +848,7 @@ fn a_call_reports_the_first_failure_in_a_fixed_order() {
     let foreign_in = other_edge.keep();
     let io_cell: Rc<RefCell<Option<Io>>> = Rc::new(RefCell::new(None));
     let found = Rc::new(RefCell::new(Vec::new()));
-    let (mut graph, edge) = Runtime::build({
+    let (mut graph, boundary) = Runtime::build({
         let io_cell = io_cell.clone();
         let found = found.clone();
         move |b| {
@@ -863,7 +863,7 @@ fn a_call_reports_the_first_failure_in_a_fixed_order() {
             (numbers_in, checked.hold(b, 0u32))
         }
     });
-    let (numbers_in, _checked) = edge.keep();
+    let (numbers_in, _checked) = boundary.keep();
     let io = graph.io();
     *io_cell.borrow_mut() = Some(io.clone());
     graph.send(numbers_in, 1);
@@ -891,13 +891,13 @@ impl Wake for Counter {
 /// made while a pump runs wakes the driver for the pump after.
 #[test]
 fn queuing_wakes_the_driver_once_per_burst() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (first, first_in) = b.input::<u32>();
         let (second, second_in) = b.input::<u32>();
         let first = first.share(b);
         (first_in, second_in, first, second.hold(b, 0u32))
     });
-    let (first_in, second_in, first, second) = edge.keep();
+    let (first_in, second_in, first, second) = boundary.keep();
     let counter = Arc::new(Counter::default());
     let wakes = || counter.0.load(Ordering::SeqCst);
     let io = graph.io();

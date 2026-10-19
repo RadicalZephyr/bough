@@ -91,17 +91,17 @@ where
     let (handoff, handed) = mpsc::sync_channel(1);
     let driving = signal.clone();
     let thread = thread::spawn(move || {
-        let (mut graph, edge) = make();
+        let (mut graph, boundary) = make();
         graph.set_waker(Waker::from(driving.clone()));
-        handoff.send((edge, graph.remote_io())).unwrap();
+        handoff.send((boundary, graph.remote_io())).unwrap();
         while !driving.stop.load(Ordering::SeqCst) {
             graph.pump();
             driving.wait();
         }
     });
-    let (edge, remote) = handed.recv().unwrap();
+    let (boundary, remote) = handed.recv().unwrap();
     let thread = Some(thread);
-    (edge, remote, Driver { signal, thread })
+    (boundary, remote, Driver { signal, thread })
 }
 
 // ---- end thread driver
@@ -144,14 +144,14 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
     static TICKS: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let (report, reports) = mpsc::channel();
     let (numbers_in, remote, driver) = spawn_driver(move || {
-        let (mut graph, edge) = Runtime::build(|b| {
+        let (mut graph, boundary) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
             b.connect(ticks_in, &TICKS, 0);
             let total = numbers.or_else(b, ticks).accumulate(b, 0u32, |n, t| t + n);
             (numbers_in, total)
         });
-        let (numbers_in, total) = edge.keep();
+        let (numbers_in, total) = boundary.keep();
         let steps = Rc::new(RefCell::new(0));
         graph
             .listen_steps(total, move |t| {
@@ -195,11 +195,11 @@ fn the_thread_driver_builds_a_local_graph_and_pumps_when_woken() {
 /// task, a `Local` graph included, and producers on other threads wake it.
 #[test]
 fn the_future_driver_pumps_at_each_poll() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
-    let (numbers_in, total) = edge.keep();
+    let (numbers_in, total) = boundary.keep();
     let seen = Rc::new(RefCell::new(0u32));
     let sink = seen.clone();
     graph
@@ -232,14 +232,14 @@ fn integrations_share_one_graph_through_remotes() {
         a
     });
     const EACH: u32 = 200;
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (events, events_in) = b.input::<(char, u32)>();
         let (sensor, sensor_in) = b.input::<Vec<(char, u32)>>();
         b.connect(sensor_in, &SENSOR, 0);
         let events = events.map(|e| vec![e]).or_else(b, sensor).node(b);
         (events_in, events)
     });
-    let (events_in, events) = edge.keep();
+    let (events_in, events) = boundary.keep();
     let widgets: Rc<RefCell<BTreeMap<char, Vec<u32>>>> = Rc::default();
     let sink = widgets.clone();
     graph
@@ -309,7 +309,7 @@ fn integrations_share_one_graph_through_remotes() {
 fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
     fn assert_send<T: Send>() {}
     assert_send::<Runtime<Threaded>>();
-    let (mut graph, edge) = Runtime::build_threaded(|b| {
+    let (mut graph, boundary) = Runtime::build_threaded(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
@@ -318,7 +318,7 @@ fn a_threaded_graph_moves_into_its_driver_thread_with_a_remote() {
         let total = numbers.accumulate(b, 0u32, |n, t| t + n);
         (numbers_in, remotes_in, found, total)
     });
-    let (numbers_in, remotes_in, found, total) = edge.keep();
+    let (numbers_in, remotes_in, found, total) = boundary.keep();
     let (report, reports) = mpsc::channel();
     let totals = report.clone();
     graph

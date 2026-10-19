@@ -62,7 +62,7 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
         drops: drops.clone(),
     };
     let initial = counted(0);
-    let (mut graph, edge) = Runtime::build(move |b| {
+    let (mut graph, boundary) = Runtime::build(move |b| {
         // Linear: an input of a type with no Clone, consumed by one hold.
         let (linear, linear_in) = b.input::<NoClone>();
         let last_linear = linear.hold(b, NoClone(0));
@@ -76,7 +76,7 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
         let keeps = shared.hold(b, initial);
         (linear_in, shared_in, last_linear, lengths, bangs, keeps)
     });
-    let (linear_in, shared_in, last_linear, lengths, bangs, _keeps) = edge.keep();
+    let (linear_in, shared_in, last_linear, lengths, bangs, _keeps) = boundary.keep();
     let (seen, on) = recorder();
     graph.listen(bangs, on).keep();
 
@@ -107,7 +107,7 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
 fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_instant() {
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
-    let (mut graph, edge) = Runtime::build(move |b| {
+    let (mut graph, boundary) = Runtime::build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (limit_events, limit_in) = b.input::<u32>();
         let limit = limit_events.hold(b, 10);
@@ -121,7 +121,7 @@ fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_
             .hold(b, 0u32);
         (numbers_in, limit_in, out)
     });
-    let (numbers_in, limit_in, out) = edge.keep();
+    let (numbers_in, limit_in, out) = boundary.keep();
     // Two inputs, the limit's hold and the chain's hold: the three adapters
     // are inside one node.
     assert_eq!(graph.live_nodes(), 4);
@@ -155,7 +155,7 @@ fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_
 fn claim3_sample_returns_the_same_reference_twice_and_runs_nothing() {
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
-    let (mut graph, edge) = Runtime::build(move |b| {
+    let (mut graph, boundary) = Runtime::build(move |b| {
         let (names, names_in) = b.input::<String>();
         let names = names.share(b);
         let joined = names
@@ -170,7 +170,7 @@ fn claim3_sample_returns_the_same_reference_twice_and_runs_nothing() {
         assert_eq!(text, "0");
         (names_in, joined, count)
     });
-    let (names_in, joined, count) = edge.keep();
+    let (names_in, joined, count) = boundary.keep();
     graph.send(names_in, "ada".to_string());
     assert_eq!(calls.get(), 1);
 

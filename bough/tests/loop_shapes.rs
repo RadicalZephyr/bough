@@ -216,19 +216,19 @@ where
 }
 
 /// Drives a schedule, one transaction per instant.
-fn drive(graph: &mut Runtime, edge: &Slice, schedule: &[Instant], now: &Rc<StdCell<usize>>) {
+fn drive(graph: &mut Runtime, boundary: &Slice, schedule: &[Instant], now: &Rc<StdCell<usize>>) {
     for (k, &(heal, damage, level_up)) in schedule.iter().enumerate() {
         now.set(k + 1);
         graph.transaction(|tx| {
             // One external cause, one transaction: all three are one instant.
             if let Some(v) = heal {
-                tx.send(edge.heal, v);
+                tx.send(boundary.heal, v);
             }
             if let Some(v) = damage {
-                tx.send(edge.damage, v);
+                tx.send(boundary.damage, v);
             }
             if let Some(v) = level_up {
-                tx.send(edge.level_up, v);
+                tx.send(boundary.level_up, v);
             }
         });
     }
@@ -248,16 +248,16 @@ struct Observed {
 /// collects every cell's steps.
 fn observe(shape: (Drive, Lifts, Reads), schedule: &[Instant], seed: Option<u64>) -> Observed {
     let (drive_kind, lifts, reads) = shape;
-    let (mut graph, edge) = Runtime::build(|b| slice(b, drive_kind, lifts, reads));
-    let edge = edge.keep();
+    let (mut graph, boundary) = Runtime::build(|b| slice(b, drive_kind, lifts, reads));
+    let boundary = boundary.keep();
     graph.set_shuffle_seed(seed);
     let now = Rc::new(StdCell::new(0));
-    let max_health = record(&mut graph, edge.max_health, &now);
-    let shield = record(&mut graph, edge.shield, &now);
-    let health = record(&mut graph, edge.health, &now);
-    let fraction = edge.fraction.map(|f| record(&mut graph, f, &now));
-    let effective = edge.effective.map(|e| record(&mut graph, e, &now));
-    drive(&mut graph, &edge, schedule, &now);
+    let max_health = record(&mut graph, boundary.max_health, &now);
+    let shield = record(&mut graph, boundary.shield, &now);
+    let health = record(&mut graph, boundary.health, &now);
+    let fraction = boundary.fraction.map(|f| record(&mut graph, f, &now));
+    let effective = boundary.effective.map(|e| record(&mut graph, e, &now));
+    drive(&mut graph, &boundary, schedule, &now);
     let take = |s: &Steps<u32>| s.borrow().clone();
     Observed {
         max_health: take(&max_health),
@@ -265,7 +265,7 @@ fn observe(shape: (Drive, Lifts, Reads), schedule: &[Instant], seed: Option<u64>
         health: take(&health),
         fraction: fraction.map(|f| f.borrow().clone()),
         effective: effective.map(|e| take(&e)),
-        final_health: *graph.sample(edge.health),
+        final_health: *graph.sample(boundary.health),
     }
 }
 
@@ -479,7 +479,7 @@ fn shape_3c_health_steps_only_when_it_changes() {
 #[test]
 fn the_slices_first_stage_clamps_by_the_maximum_before_the_instant() {
     for seed in SEEDS {
-        let (mut graph, edge) = Runtime::build(|b| {
+        let (mut graph, boundary) = Runtime::build(|b| {
             let (heal, heal_in) = b.input::<u32>();
             let (level_up, level_up_in) = b.input::<u32>();
             let (max_fwd, max_loop) = b.cell_loop::<u32>();
@@ -494,7 +494,7 @@ fn the_slices_first_stage_clamps_by_the_maximum_before_the_instant() {
             let fraction = (max_health, health).lift(b, |m, h| *h as f32 / *m as f32);
             (heal_in, level_up_in, max_health, health, fraction)
         });
-        let (heal_in, level_up_in, max_health, health, fraction) = edge.keep();
+        let (heal_in, level_up_in, max_health, health, fraction) = boundary.keep();
         graph.set_shuffle_seed(seed);
         let now = Rc::new(StdCell::new(1));
         let fractions = record(&mut graph, fraction, &now);
@@ -543,7 +543,7 @@ fn sodium_rust_52_two_input_reduction() {
                     ),
                 ] {
                     let what = format!("looped {shield_looped}, lifted {lifted}, seed {seed:?}");
-                    let (mut graph, edge) = Runtime::build(|b| {
+                    let (mut graph, boundary) = Runtime::build(|b| {
                         let (heal, heal_in) = b.input::<u32>();
                         let (damage, damage_in) = b.input::<u32>();
                         let damage = damage.share(b);
@@ -568,7 +568,7 @@ fn sodium_rust_52_two_input_reduction() {
                         let effective = lifted.then(|| (health, shield).lift(b, |h, s| h + s));
                         (heal_in, damage_in, health, effective)
                     });
-                    let (heal_in, damage_in, health, effective) = edge.keep();
+                    let (heal_in, damage_in, health, effective) = boundary.keep();
                     graph.set_shuffle_seed(seed);
                     let now = Rc::new(StdCell::new(0));
                     let steps = record(&mut graph, health, &now);
@@ -617,7 +617,7 @@ fn the_slices_took_and_delta_events() {
                 ][..],
             ),
         ] {
-            let (mut graph, edge) = Runtime::build(|b| {
+            let (mut graph, boundary) = Runtime::build(|b| {
                 let (heal_s, heal) = b.input::<u32>();
                 let (damage_s, damage) = b.input::<u32>();
                 let (level_up_s, level_up) = b.input::<u32>();
@@ -643,7 +643,7 @@ fn the_slices_took_and_delta_events() {
                     .snapshot(max_health, |(d, cur), max| clamp(d, cur, *max))
                     .hold(b, 60);
                 health_loop.close(b, health);
-                let edge = Slice {
+                let boundary = Slice {
                     heal,
                     damage,
                     level_up,
@@ -653,9 +653,9 @@ fn the_slices_took_and_delta_events() {
                     fraction: None,
                     effective: None,
                 };
-                (edge, took, delta)
+                (boundary, took, delta)
             });
-            let (edge, took, delta) = edge.keep();
+            let (boundary, took, delta) = boundary.keep();
             graph.set_shuffle_seed(seed);
             let now = Rc::new(StdCell::new(0));
             let events = |graph: &mut Runtime, stream: Shared<i64>| {
@@ -668,7 +668,7 @@ fn the_slices_took_and_delta_events() {
             };
             let took_seen = events(&mut graph, took);
             let delta_seen = events(&mut graph, delta);
-            drive(&mut graph, &edge, schedule, &now);
+            drive(&mut graph, &boundary, schedule, &now);
             assert_eq!(*took_seen.borrow(), took_expected, "seed {seed:?}");
             assert_eq!(*delta_seen.borrow(), delta_expected, "seed {seed:?}");
         }
@@ -702,7 +702,7 @@ fn two_loops_that_read_each_other_lifted_with_what_is_upstream_of_both() {
     for seed in SEEDS {
         let calls = Rc::new(StdCell::new(0u32));
         let count = calls.clone();
-        let (mut graph, edge) = Runtime::build(move |b| {
+        let (mut graph, boundary) = Runtime::build(move |b| {
             let (x_fwd, x_loop) = b.cell_loop::<u32>();
             let (y_fwd, y_loop) = b.cell_loop::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
@@ -728,7 +728,7 @@ fn two_loops_that_read_each_other_lifted_with_what_is_upstream_of_both() {
             let views = both_fwd.steps(b);
             (ticks_in, level_in, [x, y, both, both_fwd, total], views)
         });
-        let (ticks_in, level_in, cells, views) = edge.keep();
+        let (ticks_in, level_in, cells, views) = boundary.keep();
         graph.set_shuffle_seed(seed);
         let now = Rc::new(StdCell::new(0));
         let recorded = cells.map(|c| record(&mut graph, c, &now));

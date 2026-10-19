@@ -56,7 +56,7 @@ fn feedback(remote: RemoteIo, input: Input<u32>, results: Results) -> impl FnMut
 /// remote of a graph exists only once the graph does.
 #[test]
 fn a_remote_send_from_a_map_closure_or_accumulate_mut_is_inside_transaction() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let remotes = remotes.share(b);
@@ -75,7 +75,7 @@ fn a_remote_send_from_a_map_closure_or_accumulate_mut_is_inside_transaction() {
         b.depends(&mapped, &[&numbers]);
         (remotes_in, numbers_in, mapped, accumulated)
     });
-    let (remotes_in, numbers_in, mapped, accumulated) = edge.keep();
+    let (remotes_in, numbers_in, mapped, accumulated) = boundary.keep();
     let remote = graph.remote_io();
     graph.send(remotes_in, remote.clone());
     assert_eq!(*graph.sample(mapped), (true, true), "evaluation");
@@ -107,7 +107,7 @@ fn construct_closures_and_child_instants_are_guarded() {
             Some(inside(self.remote.send(self.target, 0)))
         }
     }
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let remotes = remotes.share(b);
@@ -135,7 +135,7 @@ fn construct_closures_and_child_instants_are_guarded() {
         b.depends(&built, &[&numbers]);
         (remotes_in, built, deferred, split)
     });
-    let (remotes_in, built, deferred, split) = edge.keep();
+    let (remotes_in, built, deferred, split) = boundary.keep();
     let remote = graph.remote_io();
     graph.send(remotes_in, remote);
     assert!(*graph.sample(built), "a construct closure");
@@ -148,13 +148,13 @@ fn construct_closures_and_child_instants_are_guarded() {
 /// the instant does. The next pump runs what they queued.
 #[test]
 fn listeners_and_transaction_closures_queue() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let later = numbers.defer(b);
         (numbers_in, numbers, later)
     });
-    let (numbers_in, numbers, later) = edge.keep();
+    let (numbers_in, numbers, later) = boundary.keep();
     let remote = graph.remote_io();
     let results = Results::default();
     let now = feedback(remote.clone(), numbers_in, results.clone());
@@ -190,7 +190,7 @@ fn listeners_and_transaction_closures_queue() {
 /// thread and waits for that send to return.
 #[test]
 fn another_thread_queues_while_the_driver_runs_graph_code() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
@@ -202,7 +202,7 @@ fn another_thread_queues_while_the_driver_runs_graph_code() {
             .hold(b, (false, false));
         (remotes_in, found, numbers.node(b))
     });
-    let (remotes_in, found, numbers) = edge.keep();
+    let (remotes_in, found, numbers) = boundary.keep();
     let heard = Rc::new(RefCell::new(Vec::new()));
     let sink = heard.clone();
     graph
@@ -219,20 +219,20 @@ fn another_thread_queues_while_the_driver_runs_graph_code() {
 /// graph sending through another graph's remote queues there.
 #[test]
 fn the_guard_is_per_graph() {
-    let (mut other, edge) = Runtime::build(|b| {
+    let (mut other, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
-    let (other_in, other_total) = edge.keep();
+    let (other_in, other_total) = boundary.keep();
     let elsewhere = other.remote_io();
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let sent = numbers
             .map(move |n| elsewhere.send(other_in, n).is_ok())
             .hold(b, false);
         (numbers_in, sent)
     });
-    let (numbers_in, sent) = edge.keep();
+    let (numbers_in, sent) = boundary.keep();
     graph.send(numbers_in, 5);
     assert!(*graph.sample(sent), "queued in the other graph's inbox");
     other.pump();
@@ -247,7 +247,7 @@ fn the_guard_is_per_graph() {
 fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
     let (_other, other_edge) = Runtime::build(|b| b.input::<u32>().1);
     let foreign_in = other_edge.keep();
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
@@ -261,7 +261,7 @@ fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
             .node(b);
         (numbers_in, remotes_in, found, checked)
     });
-    let (numbers_in, remotes_in, found, _checked) = edge.keep();
+    let (numbers_in, remotes_in, found, _checked) = boundary.keep();
     let remote = graph.remote_io();
     graph.send(remotes_in, remote.clone());
     assert!(*graph.sample(found), "FromGraphCode before ForeignGraph");
@@ -280,7 +280,7 @@ fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
 /// never finished, isn't told it's in graph code.
 #[test]
 fn poisoning_makes_every_later_remote_send_fail() {
-    let (mut graph, edge) = Runtime::build(|b| {
+    let (mut graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers
             .map(|n| {
@@ -290,7 +290,7 @@ fn poisoning_makes_every_later_remote_send_fail() {
             .node(b);
         (numbers_in, checked)
     });
-    let (numbers_in, _checked) = edge.keep();
+    let (numbers_in, _checked) = boundary.keep();
     let remote = graph.remote_io();
     remote.send(numbers_in, 1).unwrap();
     let message = panic_message(|| graph.send(numbers_in, 13));
