@@ -752,6 +752,28 @@ fn a_call_from_graph_code_is_refused() {
     assert_eq!(*graph.sample(echoes), 10);
 }
 
+/// A later build's closure is graph code (RFD 2), so a call from it
+/// through an `Io` or a `RemoteIo` is refused, and one after it returns
+/// queues.
+#[test]
+fn a_call_from_a_later_builds_closure_is_refused() {
+    let mut graph = Runtime::local();
+    let numbers_in = graph.build(|b| b.input::<u32>().1);
+    let io = graph.io();
+    let remote = graph.remote_io();
+    let mut refused = Vec::new();
+    graph.build(|_| {
+        refused.push(io.send(numbers_in, 1));
+        refused.push(remote.send(numbers_in, 2));
+    });
+    assert_eq!(
+        refused,
+        [Err(IoError::FromGraphCode), Err(IoError::FromGraphCode)]
+    );
+    assert_eq!(io.send(numbers_in, 3), Ok(()));
+    assert_eq!(remote.send(numbers_in, 4), Ok(()));
+}
+
 /// Test 6: a call after the runtime drops reports `Gone`, and the calls it
 /// left waiting are dropped with it.
 #[test]

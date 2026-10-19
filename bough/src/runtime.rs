@@ -308,6 +308,9 @@ impl<M: Mode> Runtime<M> {
             let id = build.graph_id;
             build.begin();
             build.push_scope();
+            // The closure is graph code (RFD 2), so a call through a handle
+            // is refused; `finish` disarms the check.
+            build.arm();
             let r = f(build);
             // A `mem::swap` with another graph's build context is safe
             // code; with no `unsafe` in the engine it is a wrong-graph
