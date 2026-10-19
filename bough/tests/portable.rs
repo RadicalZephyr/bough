@@ -17,17 +17,17 @@ fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 
 #[test]
 fn a_core_that_stores_its_own_closure_builds_in_both_modes() {
-    let (mut local, boundary) = Runtime::build(|b| {
+    let mut local = Runtime::local();
+    let (local_in, local_out) = local.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, plus_one(&mut b.portable(), numbers))
     });
-    let (local_in, local_out) = boundary.keep();
 
-    let (mut threaded, boundary) = Runtime::build_threaded(|b| {
+    let mut threaded = Runtime::threaded();
+    let (threaded_in, threaded_out) = threaded.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, plus_one(&mut b.portable(), numbers))
     });
-    let (threaded_in, threaded_out) = boundary.keep();
 
     for n in [1, 5, 41] {
         local.send(local_in, n);
@@ -64,7 +64,8 @@ fn longest(b: &mut Portable<'_>, label: Cell<String>) -> Cell<usize> {
 /// and its `Rc`-built cell into a second core.
 #[test]
 fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (clicks_in, step_in, total, label, logged, widest) = graph.build_here(|b| {
         let prefix: Rc<str> = Rc::from("total ");
         let (clicks, clicks_in) = b.input::<()>();
         let (step, step_in) = b.input_cell(1u32);
@@ -88,7 +89,6 @@ fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
         let widest = longest(&mut b.portable(), label);
         (clicks_in, step_in, total, label, logged, widest)
     });
-    let (clicks_in, step_in, total, label, logged, widest) = boundary.keep();
 
     graph.send(clicks_in, ());
     graph.send(step_in, 10);
@@ -297,22 +297,22 @@ fn the_petrol_pump_core_gives_the_same_answers_in_both_modes() {
     use Event::*;
     use Nozzle::{Down, Up};
 
-    let (mut local, boundary) = Runtime::build(|b| {
+    let mut local = Runtime::local();
+    let (lh, lo) = local.build_here(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });
-    let (lh, lo) = boundary.keep();
     let local_sales = Arc::new(Mutex::new(Vec::new()));
     let log = local_sales.clone();
     local
         .listen(lo.sales, move |s| log.lock().unwrap().push(s))
         .keep();
 
-    let (mut threaded, boundary) = Runtime::build_threaded(|b| {
+    let mut threaded = Runtime::threaded();
+    let (th, to) = threaded.build_here(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });
-    let (th, to) = boundary.keep();
     let threaded_sales = Arc::new(Mutex::new(Vec::new()));
     let log = threaded_sales.clone();
     threaded
@@ -414,11 +414,11 @@ macro_rules! navigate {
 /// they were before the navigations.
 #[test]
 fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
-    let (mut local, boundary) = Runtime::build(|b| {
+    let mut local = Runtime::local();
+    let (local_in, local_events) = local.build_here(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         (clicks_in, navigation(&mut b.portable(), clicks))
     });
-    let (local_in, local_events) = boundary.keep();
     let local_heard = Arc::new(Mutex::new(Vec::new()));
     let log = local_heard.clone();
     local
@@ -426,11 +426,11 @@ fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
         .keep();
     let local_counts = navigate!(local, local_in, local_heard, 10);
 
-    let (mut threaded, boundary) = Runtime::build_threaded(|b| {
+    let mut threaded = Runtime::threaded();
+    let (threaded_in, threaded_events) = threaded.build_here(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         (clicks_in, navigation(&mut b.portable(), clicks))
     });
-    let (threaded_in, threaded_events) = boundary.keep();
     let threaded_heard = Arc::new(Mutex::new(Vec::new()));
     let log = threaded_heard.clone();
     threaded
@@ -461,12 +461,12 @@ fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
 fn a_threaded_runtime_with_a_portable_core_moves_to_another_thread() {
     fn assert_send<T: Send>(_: &T) {}
 
-    let (mut graph, boundary) = Runtime::build_threaded(|b| {
+    let mut graph = Runtime::threaded();
+    let (h, out) = graph.build_here(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });
     assert_send(&graph);
-    let (h, out) = boundary.keep();
     let sales = Arc::new(Mutex::new(Vec::new()));
     let log = sales.clone();
     graph

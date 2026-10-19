@@ -19,12 +19,12 @@ struct Solo(u32);
 
 #[test]
 fn unzip_moves_each_half_into_its_own_stream() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, firsts, seconds) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (firsts, seconds) = numbers.map(|n| (Solo(n), Solo(n * 10))).unzip(b);
         (numbers_in, firsts, seconds)
     });
-    let (numbers_in, firsts, seconds) = boundary.keep();
     let (first_seen, on_first) = recorder();
     let (second_seen, on_second) = recorder();
     graph.listen(firsts, on_first).keep();
@@ -42,7 +42,8 @@ fn unzip_moves_each_half_into_its_own_stream() {
 /// the same value.
 #[test]
 fn unzip_denotes_two_maps() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, (firsts, seconds), (fsts, snds)) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let pairs = numbers.filter(|n| n % 3 != 0).map(|n| (n, n * n)).share(b);
         let (firsts, seconds) = pairs.unzip(b);
@@ -50,7 +51,6 @@ fn unzip_denotes_two_maps() {
         let snds = pairs.map(|(_, second)| second).node(b);
         (numbers_in, (firsts, seconds), (fsts, snds))
     });
-    let (numbers_in, (firsts, seconds), (fsts, snds)) = boundary.keep();
     let logs: Vec<_> = [firsts, seconds, fsts, snds]
         .into_iter()
         .map(|stream| {
@@ -82,7 +82,8 @@ fn unzip_denotes_two_maps() {
 /// of the switch.
 #[test]
 fn a_screen_goes_into_a_hold_while_its_input_goes_out() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (opens_in, inputs, shown) = graph.build_here(|b| {
         let (opens, opens_in) = b.input::<u32>();
         let (idle, _idle_in) = b.input::<u32>();
         let made = opens.construct(b, |b, id: u32| {
@@ -94,7 +95,6 @@ fn a_screen_goes_into_a_hold_while_its_input_goes_out() {
         let shown = screens.hold(b, idle).switch_stream(b);
         (opens_in, inputs, shown)
     });
-    let (opens_in, inputs, shown) = boundary.keep();
     let (received, on_input) = recorder::<Anchored<Input<u32>>>();
     let (seen, on_shown) = recorder();
     graph.listen(inputs, on_input).keep();
@@ -114,7 +114,8 @@ fn a_screen_goes_into_a_hold_while_its_input_goes_out() {
 /// reached.
 #[test]
 fn unzip_nodes_live_while_either_half_is_reached() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (offsets, offsets_in) = b.input::<u32>();
         let offset = offsets.hold(b, 100u32);

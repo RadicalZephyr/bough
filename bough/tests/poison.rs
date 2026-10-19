@@ -43,7 +43,8 @@ struct Fixture {
 fn fixture() -> Fixture {
     let armed = Rc::new(Cell::new(false));
     let bomb = Bomb(armed.clone());
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers
             .map(|n: u32| {

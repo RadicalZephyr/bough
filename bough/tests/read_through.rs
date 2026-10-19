@@ -24,7 +24,8 @@ fn counter() -> (Rc<StdCell<u32>>, Rc<StdCell<u32>>) {
 #[test]
 fn map_cell_computes_on_read_and_memoizes_until_its_input_steps() {
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, others_in, doubled) = graph.build_here(move |b| {
         let (numbers, numbers_in) = b.input_cell(3u32);
         let (_others, others_in) = b.input_cell(0u32);
         let doubled = numbers.map_cell(b, move |n| {
@@ -33,7 +34,6 @@ fn map_cell_computes_on_read_and_memoizes_until_its_input_steps() {
         });
         (numbers_in, others_in, doubled)
     });
-    let (numbers_in, others_in, doubled) = boundary.keep();
     assert_eq!(calls.get(), 0, "nothing has read the cell");
     let first: &String = graph.sample(doubled);
     let second: &String = graph.sample(doubled);
@@ -59,7 +59,8 @@ fn map_cell_computes_on_read_and_memoizes_until_its_input_steps() {
 #[test]
 fn a_read_through_cell_that_nothing_reads_never_runs_its_function() {
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let numbers_in = graph.build_here(move |b| {
         let (numbers, numbers_in) = b.input_cell(1u32);
         let _unread = numbers.map_cell(b, move |n| {
             count.set(count.get() + 1);
@@ -67,7 +68,6 @@ fn a_read_through_cell_that_nothing_reads_never_runs_its_function() {
         });
         numbers_in
     });
-    let numbers_in = boundary.keep();
     for n in 0..10 {
         graph.send(numbers_in, n);
     }
@@ -80,7 +80,8 @@ fn a_marked_cell_that_did_not_step_keeps_its_memo_and_stays_quiet() {
     // Updates (MapC (*2) (Hold 0 (Filter (> 5) s))) = [([2], 18)]. Marking
     // reaches the map_cell at both instants; only the second is a step.
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, doubled, view) = graph.build_here(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let big = numbers.filter(|n| *n > 5).hold(b, 0u32);
         let doubled = big.map_cell(b, move |n| {
@@ -89,7 +90,6 @@ fn a_marked_cell_that_did_not_step_keeps_its_memo_and_stays_quiet() {
         });
         (numbers_in, doubled, doubled.steps(b))
     });
-    let (numbers_in, doubled, view) = boundary.keep();
     let (view_seen, on_view) = recorder();
     graph.listen(view, on_view).keep();
     let (steps_seen, mut on_steps) = recorder();
@@ -137,7 +137,8 @@ fn a_read_through_cell_read_during_a_transaction_gives_the_value_before_it() {
     // new one, not the memo the snapshot filled.
     for numbers_first in [true, false] {
         let (calls, count) = counter();
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (numbers_in, probe_in, tripled, seen) = graph.build_here(move |b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let numbers = numbers.share(b);
             let latest = numbers.hold(b, 1u32);
@@ -152,7 +153,6 @@ fn a_read_through_cell_read_during_a_transaction_gives_the_value_before_it() {
                 .hold(b, (0u32, 0u32));
             (numbers_in, probe_in, tripled, seen)
         });
-        let (numbers_in, probe_in, tripled, seen) = boundary.keep();
         let (stepped, mut on) = recorder();
         graph.listen_steps(tripled, move |t| on(*t)).keep();
         graph.transaction(|tx| {
@@ -181,11 +181,11 @@ fn a_read_through_cell_read_during_a_transaction_gives_the_value_before_it() {
 
 #[test]
 fn listen_cell_on_a_map_cell_fires_at_registration_and_on_every_step() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (level_in, label) = graph.build_here(|b| {
         let (level, level_in) = b.input_cell(1u32);
         (level_in, level.map_cell(b, |l| format!("level {l}")))
     });
-    let (level_in, label) = boundary.keep();
     let (seen, mut on) = recorder();
     graph
         .listen_cell(label, move |t: &String| on(t.clone()))
@@ -197,11 +197,11 @@ fn listen_cell_on_a_map_cell_fires_at_registration_and_on_every_step() {
 
 #[test]
 fn a_read_through_cell_steps_whenever_its_input_does_even_to_an_equal_value() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, tens) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input_cell(5u32);
         (numbers_in, numbers.map_cell(b, |n| n / 10))
     });
-    let (numbers_in, tens) = boundary.keep();
     let (seen, mut on) = recorder();
     graph.listen_steps(tens, move |t| on(*t)).keep();
     for n in [6, 7, 15] {
@@ -213,7 +213,8 @@ fn a_read_through_cell_steps_whenever_its_input_does_even_to_an_equal_value() {
 #[test]
 fn a_map_cell_over_a_map_cell_steps_with_it() {
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, text) = graph.build_here(move |b| {
         let (numbers, numbers_in) = b.input_cell(2u32);
         let squared = numbers.map_cell(b, move |n| {
             count.set(count.get() + 1);
@@ -221,7 +222,6 @@ fn a_map_cell_over_a_map_cell_steps_with_it() {
         });
         (numbers_in, squared.map_cell(b, |n| format!("{n}")))
     });
-    let (numbers_in, text) = boundary.keep();
     let (seen, mut on) = recorder();
     graph
         .listen_cell(text, move |t: &String| on(t.clone()))
@@ -234,7 +234,8 @@ fn a_map_cell_over_a_map_cell_steps_with_it() {
 
 #[test]
 fn a_map_cell_over_a_state_is_a_state_read_like_a_cell() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (names_in, count, labels) = graph.build_here(|b| {
         let (names, names_in) = b.input::<String>();
         let names = names.share(b);
         let members = names.accumulate_mut(b, Vec::new(), |n, m: &mut Vec<String>| m.push(n));
@@ -244,7 +245,6 @@ fn a_map_cell_over_a_state_is_a_state_read_like_a_cell() {
             .hold(b, String::new());
         (names_in, count, labels)
     });
-    let (names_in, count, labels) = boundary.keep();
     let (seen, mut on) = recorder();
     graph.listen_cell(count, move |c| on(*c)).keep();
     graph.send(names_in, "ada".to_string());
@@ -257,7 +257,8 @@ fn a_map_cell_over_a_state_is_a_state_read_like_a_cell() {
 #[test]
 fn lift_computes_on_read_and_memoizes_until_an_input_steps() {
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (x_in, y_in, product) = graph.build_here(move |b| {
         let (x, x_in) = b.input_cell(3u32);
         let (y, y_in) = b.input_cell(4u32);
         let product: Cell<u32> = (x, y).lift(b, move |x, y| {
@@ -268,7 +269,6 @@ fn lift_computes_on_read_and_memoizes_until_an_input_steps() {
         assert_eq!(format!("{} {}", product.sample(b), x.sample(b)), "12 3");
         (x_in, y_in, product)
     });
-    let (x_in, y_in, product) = boundary.keep();
     assert_eq!(calls.get(), 1);
     assert!(std::ptr::eq(graph.sample(product), graph.sample(product)));
     graph.send(x_in, 5);
@@ -281,7 +281,8 @@ fn lift_computes_on_read_and_memoizes_until_an_input_steps() {
 #[test]
 fn lift_steps_once_when_several_inputs_step_in_one_transaction_at_every_arity() {
     let (calls, count) = counter();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let ((a_in, c_in, d_in), (e_in, g_in, h_in), (two, three, six)) = graph.build_here(move |b| {
         let (a, a_in) = b.input_cell(1u32);
         let (c, c_in) = b.input_cell(2u64);
         let (d, d_in) = b.input_cell("x".to_string());
@@ -296,7 +297,6 @@ fn lift_steps_once_when_several_inputs_step_in_one_transaction_at_every_arity() 
         });
         ((a_in, c_in, d_in), (e_in, g_in, h_in), (two, three, six))
     });
-    let ((a_in, c_in, d_in), (e_in, g_in, h_in), (two, three, six)) = boundary.keep();
     let (twos, mut on_two) = recorder();
     graph.listen_steps(two, move |v| on_two(*v)).keep();
     let (threes, mut on_three) = recorder();
@@ -337,11 +337,11 @@ fn lift_steps_once_when_several_inputs_step_in_one_transaction_at_every_arity() 
 
 #[test]
 fn lift_of_one_cell_twice_steps_once() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (x_in, square) = graph.build_here(|b| {
         let (x, x_in) = b.input_cell(3u32);
         (x_in, (x, x).lift(b, |a, c| a * c))
     });
-    let (x_in, square) = boundary.keep();
     let (seen, mut on) = recorder();
     graph.listen_steps(square, move |v| on(*v)).keep();
     graph.send(x_in, 4);
@@ -354,13 +354,13 @@ type Op = Leaf<Box<dyn Fn(&u32) -> u32>>;
 
 #[test]
 fn sodiums_apply_is_a_lift_of_a_cell_of_functions() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ops_in, numbers_in, applied) = graph.build_here(|b| {
         let (ops, ops_in) = b.input_cell::<Op>(Leaf(Box::new(|n| n + 1)));
         let (numbers, numbers_in) = b.input_cell(10u32);
         let applied = (ops, numbers).lift(b, |f, a| f(a));
         (ops_in, numbers_in, applied)
     });
-    let (ops_in, numbers_in, applied) = boundary.keep();
     assert_eq!(*graph.sample(applied), 11);
     graph.send(ops_in, Leaf(Box::new(|n| n * 2)));
     assert_eq!(*graph.sample(applied), 20);
@@ -375,7 +375,8 @@ fn sodiums_apply_is_a_lift_of_a_cell_of_functions() {
 
 #[test]
 fn a_lift_with_a_state_among_its_inputs_is_a_state() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (joins_in, extra_in, (first, last, both)) = graph.build_here(|b| {
         let (joins, joins_in) = b.input::<String>();
         let members = joins.accumulate_mut(b, Vec::new(), |n, m: &mut Vec<String>| m.push(n));
         let (extra, extra_in) = b.input_cell(10usize);
@@ -384,7 +385,6 @@ fn a_lift_with_a_state_among_its_inputs_is_a_state() {
         let both: State<usize> = (first, last).lift(b, |f, l| f * 1000 + l);
         (joins_in, extra_in, (first, last, both))
     });
-    let (joins_in, extra_in, (first, last, both)) = boundary.keep();
     let (seen, mut on) = recorder();
     graph.listen_cell(both, move |v| on(*v)).keep();
     graph.send(joins_in, "ada".to_string());
