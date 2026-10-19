@@ -345,3 +345,25 @@ fn a_threaded_graph_runs_construct_closures_on_another_thread() {
     // 2 * 10. total: 10 + 5.
     assert_eq!(driver.join().unwrap(), [12, 1, 21, 15]);
 }
+
+/// A `Threaded` runtime made empty, built on one thread, moved to another
+/// and built on again there: the later build joins the graph the first
+/// made, on whichever thread holds the runtime.
+#[test]
+fn a_threaded_runtime_made_empty_is_built_moved_and_built_again() {
+    let mut graph = Runtime::threaded();
+    let (numbers_in, numbers) = graph.build_here(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        (numbers_in, numbers.share(b))
+    });
+    graph.send(numbers_in, 1);
+    let total = thread::spawn(move || {
+        let total = graph.build_here(|b| numbers.accumulate(b, 0u64, |n, t| t + n));
+        graph.send(numbers_in, 2);
+        graph.send(numbers_in, 3);
+        *graph.sample(total)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(total, 5, "the later build saw only the sends after it");
+}

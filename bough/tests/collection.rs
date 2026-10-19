@@ -1486,3 +1486,57 @@ fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
         assert_eq!(grown, if on_long_lived { 50 } else { 1 });
     }
 }
+
+/// `build_anchored` returns what its closure returned anchored: dropping
+/// the `Anchored` frees what only it reached. What `build` returns is
+/// rooted for the runtime's life and never freed.
+#[test]
+fn build_anchored_releases_what_only_it_reached_and_build_keeps_its_value() {
+    let mut graph = Runtime::local();
+    let (n_in, kept) = graph.build_here(|b| {
+        let (n, n_in) = b.input::<u32>();
+        let n = n.share(b);
+        (n_in, n)
+    });
+    let kept_hold = graph.build_here(|b| kept.hold(b, 0u32));
+    assert_eq!(graph.live_nodes(), 3);
+    let part = graph.build_anchored(|b| {
+        let doubled = kept.map(|v| v * 2).hold(b, 0u32);
+        let tripled = kept.map(|v| v * 3).hold(b, 0u32);
+        (doubled, tripled)
+    });
+    assert_eq!(graph.live_nodes(), 5);
+    graph.send(n_in, 1);
+    let (doubled, tripled) = *part;
+    assert_eq!(*graph.sample(doubled), 2);
+    drop(part);
+    graph.collect_garbage();
+    assert_eq!(graph.live_nodes(), 3, "what only the Anchored reached went");
+    assert_eq!(graph.try_sample(tripled).err(), Some(TokenError::Stale));
+    for _ in 0..3 {
+        graph.send(n_in, 2);
+        graph.collect_garbage();
+    }
+    assert_eq!(*graph.sample(kept_hold), 2, "what build returned stays");
+    assert_eq!(graph.live_nodes(), 3);
+}
+
+/// A later build is a unit like any other: a collection that is due runs
+/// before it returns, so what an `Anchored` dropped since let go is gone
+/// once it does, with no explicit collection.
+#[test]
+fn a_due_collection_runs_before_a_later_build_returns() {
+    let mut graph = Runtime::local();
+    let numbers = graph.build_here(|b| b.input::<u32>().0.share(b));
+    let part = graph.build_anchored(|b| numbers.hold(b, 0u32));
+    let hold = *part;
+    assert_eq!(graph.live_nodes(), 3);
+    drop(part);
+    // Under the automatic policy a collection is due once the nodes
+    // allocated and the guards released since the last one exceed the
+    // live count it left, the input and the share: here one hold and two
+    // constants, and one release.
+    let _more = graph.build_here(|b| (b.constant(1u32), b.constant(2u32)));
+    assert_eq!(graph.try_sample(hold).err(), Some(TokenError::Stale));
+    assert_eq!(graph.live_nodes(), 4, "the input, the share, the constants");
+}
