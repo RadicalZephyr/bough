@@ -987,3 +987,101 @@ fn a_waiting_remote_send_or_cancelled_registration_keeps_nothing_alive() {
     assert_eq!(graph.try_send(bumps_in, 1), Err(SendError::Stale));
     assert_eq!(graph.try_pump(), Err(PumpError::Stale));
 }
+
+/// RFD 6's promise between runtimes, FIFO per link and nothing more: calls
+/// from one sender through one `RemoteIo` run in the order they were made.
+/// Runtime B runs on a thread of its own and pumps at irregular points.
+/// Two runtimes, A1 and A2, each on a thread of its own, send numbered
+/// events into their own input, and a listener on each sends every event
+/// on through a `RemoteIo` of B's, A1's to one input and A2's to another,
+/// at the same time. B sees each link's events in the order they were made;
+/// how the two links interleave is unchecked, since nothing is promised
+/// across links.
+#[test]
+fn calls_between_runtimes_keep_their_order_per_link() {
+    const EVENTS: u64 = 4000;
+
+    /// A small deterministic generator for the irregular pauses.
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// Pauses for an irregular moment: a spin, a yield or a short sleep.
+    fn pause(state: &mut u64) {
+        match next(state) % 8 {
+            0 => thread::sleep(Duration::from_micros(next(state) % 200)),
+            1 | 2 => thread::yield_now(),
+            _ => {
+                for _ in 0..next(state) % 500 {
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    let (links_out, links_in) = mpsc::channel();
+    let b = thread::spawn(move || {
+        let mut b = Runtime::local();
+        let (first_in, second_in, first, second) = b.build(|b| {
+            let (first, first_in) = b.input::<u64>();
+            let (second, second_in) = b.input::<u64>();
+            (first_in, second_in, first, second)
+        });
+        let first = log(&mut b, first);
+        let second = log(&mut b, second);
+        let remote = b.remote_io();
+        links_out
+            .send(((remote.clone(), first_in), (remote, second_in)))
+            .unwrap();
+        let mut state = 0x5EED;
+        let started = std::time::Instant::now();
+        while (first.borrow().len() as u64) < EVENTS || (second.borrow().len() as u64) < EVENTS {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "B heard {} and {} of {EVENTS} each",
+                first.borrow().len(),
+                second.borrow().len()
+            );
+            b.pump();
+            pause(&mut state);
+        }
+        (first.take(), second.take())
+    });
+    let (first_link, second_link) = links_in.recv().unwrap();
+
+    let sender = |(remote, target): (RemoteIo, Input<u64>), seed: u64| {
+        thread::spawn(move || {
+            let mut a = Runtime::local();
+            let (numbers_in, numbers) = a.build(|b| {
+                let (numbers, numbers_in) = b.input::<u64>();
+                (numbers_in, numbers)
+            });
+            a.listen(numbers, move |n| remote.send(target, n).unwrap())
+                .keep();
+            let mut state = seed;
+            for n in 0..EVENTS {
+                a.send(numbers_in, n);
+                if next(&mut state) % 4 == 0 {
+                    pause(&mut state);
+                }
+            }
+        })
+    };
+    let first_sender = sender(first_link, 1);
+    let second_sender = sender(second_link, 2);
+    first_sender.join().unwrap();
+    second_sender.join().unwrap();
+    let (first, second) = b.join().unwrap();
+    let in_order: Vec<u64> = (0..EVENTS).collect();
+    assert_eq!(
+        first, in_order,
+        "the first link's events, in the order made"
+    );
+    assert_eq!(
+        second, in_order,
+        "the second link's events, in the order made"
+    );
+}
