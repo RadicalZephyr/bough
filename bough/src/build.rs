@@ -6,9 +6,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::builder::{Builder, Stores};
 use crate::cell::CellRef;
-use crate::engine::edge::Edge;
+use crate::engine::boundary::Boundary;
 #[cfg(any(feature = "std", feature = "critical-section"))]
-use crate::engine::edge::{Connection, Drain};
+use crate::engine::boundary::{Connection, Drain};
 use crate::engine::nodes::stream::ChainNode;
 use crate::engine::{Sched, Store, Tx};
 use crate::guard::{Liveness, Released, Stamps};
@@ -56,8 +56,8 @@ pub struct BuildContext<M: Mode = Local> {
     /// The transaction-in-progress flag, which is also the poison.
     pub(crate) in_tx: bool,
     pub(crate) s: Sched,
-    /// The I/O edge: connected slots, the inbox and the driver's waker.
-    pub(crate) edge: Edge,
+    /// The I/O boundary: connected slots, the inbox and the driver's waker.
+    pub(crate) boundary: Boundary,
     /// The queue the runtime's `Io`s share, in `Local`.
     pub(crate) io: M::IoQueue,
     /// The anchored nodes, each with the liveness its anchor shares. A
@@ -83,7 +83,7 @@ impl<M: Mode> BuildContext<M> {
             tx: 0,
             in_tx: false,
             s: Sched::default(),
-            edge: Edge::new(graph_id, &released, &stamps),
+            boundary: Boundary::new(graph_id, &released, &stamps),
             io: M::IoQueue::new(graph_id, &released, &stamps),
             anchors: Vec::new(),
             ownerless: Liveness::ownerless(&released),
@@ -126,11 +126,11 @@ impl<M: Mode> BuildContext<M> {
     ) {
         self.check(input.token);
         assert!(
-            Drain::connect(slot, self.graph_id, self.edge.waker.as_ref()),
+            Drain::connect(slot, self.graph_id, self.boundary.waker.as_ref()),
             "bough: an input slot connected twice: a slot feeds one input of one graph; \
              give a second producer or a second input a slot of its own"
         );
-        let slots = &mut self.edge.slots;
+        let slots = &mut self.boundary.slots;
         let at = slots
             .iter()
             .position(|connection| connection.priority < priority)

@@ -5,7 +5,7 @@ use core::mem;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Waker;
 
-use crate::engine::edge::{Drain, Lock};
+use crate::engine::boundary::{Drain, Lock};
 
 /// A static mailbox for one input: written from any context, folded in
 /// place, drained by the driver.

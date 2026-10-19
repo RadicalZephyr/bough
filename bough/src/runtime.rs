@@ -21,13 +21,13 @@ use crate::cell::CellRef;
 #[cfg(feature = "statistics")]
 use crate::engine::Statistics;
 #[cfg(any(feature = "std", feature = "critical-section"))]
-use crate::engine::edge::Connection;
-use crate::engine::edge::Fault;
+use crate::engine::boundary::Connection;
+use crate::engine::boundary::Fault;
 #[cfg(all(
     target_has_atomic = "ptr",
     any(feature = "std", feature = "critical-section")
 ))]
-use crate::engine::edge::{Inbox, RemoteCall, Unit};
+use crate::engine::boundary::{Inbox, RemoteCall, Unit};
 use crate::engine::{Cx, DoubleSend, Entry, LISTENERS, ListenerCall, TokenFault, part};
 #[cfg(all(
     target_has_atomic = "ptr",
@@ -289,7 +289,7 @@ impl<M: Mode> Runtime<M> {
                 target_has_atomic = "ptr",
                 any(feature = "std", feature = "critical-section")
             ))]
-            self.build.edge.inbox.poison();
+            self.build.boundary.inbox.poison();
             self.build.io.poison();
         }
         poisoned
@@ -1231,7 +1231,7 @@ impl<M: Mode> Runtime<M> {
     fn begin_pump(&mut self) -> usize {
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
-            self.build.edge.pumps += 1;
+            self.build.boundary.pumps += 1;
         }
         self.build.io.begin_pump();
         #[cfg(all(
@@ -1239,7 +1239,7 @@ impl<M: Mode> Runtime<M> {
             any(feature = "std", feature = "critical-section")
         ))]
         {
-            self.build.edge.inbox.begin_pump(&self.build.stamps)
+            self.build.boundary.inbox.begin_pump(&self.build.stamps)
         }
         #[cfg(not(all(
             target_has_atomic = "ptr",
@@ -1263,7 +1263,7 @@ impl<M: Mode> Runtime<M> {
         ))]
         let remote = self
             .build
-            .edge
+            .boundary
             .inbox
             .front()
             .filter(|&stamp| before(stamp, limit));
@@ -1301,7 +1301,7 @@ impl<M: Mode> Runtime<M> {
         any(feature = "std", feature = "critical-section")
     ))]
     fn pump_remote(&mut self, skip_stale: bool) -> Result<(), Stop> {
-        match self.build.edge.inbox.pop() {
+        match self.build.boundary.inbox.pop() {
             Some(RemoteCall::Unit(unit)) => self.run_remote_unit(skip_stale, unit),
             Some(RemoteCall::Register(registration)) => M::register(self, registration, skip_stale),
             None => unreachable!("bough engine: the front call is there to pop"),
@@ -1368,10 +1368,10 @@ impl<M: Mode> Runtime<M> {
     /// released.
     #[cfg(any(feature = "std", feature = "critical-section"))]
     fn pump_slot(&mut self, skip_stale: bool) -> Result<bool, Stop> {
-        let pump = self.build.edge.pumps;
+        let pump = self.build.boundary.pumps;
         let Some(k) = self
             .build
-            .edge
+            .boundary
             .slots
             .iter()
             .position(|connection| connection.drained != pump && connection.slot.pending())
@@ -1381,8 +1381,8 @@ impl<M: Mode> Runtime<M> {
         // Marked as it's picked, so the pump picks each slot at most once,
         // and before its transaction runs, which may connect a slot ahead
         // of it and move it.
-        self.build.edge.slots[k].drained = pump;
-        let Connection { input, slot, .. } = self.build.edge.slots[k];
+        self.build.boundary.slots[k].drained = pump;
+        let Connection { input, slot, .. } = self.build.boundary.slots[k];
         let mut live = true;
         slot.drain(&mut |event| match self.build.lookup(input) {
             Ok(i) => {
@@ -1397,7 +1397,7 @@ impl<M: Mode> Runtime<M> {
             Err(_) => live = false,
         });
         if !live {
-            self.build.edge.slots.remove(k);
+            self.build.boundary.slots.remove(k);
             slot.disconnect();
             if !skip_stale {
                 return Err((PumpError::Stale, SEND));
@@ -1417,21 +1417,21 @@ impl<M: Mode> Runtime<M> {
     /// on the interrupt itself gives `Waker::noop()`. A waker that would
     /// wake the same task as the one registered changes nothing.
     pub fn set_waker(&mut self, waker: Waker) {
-        let BuildContext { edge, io, .. } = &mut self.build;
-        if edge.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
+        let BuildContext { boundary, io, .. } = &mut self.build;
+        if boundary.waker.as_ref().is_some_and(|w| w.will_wake(&waker)) {
             return;
         }
         #[cfg(any(feature = "std", feature = "critical-section"))]
-        for connection in &edge.slots {
+        for connection in &boundary.slots {
             connection.slot.set_waker(Some(waker.clone()));
         }
         #[cfg(all(
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        edge.inbox.set_waker(waker.clone());
+        boundary.inbox.set_waker(waker.clone());
         io.set_waker(&waker);
-        edge.waker = Some(waker);
+        boundary.waker = Some(waker);
     }
 
     /// A handle for I/O code on any thread: every call through it queues
@@ -1444,7 +1444,7 @@ impl<M: Mode> Runtime<M> {
     ))]
     pub fn remote_io(&self) -> RemoteIo {
         RemoteIo {
-            inbox: self.build.edge.inbox.clone(),
+            inbox: self.build.boundary.inbox.clone(),
         }
     }
 
@@ -1822,7 +1822,7 @@ impl<M: Mode> Drop for Runtime<M> {
             .count()
             + self.build.io.kept_once();
         #[cfg(target_has_atomic = "ptr")]
-        let waiting = waiting + self.build.edge.inbox.kept_once();
+        let waiting = waiting + self.build.boundary.inbox.kept_once();
         assert!(
             waiting == 0,
             "bough: the runtime dropped with {waiting} once-listener(s) kept but never fired. \

@@ -1,4 +1,4 @@
-//! The I/O edge's engine side (RFD 6, RFD 7): the lock the edge's shared
+//! The I/O boundary's engine side (RFD 6, RFD 7): the lock the boundary's shared
 //! state lives behind, the input slots connected to the graph, the inbox of
 //! remote calls, and the waker the driver registered.
 //!
@@ -58,7 +58,7 @@ use crate::runtime::RemoteTransaction;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 use crate::token::Token;
 
-/// The lock under the edge's shared state: the standard mutex.
+/// The lock under the boundary's shared state: the standard mutex.
 ///
 /// Only a slot's fold and the clone or drop of a waker run under it, never
 /// a transaction, so a panic there leaves the state consistent and a
@@ -82,7 +82,7 @@ impl<T> Lock<T> {
     }
 }
 
-/// The lock under the edge's shared state on bare metal: a critical
+/// The lock under the boundary's shared state on bare metal: a critical
 /// section, which the target's HAL provides through the
 /// `critical-section` crate.
 #[cfg(all(not(feature = "std"), feature = "critical-section"))]
@@ -135,9 +135,9 @@ pub(crate) struct Connection {
     pub(crate) drained: u64,
 }
 
-/// The graph's side of the edge. It lives in the build context, since
+/// The graph's side of the boundary. It lives in the build context, since
 /// [`connect`](crate::BuildContext::connect) takes one.
-pub(crate) struct Edge {
+pub(crate) struct Boundary {
     /// The waker the driver registered; a slot connected later gets it too.
     pub(crate) waker: Option<Waker>,
     /// The connected slots in the order the pump drains them: higher
@@ -156,9 +156,9 @@ pub(crate) struct Edge {
     pub(crate) inbox: Arc<Inbox>,
 }
 
-impl Edge {
+impl Boundary {
     /// The remote's half of [`BuildContext::arm`]: a remote send from this
-    /// thread is refused until [`disarm`](Edge::disarm) (RFD 6).
+    /// thread is refused until [`disarm`](Boundary::disarm) (RFD 6).
     #[inline]
     pub(crate) fn arm(&self) {
         #[cfg(all(feature = "std", target_has_atomic = "ptr"))]
@@ -174,7 +174,7 @@ impl Edge {
 
     pub(crate) fn new(graph: u32, released: &Released, stamps: &Stamps) -> Self {
         let _ = (graph, released, stamps);
-        Edge {
+        Boundary {
             waker: None,
             #[cfg(any(feature = "std", feature = "critical-section"))]
             slots: Vec::new(),
@@ -193,7 +193,7 @@ impl Edge {
 /// disconnects its slots, so that each can be connected again and no event
 /// written for this graph reaches another, and closes its inbox, so that
 /// no `RemoteIo` keeps filling a queue that no pump will drain.
-impl Drop for Edge {
+impl Drop for Boundary {
     fn drop(&mut self) {
         #[cfg(any(feature = "std", feature = "critical-section"))]
         for connection in self.slots.drain(..) {
@@ -443,7 +443,7 @@ impl<M: Mode> BuildContext<M> {
     /// (RFD 6).
     #[inline]
     pub(crate) fn arm(&self) {
-        self.edge.arm();
+        self.boundary.arm();
         self.io.graph_code(true);
     }
 
@@ -451,7 +451,7 @@ impl<M: Mode> BuildContext<M> {
     /// transaction ends.
     #[inline]
     pub(crate) fn disarm(&self) {
-        self.edge.disarm();
+        self.boundary.disarm();
         self.io.graph_code(false);
     }
 

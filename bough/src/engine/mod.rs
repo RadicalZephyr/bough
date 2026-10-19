@@ -33,9 +33,9 @@ macro_rules! count {
     };
 }
 
+pub(crate) mod boundary;
 mod children;
 mod collect;
-pub(crate) mod edge;
 mod loops;
 pub(crate) mod nodes;
 mod pull;

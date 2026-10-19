@@ -92,7 +92,7 @@ impl<M: Mode> BuildContext<M> {
             target_has_atomic = "ptr",
             any(feature = "std", feature = "critical-section")
         ))]
-        self.edge.inbox.roots(&mut waiting);
+        self.boundary.inbox.roots(&mut waiting);
         for token in waiting {
             if let Ok(i) = self.lookup(token) {
                 self.shade(&mut gray, epoch, i);

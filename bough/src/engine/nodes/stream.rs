@@ -5,7 +5,7 @@ use core::any::Any;
 
 use super::Marker;
 use crate::build::BuildContext;
-use crate::engine::edge::fire_input;
+use crate::engine::boundary::fire_input;
 use crate::engine::{Cx, Data, NodeOps, Ops, clear_slot, part, slot_mut};
 use crate::mode::Mode;
 use crate::source::Source;
