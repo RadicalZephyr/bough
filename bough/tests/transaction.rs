@@ -160,3 +160,125 @@ fn statistics_count_instants_and_nothing_else_on_an_unconsumed_input() {
     assert_eq!(after.ordered, 0, "nothing depends on the input");
     assert_eq!(after.evaluations, 0);
 }
+
+/// An empty runtime from each constructor, then a build, then a send and a
+/// listener: the runtime is made first, and the build fixes nothing about
+/// it but what it holds.
+#[test]
+fn an_empty_runtime_from_each_constructor_builds_sends_and_listens() {
+    let mut local = Runtime::local();
+    assert_eq!(local.live_nodes(), 0, "empty");
+    let (numbers_in, total) = local.build_here(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
+    });
+    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    local
+        .listen_steps(total, move |t| sink.borrow_mut().push(*t))
+        .keep();
+    local.send(numbers_in, 2);
+    local.send(numbers_in, 3);
+    assert_eq!(*heard.borrow(), [2, 5]);
+
+    let mut threaded = Runtime::threaded();
+    assert_eq!(threaded.live_nodes(), 0, "empty");
+    let (numbers_in, total) = threaded.build_here(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
+    });
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = heard.clone();
+    threaded
+        .listen_steps(total, move |t| sink.lock().unwrap().push(*t))
+        .keep();
+    threaded.send(numbers_in, 2);
+    threaded.send(numbers_in, 3);
+    assert_eq!(*heard.lock().unwrap(), [2, 5]);
+}
+
+/// A later build on a running runtime is the semantics' `Execute` fired
+/// once by an input nothing else fires (RFD 2). `sample` inside it reads
+/// the value the earlier send committed, its nodes join the graph the
+/// earlier build made, and nothing the earlier build made fires in it.
+#[test]
+fn a_later_build_samples_the_values_from_before_it() {
+    let mut graph = Runtime::local();
+    let (numbers_in, latest, numbers) = graph.build_here(|b| {
+        let (numbers, numbers_in) = b.input::<u32>();
+        let numbers = numbers.share(b);
+        (numbers_in, numbers.hold(b, 0u32), numbers)
+    });
+    let fired = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = fired.clone();
+    graph
+        .listen(numbers, move |_| count.set(count.get() + 1))
+        .keep();
+    graph.send(numbers_in, 5);
+    assert_eq!(fired.get(), 1);
+
+    let (seen, doubled) = graph.build_here(|b| {
+        let seen = *latest.sample(b);
+        (seen, numbers.map(|n| n * 2).hold(b, seen * 2))
+    });
+    assert_eq!(seen, 5, "the value from before the build");
+    assert_eq!(fired.get(), 1, "nothing the first build made fired");
+    assert_eq!(*graph.sample(doubled), 10);
+    graph.send(numbers_in, 6);
+    assert_eq!(
+        *graph.sample(doubled),
+        12,
+        "the new hold follows the old input"
+    );
+}
+
+/// A later build runs the child transactions it starts before it returns,
+/// as the first build does: a defer of a `steps_with_current` built there
+/// fires in a child of the build's transaction.
+#[test]
+fn a_later_build_runs_its_child_transactions_before_it_returns() {
+    let mut graph = Runtime::local();
+    let (count_in, count) = graph.build_here(|b| {
+        let (count, count_in) = b.input_cell(3u32);
+        (count_in, count)
+    });
+    let later = graph.build_here(|b| count.steps_with_current(b).defer(b).hold(b, 0u32));
+    assert_eq!(*graph.sample(later), 3, "the child transaction ran");
+    graph.send(count_in, 4);
+    assert_eq!(*graph.sample(later), 4);
+}
+
+/// The same-instant cycle check covers a later build: closing a loop with
+/// a cell defined from its own forward at the same instant is refused, and
+/// the panic escapes the build's transaction, so the runtime is poisoned.
+#[test]
+fn a_later_build_refuses_a_same_instant_cycle() {
+    let mut graph = Runtime::local();
+    let numbers_in = graph.build_here(|b| b.input::<u32>().1);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        graph.build_here(|b| {
+            let (count, count_loop) = b.cell_loop::<u32>();
+            let next = count.map_cell(b, |n| n + 1);
+            count_loop.close(b, next);
+        })
+    }));
+    assert!(panic_text(result).contains("cycle"));
+    assert_eq!(graph.try_send(numbers_in, 1), Err(SendError::Poisoned));
+}
+
+/// A poisoned runtime refuses a build as it refuses its other operations.
+#[test]
+fn a_poisoned_runtime_refuses_a_build() {
+    let mut graph = Runtime::local();
+    let a_in = graph.build_here(|b| b.input::<u32>().1);
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        graph.transaction(|tx| {
+            tx.send(a_in, 1);
+            tx.send(a_in, 2);
+        })
+    }));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        graph.build_here(|b| b.constant(1u32));
+    }));
+    assert!(panic_text(result).contains("poisoned"));
+}

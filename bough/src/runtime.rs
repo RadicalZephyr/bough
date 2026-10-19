@@ -115,37 +115,20 @@ pub struct Runtime<M: Mode = Local> {
 fn build_graph<M: Mode, R: Trace>(
     f: impl FnOnce(&mut BuildContext<M>) -> R,
 ) -> (Runtime<M>, Anchored<R>) {
-    let mut build = BuildContext::<M>::new();
-    let id = build.graph_id;
-    build.begin();
-    build.push_scope();
-    let r = f(&mut build);
-    // A `mem::swap` with another graph's build context is safe code; with
-    // no `unsafe` in the engine it is a wrong-graph error, caught here.
-    assert_eq!(
-        build.graph_id, id,
-        "bough: the build context was swapped for another graph's"
-    );
-    build.pop_scope();
-    build.finish();
-    let boundary = build.anchor(r);
-    let mut graph = Runtime {
-        build,
-        released_before: 0,
-        baseline: 0,
-        policy: CollectionPolicy::Automatic,
-        stress: false,
-        stale_operations: 0,
-        #[cfg(all(debug_assertions, feature = "std"))]
-        shut_down: false,
-    };
-    // Transaction zero is a unit like any other: a collection that is due
-    // runs after it, and frees what the build made that nothing reaches.
-    graph.collect_if_due();
+    let mut graph = Runtime::empty();
+    let boundary = graph.build_anchored(f);
     (graph, boundary)
 }
 
 impl Runtime<Local> {
+    /// An empty `Local` runtime: no nodes until a
+    /// [`build`](Runtime::build_here) adds them. The empty runtime is no
+    /// hazard, since `send` and `listen` need tokens, and only a build or a
+    /// `construct` hands them out.
+    pub fn local() -> Self {
+        Runtime::empty()
+    }
+
     /// Builds a `Local` graph. The closure gets the only [`BuildContext`];
     /// whatever it returns is the graph's boundary, which comes back
     /// [`Anchored`], so `R: Trace`. [`keep`](Anchored::keep) it to hold the
@@ -200,6 +183,13 @@ impl Runtime<Local> {
 
 #[cfg(target_has_atomic = "ptr")]
 impl Runtime<Threaded> {
+    /// An empty `Threaded` runtime, which is `Send`: every value and closure
+    /// a build stores in it must be `Send`. It exists where the target has
+    /// pointer atomics.
+    pub fn threaded() -> Self {
+        Runtime::empty()
+    }
+
     /// Builds a `Threaded` graph, which is `Send`; every value and closure it
     /// stores must be `Send`.
     ///
@@ -277,6 +267,97 @@ where
 }
 
 impl<M: Mode> Runtime<M> {
+    /// An empty runtime of mode `M`, for [`local`](Runtime::local) and
+    /// [`threaded`](Runtime::threaded).
+    fn empty() -> Self {
+        Runtime {
+            build: BuildContext::new(),
+            released_before: 0,
+            baseline: 0,
+            policy: CollectionPolicy::Automatic,
+            stress: false,
+            stale_operations: 0,
+            #[cfg(all(debug_assertions, feature = "std"))]
+            shut_down: false,
+        }
+    }
+
+    /// Builds on the runtime, and returns what the closure returned, rooted
+    /// for the runtime's life, as if [anchored](Runtime::anchor) and
+    /// [kept](Anchored::keep). So `R: Trace`, and nothing more: the value
+    /// comes back to the caller, and the runtime keeps only its tokens. The
+    /// closure gets the only [`BuildContext`] and runs now, so it needn't
+    /// be `Send` or `'static`, in either mode.
+    ///
+    /// The first build on an empty runtime and every later one are the
+    /// same: the semantics' `Execute`, fired once by an input nothing else
+    /// fires. A build runs in a transaction of its own, so `sample` inside
+    /// it sees the values from before it, and the same-instant cycle check
+    /// covers what it builds, as for a [`construct`](crate::Source::construct).
+    /// Its child transactions, which a [`split`](crate::Source::split) or a
+    /// [`defer`](crate::Source::defer) that fires in it starts, run before
+    /// it returns, and so does the collection that is due after it, as after
+    /// any unit: what the build made that nothing reaches is gone before
+    /// I/O code sees it.
+    ///
+    /// A build is I/O code's call, between pumps. It can't be called from
+    /// inside a [`transaction`](Runtime::transaction), whose closure holds
+    /// the runtime:
+    ///
+    /// ```compile_fail,E0499
+    /// use bough::prelude::*;
+    ///
+    /// let mut runtime = Runtime::local();
+    /// let numbers_in = runtime.build_here(|b| b.input::<u32>().1);
+    /// runtime.transaction(|tx| {
+    ///     tx.send(numbers_in, 1);
+    ///     let _more = runtime.build_here(|b| b.constant(1u32)); // error: runtime is borrowed by the transaction
+    /// });
+    /// ```
+    ///
+    /// Each build roots a little more for the runtime's life. A program
+    /// that builds repeatedly and lets the parts go uses
+    /// [`build_anchored`](Runtime::build_anchored).
+    ///
+    /// Panics on a poisoned runtime. A panic inside the closure, or a loop
+    /// it leaves open, escapes the transaction and poisons the runtime.
+    pub fn build_here<R: Trace>(&mut self, f: impl FnOnce(&mut BuildContext<M>) -> R) -> R {
+        self.build_anchored(f).keep()
+    }
+
+    /// [`build`](Runtime::build_here), but what the closure returned comes
+    /// back [`Anchored`]: dropping it releases the root, and the next
+    /// collection frees what only it reached. Part of it can be kept by
+    /// anchoring that part and dropping the rest. The bounds are
+    /// `build`'s.
+    pub fn build_anchored<R: Trace>(
+        &mut self,
+        f: impl FnOnce(&mut BuildContext<M>) -> R,
+    ) -> Anchored<R> {
+        self.enter();
+        self.mark_on_panic(|rt| {
+            let build = &mut rt.build;
+            let id = build.graph_id;
+            build.begin();
+            build.push_scope();
+            let r = f(build);
+            // A `mem::swap` with another graph's build context is safe
+            // code; with no `unsafe` in the engine it is a wrong-graph
+            // error, caught here.
+            assert_eq!(
+                build.graph_id, id,
+                "bough: the build context was swapped for another graph's"
+            );
+            build.pop_scope();
+            build.finish();
+            let anchored = build.anchor(r);
+            // A build is a unit like any other: a collection that is due
+            // runs after it, and frees what it made that nothing reaches.
+            rt.collect_if_due();
+            anchored
+        })
+    }
+
     /// Whether a transaction never finished. Every entry checks this, and
     /// one that finds it set mirrors it into the inbox and the `Io`s'
     /// queue, so that remote sends and `Io` calls fail from then on (RFD 6).
@@ -2395,6 +2476,27 @@ mod tests {
         // an affine stream, and both of its consumers cloned from it.
         assert_eq!(data(&graph, shared_in.token.index), None);
         assert_eq!(data(&graph, shared.token.index), Some(7));
+    }
+
+    /// A later build runs in a transaction of its own, after the sends
+    /// before it: the serial advances by one, as for a send with no child
+    /// transactions, and the nodes it makes record that serial as the one
+    /// that created them.
+    #[test]
+    fn a_later_build_runs_in_a_transaction_of_its_own() {
+        let mut graph = Runtime::local();
+        let first = graph.build_here(|b| b.constant(1u32));
+        assert_eq!(graph.build.tx, 1, "the first build is serial 1");
+        let numbers_in = graph.build_here(|b| b.input::<u32>().1);
+        graph.send(numbers_in, 1);
+        let before = graph.build.tx;
+        let later = graph.build_here(|b| b.constant(2u32));
+        assert_eq!(graph.build.tx, before + 1);
+        assert!(!graph.build.in_tx, "and it finished");
+        let created =
+            |token: crate::token::Token| graph.build.store.hot[token.index as usize].created;
+        assert_eq!(created(first.token), 1);
+        assert_eq!(created(later.token), before + 1);
     }
 
     /// Dispatch prunes a node's entries only when one died there. A spent
