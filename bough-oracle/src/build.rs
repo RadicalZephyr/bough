@@ -1065,7 +1065,7 @@ struct Checked {
 /// each node makes. Every error names the node at fault where there is one.
 ///
 /// A cell loop is a `State` when the definition its `Close` names is one,
-/// and the `Close` comes later. So [`states`] first works out which cells
+/// and the `Close` comes later. So `states` first works out which cells
 /// are `State`s, loops included, and the definitions are checked once,
 /// each loop declared as what its definition is.
 pub fn check(program: &Program) -> Result<Vec<NodeType>, BuildError> {
