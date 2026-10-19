@@ -84,12 +84,11 @@ pub struct Cell<A> {
 /// ```compile_fail,E0599
 /// use bough::prelude::*;
 ///
-/// let (_graph, boundary) = Runtime::build(|b| {
+/// let _ = Runtime::local().build_here(|b| {
 ///     let (names, _names_in) = b.input::<String>();
 ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     let _joined = members.steps(b); // error: no method named `steps` found for struct `State`
 /// });
-/// boundary.keep();
 /// ```
 pub struct State<A> {
     pub(crate) token: Token,

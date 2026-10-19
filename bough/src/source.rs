@@ -10,7 +10,8 @@
 //! ```
 //! use bough::prelude::*;
 //!
-//! let (graph, boundary) = Runtime::build(|b| {
+//! let mut graph = Runtime::local();
+//! let total = graph.build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (limit, _limit_in) = b.input_cell(10u32);
 //!     numbers
@@ -19,7 +20,6 @@
 //!         .snapshot(limit, |n, l| n.min(*l))
 //!         .hold(b, 0u32)                  // one node for the whole chain
 //! });
-//! let total = boundary.keep();
 //! ```
 //!
 //! A chain used twice does not compile:
@@ -27,13 +27,13 @@
 //! ```compile_fail,E0382
 //! use bough::prelude::*;
 //!
-//! let (graph, boundary) = Runtime::build(|b| {
+//! let mut graph = Runtime::local();
+//! let _ = graph.build_here(|b| {
 //!     let (numbers, _in) = b.input::<u32>();
 //!     let doubled = numbers.map(|n| n * 2);
 //!     let a = doubled.hold(b, 0u32);
 //!     let b2 = doubled.hold(b, 0u32); // error: use of moved value
 //! });
-//! boundary.keep();
 //! ```
 //!
 //! A chain runs only inside its node. The hidden method that pulls it takes
@@ -42,11 +42,11 @@
 //! ```compile_fail,E0433
 //! use bough::prelude::*;
 //!
-//! let (graph, boundary) = Runtime::build(|b| {
+//! let mut graph = Runtime::local();
+//! let _ = graph.build_here(|b| {
 //!     let (mut numbers, _in) = b.input::<u32>();
 //!     let _ = numbers.pull(&mut bough::Cx::new(b)); // error: no `Cx` in `bough`
 //! });
-//! boundary.keep();
 //! ```
 
 use alloc::boxed::Box;
@@ -146,11 +146,11 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// #[derive(Clone)]
     /// struct Label(&'static str);
     ///
-    /// let (graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let _ = graph.build_here(|b| {
     ///     let (clicks, _clicks_in) = b.input::<()>();
     ///     let _ = clicks.map_to(Label("clicked")).node(b); // error: Label is not Trace
     /// });
-    /// boundary.keep();
     /// ```
     fn map_to<B>(self, value: B) -> MapTo<Self, B>
     where
@@ -259,13 +259,12 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _count = numbers
     ///         .map(Rc::new)
     ///         .accumulate_mut(b, 0u32, |_, n: &mut u32| *n += 1); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn accumulate_mut<C, S, F>(self, builder: &mut C, initial: S, f: F) -> State<S>
     where
@@ -308,11 +307,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn scan<C, S, B, F>(self, builder: &mut C, initial: S, f: F) -> Stream<B>
     where
@@ -361,11 +359,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn node<C>(self, builder: &mut C) -> Stream<Self::Event>
     where
@@ -394,11 +391,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _halves = numbers.map(|n| (Rc::new(n), n)).unzip(b); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn unzip<C, A, B>(self, builder: &mut C) -> (Stream<A>, Stream<B>)
     where
@@ -473,13 +469,13 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (words_in, letters, count) = graph.build_here(|b| {
     ///     let (words, words_in) = b.input::<Vec<char>>();
     ///     let letters = words.split(b).share(b);
     ///     let count = letters.accumulate(b, 0u32, |_, n| n + 1);
     ///     (words_in, letters, count)
     /// });
-    /// let (words_in, letters, count) = boundary.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen(letters, move |c| log.borrow_mut().push(c)).keep();
@@ -511,11 +507,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn split<C>(self, builder: &mut C) -> Stream<<Self::Event as IntoIterator>::Item>
     where
@@ -560,7 +555,8 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (starts_in, counts) = graph.build_here(|b| {
     ///     let (counts, counts_loop) = b.stream_loop::<u32>();
     ///     let again = counts.filter(|n| *n > 1).map(|n| n - 1).defer(b);
     ///     let (starts, starts_in) = b.input::<u32>();
@@ -568,7 +564,6 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     counts_loop.close(b, counts);
     ///     (starts_in, counts)
     /// });
-    /// let (starts_in, counts) = boundary.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen(counts, move |n| log.borrow_mut().push(n)).keep();
@@ -594,11 +589,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn defer<C>(self, builder: &mut C) -> Stream<Self::Event>
     where
@@ -647,7 +641,8 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     ///
     /// // Each event opens a counter of its own: an input and a hold over it.
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (open_in, opened) = graph.build_here(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -656,7 +651,6 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     });
     ///     (open_in, opened)
     /// });
-    /// let (open_in, opened) = boundary.keep();
     /// let received = Rc::new(RefCell::new(Vec::new()));
     /// let log = received.clone();
     /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
@@ -692,11 +686,10 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     fn construct<C, B, F>(self, builder: &mut C, f: F) -> Stream<B>
     where

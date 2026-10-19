@@ -32,7 +32,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let _ = b.input::<Rc<u32>>();
 //! });
 //! ```
@@ -42,7 +42,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let _ = b.input_coalescing(|a: Rc<u32>, _: Rc<u32>| a);
 //! });
 //! ```
@@ -50,7 +50,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let rc = Rc::new(1u32);
 //!     let _ = b.input_coalescing(move |a: u32, c: u32| a + c + *rc);
 //! });
@@ -61,7 +61,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let _ = b.input_cell(Rc::new(0u32));
 //! });
 //! ```
@@ -71,7 +71,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let _ = b.input_cell_coalescing(Rc::new(0u32), |a, _| a);
 //! });
 //! ```
@@ -79,7 +79,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let rc = Rc::new(1u32);
 //!     let _ = b.input_cell_coalescing(0u32, move |a, c| a + c + *rc);
 //! });
@@ -90,7 +90,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let _ = b.constant(Rc::new(0u32));
 //! });
 //! ```
@@ -102,7 +102,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).hold(b, Rc::new(0));
 //! });
@@ -111,7 +111,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.map(move |n| n + *rc).hold(b, 0);
@@ -123,7 +123,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).node(b);
 //! });
@@ -132,7 +132,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.map(move |n| n + *rc).node(b);
@@ -144,7 +144,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).share(b);
 //! });
@@ -153,7 +153,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.map(move |n| n + *rc).share(b);
@@ -165,7 +165,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (others, _others_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).merge(b, others.map(Rc::new), |a, _| a);
@@ -175,7 +175,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (others, _others_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
@@ -188,7 +188,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (others, _others_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).or_else(b, others.map(Rc::new));
@@ -198,7 +198,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (others, _others_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
@@ -211,7 +211,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.accumulate(b, Rc::new(0u32), |n, s| Rc::new(n + **s));
 //! });
@@ -220,7 +220,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.accumulate(b, 0u32, move |n, s| n + s + *rc);
@@ -232,7 +232,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers
 //!         .map(Rc::new)
@@ -243,7 +243,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.accumulate_mut(b, Rc::new(0u32), |n, s: &mut Rc<u32>| *s = Rc::new(n));
 //! });
@@ -252,7 +252,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.accumulate_mut(b, 0u32, move |n, s: &mut u32| *s += n + *rc);
@@ -264,7 +264,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.scan(b, 0u32, |n, s| (Rc::new(n), s + 1));
 //! });
@@ -273,7 +273,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.scan(b, Rc::new(0u32), |n, s| (n, Rc::new(n + **s)));
 //! });
@@ -282,7 +282,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.scan(b, 0u32, move |n, s| (n + *rc, s + 1));
@@ -294,7 +294,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.map(|n| vec![Rc::new(n)]).split(b);
 //! });
@@ -303,7 +303,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.map(move |n| vec![n + *rc]).split(b);
@@ -315,7 +315,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.map(Rc::new).defer(b);
 //! });
@@ -324,7 +324,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.map(move |n| n + *rc).defer(b);
@@ -336,7 +336,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _ = numbers.construct(b, |_, n| Rc::new(n));
 //! });
@@ -345,7 +345,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let rc = Rc::new(1u32);
 //!     let _ = numbers.construct(b, move |b, n| b.constant(n + *rc));
@@ -359,7 +359,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (level, _level_in) = b.input_cell(1u32);
 //!     let _ = level.map_cell(b, |l| Rc::new(*l));
 //! });
@@ -368,7 +368,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (level, _level_in) = b.input_cell(1u32);
 //!     let rc = Rc::new(1u32);
 //!     let _ = level.map_cell(b, move |l| l + *rc);
@@ -378,7 +378,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let total = numbers.accumulate_mut(b, 0u32, |n, s: &mut u32| *s += n);
 //!     let _ = total.map_cell(b, |t| Rc::new(*t));
@@ -390,7 +390,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (level, _level_in) = b.input_cell(1u32);
 //!     let _ = (level, level).lift(b, |a, c| Rc::new(a + c));
 //! });
@@ -399,7 +399,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (level, _level_in) = b.input_cell(1u32);
 //!     let rc = Rc::new(1u32);
 //!     let _ = (level, level).lift(b, move |a, c| a + c + *rc);
@@ -411,9 +411,9 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (_local, boundary) = Runtime::build(|b| b.constant(Rc::new(0u32)));
-//! let shared = boundary.keep();
-//! let _ = Runtime::build_threaded(move |b| {
+//! let mut _local = Runtime::local();
+//! let shared = _local.build_here(|b| b.constant(Rc::new(0u32)));
+//! let _ = Runtime::threaded().build_here(move |b| {
 //!     let _ = shared.steps(b);
 //! });
 //! ```
@@ -421,9 +421,9 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (_local, boundary) = Runtime::build(|b| b.constant(Rc::new(0u32)));
-//! let shared = boundary.keep();
-//! let _ = Runtime::build_threaded(move |b| {
+//! let mut _local = Runtime::local();
+//! let shared = _local.build_here(|b| b.constant(Rc::new(0u32)));
+//! let _ = Runtime::threaded().build_here(move |b| {
 //!     let _ = shared.steps_with_current(b);
 //! });
 //! ```
@@ -433,9 +433,9 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (_local, boundary) = Runtime::build(|b| b.input::<Rc<u32>>().0);
-//! let shared = boundary.keep();
-//! let _ = Runtime::build_threaded(move |b| {
+//! let mut _local = Runtime::local();
+//! let shared = _local.build_here(|b| b.input::<Rc<u32>>().0);
+//! let _ = Runtime::threaded().build_here(move |b| {
 //!     let _ = b.constant(shared).switch_stream(b);
 //! });
 //! ```
@@ -447,7 +447,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (_forward, forward_loop) = b.stream_loop::<Rc<u32>>();
 //!     forward_loop.close(b, numbers.map(Rc::new));
@@ -457,7 +457,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (_forward, forward_loop) = b.stream_loop::<u32>();
 //!     let rc = Rc::new(1u32);
@@ -470,7 +470,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (_forward, forward_loop) = b.cell_loop::<Rc<u32>>();
 //!     let definition = numbers.map(Rc::new).hold(b, Rc::new(0));
@@ -481,7 +481,7 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let _ = Runtime::build_threaded(|b| {
+//! let _ = Runtime::threaded().build_here(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (_forward, forward_loop) = b.state_loop::<Rc<u32>>();
 //!     let definition =
@@ -497,8 +497,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input::<u32>().0);
-//! let numbers = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let numbers = graph.build_here(|b| b.input::<u32>().0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen(numbers, move |n| assert!(n < *rc));
 //! ```
@@ -506,8 +506,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input::<u32>().0);
-//! let numbers = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let numbers = graph.build_here(|b| b.input::<u32>().0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen(numbers, move |n| assert!(n < *rc));
 //! ```
@@ -517,8 +517,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
-//! let level = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let level = graph.build_here(|b| b.input_cell(1u32).0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen_cell(level, move |l| assert!(*l < *rc));
 //! ```
@@ -526,8 +526,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
-//! let level = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let level = graph.build_here(|b| b.input_cell(1u32).0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen_cell(level, move |l| assert!(*l < *rc));
 //! ```
@@ -537,8 +537,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
-//! let level = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let level = graph.build_here(|b| b.input_cell(1u32).0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.listen_steps(level, move |l| assert!(*l < *rc));
 //! ```
@@ -546,8 +546,8 @@
 //! ```compile_fail,E0277
 //! # use std::rc::Rc;
 //! # use bough::prelude::*;
-//! let (mut graph, boundary) = Runtime::build_threaded(|b| b.input_cell(1u32).0);
-//! let level = boundary.keep();
+//! let mut graph = Runtime::threaded();
+//! let level = graph.build_here(|b| b.input_cell(1u32).0);
 //! let rc = Rc::new(1u32);
 //! let _ = graph.try_listen_steps(level, move |l| assert!(*l < *rc));
 //! ```

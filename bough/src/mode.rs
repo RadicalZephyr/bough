@@ -37,11 +37,10 @@
 //! use std::rc::Rc;
 //!
 //! let offset = Rc::new(5u32);
-//! let (_graph, boundary) = Runtime::build_threaded(move |b| {
+//! let _ = Runtime::threaded().build_here(move |b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _held = numbers.map(move |n| n + *offset).hold(b, 0u32); // error: Rc is not Send
 //! });
-//! boundary.keep();
 //! ```
 
 use alloc::boxed::Box;

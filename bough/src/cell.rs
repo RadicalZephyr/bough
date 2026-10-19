@@ -30,7 +30,8 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 /// ```
 /// use bough::prelude::*;
 ///
-/// let (mut graph, boundary) = Runtime::build(|b| {
+/// let mut graph = Runtime::local();
+/// let (joins_in, members) = graph.build_here(|b| {
 ///     let (joins, joins_in) = b.input::<String>();
 ///     let (lines, _lines_in) = b.input::<String>();
 ///     let joins = joins.share(b);
@@ -43,7 +44,6 @@ use crate::token::{Cell, State, Stream, Token, TokenRef};
 ///     assert!(members.sample(b).is_empty());
 ///     (joins_in, members)
 /// });
-/// let (joins_in, members) = boundary.keep();
 /// let _sizes = graph.listen_cell(members, |m| println!("{} members", m.len()));
 /// graph.send(joins_in, "ada".to_string());
 /// assert_eq!(graph.sample(members).len(), 1);
@@ -151,13 +151,12 @@ impl<A: 'static> State<A> {
     /// ```compile_fail,E0599
     /// use bough::prelude::*;
     ///
-    /// let (_graph, boundary) = Runtime::build(|b| {
+    /// let _ = Runtime::local().build_here(|b| {
     ///     let (names, _names_in) = b.input::<String>();
     ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
     ///     let count = members.map_cell(b, |m| m.len());
     ///     let _counts = count.steps(b); // error: no method named `steps` found for struct `State`
     /// });
-    /// boundary.keep();
     /// ```
     pub fn map_cell<C, B, F>(self, builder: &mut C, f: F) -> State<B>
     where
@@ -180,7 +179,8 @@ impl<A: 'static> Cell<A> {
     /// ```
     /// use bough::prelude::*;
     ///
-    /// let (graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let _ = graph.build_here(|b| {
     ///     let (a, _a_in) = b.input_cell(1u32);
     ///     let (c, _c_in) = b.input_cell(2u32);
     ///     let text = format!("{} {}", a.sample(b), c.sample(b));
@@ -189,7 +189,6 @@ impl<A: 'static> Cell<A> {
     ///     let sum = *x + *y;
     ///     (text, sum)
     /// });
-    /// boundary.keep();
     /// ```
     pub fn sample<C: Builder>(self, builder: &C) -> &A {
         builder.read::<A>(self.token)
@@ -300,7 +299,8 @@ impl<A: 'static> Cell<Cell<A>> {
     ///
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (english_in, choose_in, shown) = graph.build_here(|b| {
     ///     let (english, english_in) = b.input_cell("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (choose, choose_in) = b.input::<bool>();
@@ -311,7 +311,6 @@ impl<A: 'static> Cell<Cell<A>> {
     ///     b.depends(&language, &[&french, &english]);
     ///     (english_in, choose_in, language.switch_cell(b))
     /// });
-    /// let (english_in, choose_in, shown) = boundary.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen_steps(shown, move |s| log.borrow_mut().push(s.clone())).keep();
@@ -352,7 +351,8 @@ impl<A: 'static> Cell<State<A>> {
     /// ```
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (names_in, pick_in, current) = graph.build_here(|b| {
     ///     let (names, names_in) = b.input::<String>();
     ///     let names = names.share(b);
     ///     let all = names.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
@@ -365,7 +365,6 @@ impl<A: 'static> Cell<State<A>> {
     ///     let current: State<Vec<String>> = chosen.switch_cell(b);
     ///     (names_in, pick_in, current)
     /// });
-    /// let (names_in, pick_in, current) = boundary.keep();
     /// graph.send(names_in, "ada".to_string());
     /// graph.send(names_in, "grace".to_string());
     /// graph.send(pick_in, true);
@@ -396,7 +395,8 @@ where
     ///
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, boundary) = Runtime::build(|b| {
+    /// let mut graph = Runtime::local();
+    /// let (keys_in, mouse_in, focus_in, events) = graph.build_here(|b| {
     ///     let (keys, keys_in) = b.input::<char>();
     ///     let (mouse, mouse_in) = b.input::<char>();
     ///     let keys = keys.share(b);
@@ -408,7 +408,6 @@ where
     ///     b.depends(&source, &[&mouse, &keys]); // what the closure selects from
     ///     (keys_in, mouse_in, focus_in, source.switch_stream(b))
     /// });
-    /// let (keys_in, mouse_in, focus_in, events) = boundary.keep();
     /// let seen = Rc::new(RefCell::new(Vec::new()));
     /// let log = seen.clone();
     /// graph.listen(events, move |e| log.borrow_mut().push(e)).keep();
@@ -449,13 +448,12 @@ where
     /// ```should_panic
     /// use bough::prelude::*;
     ///
-    /// let (_graph, boundary) = Runtime::build(|b| {
+    /// let _ = Runtime::local().build_here(|b| {
     ///     let (clicks, _clicks_in) = b.input::<u32>();
     ///     let current = b.constant(clicks);
     ///     let _first = current.switch_stream(b);
     ///     let _second = current.switch_stream(b); // panics: a second switch
     /// });
-    /// boundary.keep();
     /// ```
     ///
     /// The switch's slot keeps an event nobody consumed between
@@ -466,12 +464,11 @@ where
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let (_graph, boundary) = Runtime::build_threaded(|b| {
+    /// let _ = Runtime::threaded().build_here(|b| {
     ///     let quiet = b.never::<Rc<u32>>();
     ///     let selected = b.constant(quiet);
     ///     let _events = selected.switch_stream(b); // error: Rc is not Send
     /// });
-    /// boundary.keep();
     /// ```
     pub fn switch_stream<C>(self, builder: &mut C) -> Stream<S::Event>
     where

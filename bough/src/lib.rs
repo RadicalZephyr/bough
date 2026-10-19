@@ -77,13 +77,13 @@
 //!
 //! struct Click;
 //!
-//! let (mut graph, boundary) = Runtime::build(|b| {
+//! let mut graph = Runtime::local();
+//! let (clicks_in, label) = graph.build_here(|b| {
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
 //!     (clicks_in, label) // whatever build returns is the boundary, anchored
-//! });
-//! let (clicks_in, label) = boundary.keep(); // kept for the graph's life
+//! }); // kept for the graph's life
 //!
 //! let shown = Rc::new(RefCell::new(Vec::new()));
 //! let _listener = graph.listen_cell(label, {

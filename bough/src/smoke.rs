@@ -7,13 +7,13 @@ use alloc::vec::Vec;
 
 use crate::{Builder, CollectionPolicy, Lift, Runtime, Source};
 
-/// Builds and drives the smoke graph with one of the two graph
-/// constructors. A macro rather than a function generic over the mode: the
+/// Builds and drives the smoke graph on an empty runtime of either mode. A macro rather than a function generic over the mode: the
 /// closures here are made inside the body, and a function generic over the
 /// mode cannot name the `Accepts` bound their types need.
 macro_rules! smoke_graph {
-    ($build:path) => {{
-        let (mut graph, boundary) = $build(|b| {
+    ($new:expr) => {{
+        let mut graph = $new;
+        let boundary = graph.build_here(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
             let (level, level_in) = b.input_cell(1u32);
@@ -180,8 +180,7 @@ macro_rules! smoke_graph {
                 (stage2, stage3, stage4, stage5, stage6),
             )
         });
-        let ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later) =
-            boundary.keep();
+        let ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later) = boundary;
         let (
             stage2,
             (ticks, tick_steps, running, entry_count),
@@ -277,16 +276,16 @@ macro_rules! smoke_graph {
 /// has a `RemoteIo`, remote sends and remote transactions, pumped after
 /// the slot. Each expansion has a slot of its own.
 macro_rules! smoke_boundary {
-    ($build:path) => {{
+    ($new:expr) => {{
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
-            let (mut graph, boundary) = $build(|b| {
+            let mut graph = $new;
+            let (presses_in, total) = graph.build_here(|b| {
                 let (presses, presses_in) = b.input::<u32>();
                 b.connect(presses_in, &PRESSES, 0);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
             });
-            let (presses_in, total) = boundary.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             PRESSES.send(1);
             PRESSES.send(2);
@@ -306,8 +305,8 @@ macro_rules! smoke_boundary {
         }
         #[cfg(not(any(feature = "std", feature = "critical-section")))]
         {
-            let (mut graph, boundary) = $build(|b| b.input::<u32>().1);
-            boundary.keep();
+            let mut graph = $new;
+            let _presses_in = graph.build_here(|b| b.input::<u32>().1);
             graph.set_waker(core::task::Waker::noop().clone());
             graph.pump();
             let _ = graph.try_pump();
@@ -320,9 +319,9 @@ macro_rules! smoke_boundary {
 /// each mode the target has, and returns a sum of the final values.
 #[doc(hidden)]
 pub fn smoke() -> u32 {
-    let local = smoke_graph!(Runtime::build) + smoke_boundary!(Runtime::build);
+    let local = smoke_graph!(Runtime::local()) + smoke_boundary!(Runtime::local());
     #[cfg(target_has_atomic = "ptr")]
-    let threaded = smoke_graph!(Runtime::build_threaded) + smoke_boundary!(Runtime::build_threaded);
+    let threaded = smoke_graph!(Runtime::threaded()) + smoke_boundary!(Runtime::threaded());
     #[cfg(not(target_has_atomic = "ptr"))]
     let threaded = local;
     local + threaded
