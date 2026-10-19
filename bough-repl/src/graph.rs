@@ -103,12 +103,12 @@ pub struct Graph {
 impl Graph {
     /// Builds the graph: an input of commands and the construct over it.
     pub fn new() -> Graph {
-        let (mut runtime, edge) = Runtime::build(|b| {
+        let (mut runtime, boundary) = Runtime::build(|b| {
             let (commands, commands_in) = b.input::<Command>();
             let made = commands.construct(b, make);
             (commands_in, made)
         });
-        let (commands, made_events) = edge.keep();
+        let (commands, made_events) = boundary.keep();
         let made = Rc::new(RefCell::new(None));
         let slot = made.clone();
         runtime

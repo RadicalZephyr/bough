@@ -408,8 +408,8 @@ macro_rules! engine_mode {
             fn build<R: Trace + Send>(
                 f: impl FnOnce(&mut BuildContext<Self>) -> R,
             ) -> (Runtime<Self>, R) {
-                let (runtime, edge) = Runtime::$build(f);
-                (runtime, edge.keep())
+                let (runtime, boundary) = Runtime::$build(f);
+                (runtime, boundary.keep())
             }
             fn input(b: &mut BuildContext<Self>) -> (Stream<i64>, bough::Input<i64>) {
                 b.input()
@@ -2748,13 +2748,13 @@ enum Observed {
     Cell(CellToken),
 }
 
-/// What the build closure returns: the edge of the graph.
-struct Edge {
+/// What the build closure returns: the graph's boundary.
+struct Boundary {
     inputs: Vec<Vec<EngineInput>>,
     observed: Vec<Observed>,
 }
 
-impl Trace for Edge {
+impl Trace for Boundary {
     fn trace(&self, tracer: &mut Tracer) {
         for input in self.inputs.iter().flatten() {
             match input {
@@ -3705,7 +3705,7 @@ fn build_program<M: EngineMode>(
     program: &Program,
     checked: &Checked,
     slot: Option<(usize, &'static InputSlot<i64>)>,
-) -> Edge {
+) -> Boundary {
     let mut builder = Builder::<M> {
         program_inputs: &program.inputs,
         types: &checked.types,
@@ -3732,7 +3732,7 @@ fn build_program<M: EngineMode>(
         .iter()
         .map(|&node| builder.observe(b, node))
         .collect();
-    Edge {
+    Boundary {
         inputs: builder.inputs,
         observed,
     }
@@ -4174,7 +4174,7 @@ pub fn refusal<M: EngineMode>(
     let built = panic::catch_unwind(AssertUnwindSafe(|| {
         M::build(|b| build_program(b, program, &checked, None))
     }));
-    let (mut graph, edge) = match built {
+    let (mut graph, boundary) = match built {
         Ok(built) => built,
         Err(payload) => return Ok(Refusal::Build(panic_message(payload))),
     };
@@ -4183,7 +4183,7 @@ pub fn refusal<M: EngineMode>(
     for (k, sends) in program.schedule.iter().enumerate() {
         let order = engine_sends(
             sends,
-            &edge.inputs,
+            &boundary.inputs,
             options.permute_sends.map(|seed| (seed, k)),
         );
         let ran = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -4331,13 +4331,13 @@ fn execute<M: EngineMode>(
     options: RunOptions,
 ) -> Result<EngineRun, BuildError> {
     let checked = checked(program)?;
-    let (mut graph, edge) = M::build(|b| build_program(b, program, &checked, slot));
+    let (mut graph, boundary) = M::build(|b| build_program(b, program, &checked, slot));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
     graph.set_collect_after_every_unit(options.collect_every_unit);
     let log = Log::default();
     let mut listeners = Vec::new();
-    let mut recorders: Vec<Recorder> = edge
+    let mut recorders: Vec<Recorder> = boundary
         .observed
         .into_iter()
         .enumerate()
@@ -4364,7 +4364,7 @@ fn execute<M: EngineMode>(
             Drive::Transaction(sends) => {
                 let order = engine_sends(
                     sends,
-                    &edge.inputs,
+                    &boundary.inputs,
                     options.permute_sends.map(|seed| (seed, k)),
                 );
                 graph.transaction(|tx| send_all::<M>(tx, order));

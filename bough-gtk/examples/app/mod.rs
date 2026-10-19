@@ -26,7 +26,7 @@ pub enum Edit {
     Remove(Row),
 }
 
-/// The edge of the graph, and its permanent roots.
+/// The graph's boundary, and its permanent roots.
 #[derive(Clone, Copy, Trace)]
 pub struct App {
     pub clicks_in: Input<()>,
@@ -49,7 +49,7 @@ pub struct App {
 }
 
 pub fn build() -> (Runtime, App) {
-    let (graph, edge) = Runtime::build(|b| {
+    let (graph, boundary) = Runtime::build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
         let counter_label = count.map_cell(b, |n| format!("Clicked {n} times"));
@@ -98,7 +98,7 @@ pub fn build() -> (Runtime, App) {
             clock,
         }
     });
-    (graph, edge.keep())
+    (graph, boundary.keep())
 }
 
 /// A row that wires itself. It takes an `Io`, not the runtime, so it can
