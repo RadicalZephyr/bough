@@ -117,7 +117,8 @@ fn relinks(_: &Runtime) -> Option<u64> {
 #[test]
 fn steady_state_transactions_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let ((numbers_in, bumps_in, open_in), (total, both, merged), later) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let total = numbers
@@ -272,7 +273,6 @@ fn steady_state_transactions_do_not_allocate() {
             (stage2, stage3, stage4, stage5, stage6),
         )
     });
-    let ((numbers_in, bumps_in, open_in), (total, both, merged), later) = boundary.keep();
     let (stage2, stage3, stage4, stage5, stage6) = later;
     let ((products, current), (recent, recent_sum), (seen, running, product)) = stage2;
     let ((counted, counted_view, acc_fwd), (joined, joined_view), (last, window)) = stage3;
@@ -460,7 +460,8 @@ fn steady_state_transactions_do_not_allocate() {
 #[test]
 fn steady_state_collections_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (go_in, clicks_in, made, shown) = graph.build_here(|b| {
         let (clicks, clicks_in) = b.input::<u64>();
         let clicks = clicks.share(b);
         let (go, go_in) = b.input::<u64>();
@@ -475,7 +476,6 @@ fn steady_state_collections_do_not_allocate() {
         let shown = made.hold(b, zero).switch_cell(b);
         (go_in, clicks_in, made, shown)
     });
-    let (go_in, clicks_in, made, shown) = boundary.keep();
     graph.set_collection_policy(CollectionPolicy::Manual);
     let newest: Rc<StdCell<Option<Cell<u64>>>> = Rc::new(StdCell::new(None));
     let writer = newest.clone();
@@ -536,7 +536,8 @@ fn slot_writes_and_pumps_do_not_allocate() {
     static SENSOR: InputSlot<u64> = InputSlot::new(|a, b| a + b);
     static LEVEL: InputSlot<u64> = InputSlot::keep_latest();
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let total = graph.build_here(|b| {
         let (sensor, sensor_in) = b.input::<u64>();
         b.connect(sensor_in, &SENSOR, 0);
         let (level, level_in) = b.input::<u64>();
@@ -545,7 +546,6 @@ fn slot_writes_and_pumps_do_not_allocate() {
             .merge(b, level, |s, l| s + l)
             .accumulate(b, 0u64, |n, t| t + n)
     });
-    let total = boundary.keep();
     let (heard, sink) = tally();
     graph
         .listen_steps(total, move |_| sink.set(sink.get() + 1))
@@ -582,11 +582,11 @@ fn slot_writes_and_pumps_do_not_allocate() {
 fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
     const UNITS: u64 = 1_000;
     DRIVER.with(|driver| driver.set(true));
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, total) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         (numbers_in, numbers.accumulate(b, 0u64, |n, t| t + n))
     });
-    let (numbers_in, total) = boundary.keep();
     let (heard, sink) = tally();
     graph
         .listen_steps(total, move |_| sink.set(sink.get() + 1))
@@ -639,11 +639,11 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
 fn keeping_a_guard_leaks_nothing_once_the_runtime_drops() {
     DRIVER.with(|driver| driver.set(true));
     let round = || {
-        let (mut graph, boundary) = Runtime::build(|b| {
+        let mut graph = Runtime::local();
+        let (numbers_in, held) = graph.build_here(|b| {
             let (numbers, numbers_in) = b.input::<u64>();
             (numbers_in, numbers.hold(b, 0u64))
         });
-        let (numbers_in, held) = boundary.keep();
         graph.listen_cell(held, |_| ()).keep();
         graph.anchor(held).keep();
         graph.send(numbers_in, 1);

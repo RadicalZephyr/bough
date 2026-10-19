@@ -248,8 +248,8 @@ struct Observed {
 /// collects every cell's steps.
 fn observe(shape: (Drive, Lifts, Reads), schedule: &[Instant], seed: Option<u64>) -> Observed {
     let (drive_kind, lifts, reads) = shape;
-    let (mut graph, boundary) = Runtime::build(|b| slice(b, drive_kind, lifts, reads));
-    let boundary = boundary.keep();
+    let mut graph = Runtime::local();
+    let boundary = graph.build_here(|b| slice(b, drive_kind, lifts, reads));
     graph.set_shuffle_seed(seed);
     let now = Rc::new(StdCell::new(0));
     let max_health = record(&mut graph, boundary.max_health, &now);
@@ -479,7 +479,8 @@ fn shape_3c_health_steps_only_when_it_changes() {
 #[test]
 fn the_slices_first_stage_clamps_by_the_maximum_before_the_instant() {
     for seed in SEEDS {
-        let (mut graph, boundary) = Runtime::build(|b| {
+        let mut graph = Runtime::local();
+        let (heal_in, level_up_in, max_health, health, fraction) = graph.build_here(|b| {
             let (heal, heal_in) = b.input::<u32>();
             let (level_up, level_up_in) = b.input::<u32>();
             let (max_fwd, max_loop) = b.cell_loop::<u32>();
@@ -494,7 +495,6 @@ fn the_slices_first_stage_clamps_by_the_maximum_before_the_instant() {
             let fraction = (max_health, health).lift(b, |m, h| *h as f32 / *m as f32);
             (heal_in, level_up_in, max_health, health, fraction)
         });
-        let (heal_in, level_up_in, max_health, health, fraction) = boundary.keep();
         graph.set_shuffle_seed(seed);
         let now = Rc::new(StdCell::new(1));
         let fractions = record(&mut graph, fraction, &now);
@@ -543,7 +543,8 @@ fn sodium_rust_52_two_input_reduction() {
                     ),
                 ] {
                     let what = format!("looped {shield_looped}, lifted {lifted}, seed {seed:?}");
-                    let (mut graph, boundary) = Runtime::build(|b| {
+                    let mut graph = Runtime::local();
+                    let (heal_in, damage_in, health, effective) = graph.build_here(|b| {
                         let (heal, heal_in) = b.input::<u32>();
                         let (damage, damage_in) = b.input::<u32>();
                         let damage = damage.share(b);
@@ -568,7 +569,6 @@ fn sodium_rust_52_two_input_reduction() {
                         let effective = lifted.then(|| (health, shield).lift(b, |h, s| h + s));
                         (heal_in, damage_in, health, effective)
                     });
-                    let (heal_in, damage_in, health, effective) = boundary.keep();
                     graph.set_shuffle_seed(seed);
                     let now = Rc::new(StdCell::new(0));
                     let steps = record(&mut graph, health, &now);
@@ -617,7 +617,8 @@ fn the_slices_took_and_delta_events() {
                 ][..],
             ),
         ] {
-            let (mut graph, boundary) = Runtime::build(|b| {
+            let mut graph = Runtime::local();
+            let (boundary, took, delta) = graph.build_here(|b| {
                 let (heal_s, heal) = b.input::<u32>();
                 let (damage_s, damage) = b.input::<u32>();
                 let (level_up_s, level_up) = b.input::<u32>();
@@ -655,7 +656,6 @@ fn the_slices_took_and_delta_events() {
                 };
                 (boundary, took, delta)
             });
-            let (boundary, took, delta) = boundary.keep();
             graph.set_shuffle_seed(seed);
             let now = Rc::new(StdCell::new(0));
             let events = |graph: &mut Runtime, stream: Shared<i64>| {
@@ -702,7 +702,8 @@ fn two_loops_that_read_each_other_lifted_with_what_is_upstream_of_both() {
     for seed in SEEDS {
         let calls = Rc::new(StdCell::new(0u32));
         let count = calls.clone();
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (ticks_in, level_in, cells, views) = graph.build_here(move |b| {
             let (x_fwd, x_loop) = b.cell_loop::<u32>();
             let (y_fwd, y_loop) = b.cell_loop::<u32>();
             let (ticks, ticks_in) = b.input::<u32>();
@@ -728,7 +729,6 @@ fn two_loops_that_read_each_other_lifted_with_what_is_upstream_of_both() {
             let views = both_fwd.steps(b);
             (ticks_in, level_in, [x, y, both, both_fwd, total], views)
         });
-        let (ticks_in, level_in, cells, views) = boundary.keep();
         graph.set_shuffle_seed(seed);
         let now = Rc::new(StdCell::new(0));
         let recorded = cells.map(|c| record(&mut graph, c, &now));

@@ -65,12 +65,12 @@ fn folded_runs<A: Clone>(steps: &[Step<A>], fold: fn(A, A) -> A) -> Vec<A> {
 /// What the engine delivers for the same steps, through a slot connected
 /// to an input a listener observes, with a pump at the end.
 fn delivered<A: Clone + Send + 'static>(slot: &'static InputSlot<A>, steps: &[Step<A>]) -> Vec<A> {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let events = graph.build_here(|b| {
         let (events, events_in) = b.input::<A>();
         b.connect(events_in, slot, 0);
         events.node(b)
     });
-    let events = boundary.keep();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     graph
@@ -182,7 +182,8 @@ fn delivered_many(
     reactions: &[Vec<(usize, u8)>],
     steps: &[Many],
 ) -> Vec<(usize, Vec<u8>)> {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let streams = graph.build_here(|b| {
         let mut streams = Vec::new();
         for (slot, &priority) in slots.iter().zip(priorities) {
             let (events, events_in) = b.input::<Vec<u8>>();
@@ -191,7 +192,6 @@ fn delivered_many(
         }
         streams
     });
-    let streams = boundary.keep();
     let seen = Rc::new(RefCell::new(Vec::new()));
     for (i, events) in streams.into_iter().enumerate() {
         let sink = seen.clone();
@@ -262,12 +262,12 @@ fn runs_cut_by_timing_join_into_the_writes() {
         a
     });
     const WRITES: u32 = 20_000;
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let events = graph.build_here(|b| {
         let (events, events_in) = b.input::<Vec<u32>>();
         b.connect(events_in, &SLOT, 0);
         events.node(b)
     });
-    let events = boundary.keep();
     let runs = Rc::new(RefCell::new(Vec::new()));
     let sink = runs.clone();
     graph

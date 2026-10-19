@@ -70,7 +70,8 @@ where
 /// that has no program.
 #[test]
 fn a_hold_named_in_a_constant_s_value_survives_and_an_unrooted_hold_is_collected() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (x, x_in) = b.input::<u32>();
         let x = x.share(b);
         let kept = x.hold(b, 0u32);
@@ -117,7 +118,8 @@ fn build_drive_drop<L: Trace + 'static>(
     drive: impl Fn(&mut Runtime, &[Input<u32>], u32),
     stale: impl FnOnce(&mut Runtime, &L) -> bool,
 ) -> Counts {
-    let (mut graph, boundary) = Runtime::build(build);
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(build);
     let ((inputs, logic), boundary) = boundary.into_parts();
     let inputs = graph.anchor(inputs).keep();
     let built = graph.live_nodes();
@@ -351,7 +353,8 @@ fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Shown> {
 /// takes its events; a click of 0 navigates. The build returns the clicks'
 /// input and the log, and the rest is reached from the log.
 fn navigation() -> (Runtime, Input<u32>, Cell<Vec<Shown>>) {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (clicks_in, log) = graph.build_here(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let clicks = clicks.share(b);
         let (navigate, navigate_loop) = b.stream_loop::<u32>();
@@ -365,7 +368,6 @@ fn navigation() -> (Runtime, Input<u32>, Cell<Vec<Shown>>) {
         );
         (clicks_in, log_events(b, events))
     });
-    let (clicks_in, log) = boundary.keep();
     (graph, clicks_in, log)
 }
 
@@ -466,7 +468,8 @@ fn the_navigation_loop_stays_bounded_under_the_automatic_policy() {
 /// over a hold, and a loop feeds it into that hold.
 #[test]
 fn a_cycle_through_a_value_is_collected_once_unrooted() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (forward, forward_loop) = b.cell_loop::<Cell<u32>>();
         let seven = forward.map_cell(b, |_| 7u32);
         let holder = b.constant(seven);
@@ -491,7 +494,8 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
     assert_eq!(graph.try_sample(holder).err(), Some(TokenError::Stale));
     assert_eq!(graph.try_sample(seven).err(), Some(TokenError::Stale));
 
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (go, go_in) = b.input::<u32>();
         let (fed, fed_loop) = b.stream_loop::<Cell<u32>>();
         let zero = b.constant(0u32);
@@ -528,7 +532,8 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
 /// and each counter counts every click, selected or not.
 #[test]
 fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (clicks_in, pick_in, shown) = graph.build_here(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let clicks = clicks.share(b);
         let counters: Vec<Cell<u32>> = (0..3)
@@ -539,7 +544,6 @@ fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
         let current = pick.snapshot(registry, |i, r| r[i]).hold(b, counters[0]);
         (clicks_in, pick_in, current.switch_cell(b))
     });
-    let (clicks_in, pick_in, shown) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, ());
     graph.send(clicks_in, ());
@@ -561,7 +565,8 @@ fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
 /// slot is reused by the next counter.
 #[test]
 fn a_deselected_inner_that_nothing_names_is_collected() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (clicks_in, open_in, made, shown) = graph.build_here(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let clicks = clicks.share(b);
         let (open, open_in) = b.input::<u32>();
@@ -572,7 +577,6 @@ fn a_deselected_inner_that_nothing_names_is_collected() {
         let shown = made.hold(b, zero).switch_cell(b);
         (clicks_in, open_in, made, shown)
     });
-    let (clicks_in, open_in, made, shown) = boundary.keep();
     let (received, on) = recorder::<Cell<u32>>();
     graph.listen(made, on).keep();
     graph.set_collect_after_every_unit(true);
@@ -603,7 +607,8 @@ fn a_deselected_inner_that_nothing_names_is_collected() {
 #[test]
 fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
     let program = |declare: bool| {
-        Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let boundary = graph.build_here(move |b| {
             let (clicks, clicks_in) = b.input::<u32>();
             let (sums, sums_loop) = b.stream_loop::<u32>();
             let total = sums.hold(b, 0u32);
@@ -615,17 +620,16 @@ fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
             let zero = b.constant(0u32);
             let reported = bumps.map(|(_, t)| t).hold(b, zero);
             (clicks_in, reported)
-        })
+        });
+        (graph, boundary)
     };
-    let (mut graph, boundary) = program(false);
-    let (clicks_in, reported) = boundary.keep();
+    let (mut graph, (clicks_in, reported)) = program(false);
     graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, 5);
     let total = *graph.sample(reported);
     assert_eq!(graph.try_sample(total).err(), Some(TokenError::Stale));
 
-    let (mut graph, boundary) = program(true);
-    let (clicks_in, reported) = boundary.keep();
+    let (mut graph, (clicks_in, reported)) = program(true);
     graph.set_collect_after_every_unit(true);
     graph.send(clicks_in, 5);
     graph.send(clicks_in, 6);
@@ -644,7 +648,8 @@ fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
 #[test]
 fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaration() {
     for declare in [false, true] {
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (clicks_in, open_in, back_in, shown) = graph.build_here(move |b| {
             let (clicks, clicks_in) = b.input::<()>();
             let clicks = clicks.share(b);
             let (open, open_in) = b.input::<u32>();
@@ -660,7 +665,6 @@ fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaratio
             let shown = opened.or_else(b, returns).hold(b, first).switch_cell(b);
             (clicks_in, open_in, back_in, shown)
         });
-        let (clicks_in, open_in, back_in, shown) = boundary.keep();
         graph.set_collect_after_every_unit(true);
         graph.send(clicks_in, ());
         assert_eq!(*graph.sample(shown), 1);
@@ -690,7 +694,8 @@ fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaratio
 #[test]
 fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
     for declare in [false, true] {
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (clicks_in, timer_in, log) = graph.build_here(move |b| {
             let (clicks, clicks_in) = b.input::<u32>();
             let clicks = clicks.share(b);
             let (timer, timer_in) = b.input::<u32>();
@@ -715,7 +720,6 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
             navigate_loop.close(b, next);
             (clicks_in, timer_in, log_events(b, events))
         });
-        let (clicks_in, timer_in, log) = boundary.keep();
         graph.set_collect_after_every_unit(true);
         graph.send(clicks_in, 4);
         graph.send(clicks_in, 0); // to page 2, which is quiet
@@ -738,7 +742,8 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
 /// `a_construct_can_anchor_what_it_sends_out`.
 #[test]
 fn a_token_a_listener_delivers_is_gone_after_its_unit_unless_anchored() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (open_in, opened) = graph.build_here(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -746,7 +751,6 @@ fn a_token_a_listener_delivers_is_gone_after_its_unit_unless_anchored() {
         });
         (open_in, opened)
     });
-    let (open_in, opened) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     let (received, on) = recorder::<(Input<u32>, Cell<u32>)>();
     graph.listen(opened, on).keep();
@@ -766,12 +770,12 @@ fn a_trace_that_misses_a_token_makes_it_stale() {
     impl Trace for Forgetful {
         fn trace(&self, _tracer: &mut Tracer) {}
     }
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (forgetful, honest) = graph.build_here(|b| {
         let one = b.constant(1u32);
         let two = b.constant(2u32);
         (b.constant(Forgetful(one)), b.constant((two,)))
     });
-    let (forgetful, honest) = boundary.keep();
     graph.collect_garbage();
     let missed = graph.sample(forgetful).0;
     let (traced,) = *graph.sample(honest);
@@ -786,7 +790,8 @@ fn a_trace_that_misses_a_token_makes_it_stale() {
 /// the token of the node that took the slot works.
 #[test]
 fn a_slot_reused_after_collection_rejects_the_old_token() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (go, go_in) = b.input::<u32>();
         let lost = b.constant(1u32);
         let made = go.construct(b, |b, n| b.constant(n)).share(b);
@@ -814,7 +819,8 @@ fn a_slot_reused_after_collection_rejects_the_old_token() {
 /// collected at the next collection, while the other listener's stays.
 #[test]
 fn a_listener_dropped_inside_a_listener_lets_its_node_be_collected() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let kept = n.map(|v| v + 1).share(b);
@@ -858,7 +864,8 @@ fn a_listener_dropped_inside_a_listener_lets_its_node_be_collected() {
 /// was kept and the one whose handle is still held.
 #[test]
 fn a_once_listener_is_a_root_until_it_fires() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let kept = n.map(|v| v + 1).share(b);
@@ -896,7 +903,8 @@ fn a_once_listener_is_a_root_until_it_fires() {
 /// unanchored anchor roots nothing from the next collection on.
 #[test]
 fn kept_handles_are_roots_for_the_graph_s_life() {
-    let (mut graph, boundary) = Runtime::build(|b| [1u32, 2, 3, 4].map(|v| b.constant(v)));
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| [1u32, 2, 3, 4].map(|v| b.constant(v)));
     let ([listened, anchored, dropped, unanchored], boundary) = boundary.into_parts();
     graph.listen_cell(listened, |_| ()).keep();
     graph.anchor(anchored).keep();
@@ -939,7 +947,8 @@ fn a_listener_dropped_on_another_thread_counts_as_released() {
 /// `release` lets go at once, then three more listeners it lets go one at
 /// a time.
 fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let cells: Vec<Cell<u32>> = (0..4)
@@ -977,7 +986,8 @@ fn collects_a_graph_that_only_releases(release: impl Fn(Vec<Listener>)) {
 /// fired, and two held and dropped after.
 #[test]
 fn the_automatic_policy_counts_a_once_listener_released_when_it_fires() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let streams: Vec<Shared<u32>> = (0..4).map(|k| n.map(move |v| v + k).share(b)).collect();
@@ -1017,7 +1027,8 @@ fn the_automatic_policy_counts_a_once_listener_released_when_it_fires() {
 /// runtime's: the next collection frees what only the anchor reached.
 #[test]
 fn an_anchor_dropped_on_another_thread_releases_its_root() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         (n_in, n.hold(b, 0u32))
     });
@@ -1037,7 +1048,8 @@ fn an_anchor_dropped_on_another_thread_releases_its_root() {
 /// drops, not the first.
 #[test]
 fn clones_of_an_anchored_value_share_one_root() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         (n_in, n.hold(b, 0u32))
     });
@@ -1060,7 +1072,8 @@ fn clones_of_an_anchored_value_share_one_root() {
 /// returns the value.
 #[test]
 fn into_parts_leaves_the_root_with_the_anchor_and_keep_keeps_it() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         (n_in, (n.hold(b, 0u32), n.map(|v| v * 2).hold(b, 0u32)))
@@ -1088,12 +1101,12 @@ fn into_parts_leaves_the_root_with_the_anchor_and_keep_keeps_it() {
 /// the runtime.
 #[test]
 fn the_build_collects_what_nothing_reaches() {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let _n_in = graph.build_here(|b| {
         let (n, n_in) = b.input::<u32>();
         let _unreached = n.hold(b, 0u32);
         n_in
     });
-    let _n_in = boundary.keep();
     assert_eq!(graph.live_nodes(), 1, "the input alone");
 }
 
@@ -1102,7 +1115,8 @@ fn the_build_collects_what_nothing_reaches() {
 /// what only it reached, but not what a listener still reaches.
 #[test]
 fn dropping_what_build_returned_releases_it() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         (n_in, n.hold(b, 0u32), n.map(|v| v * 2).hold(b, 0u32))
@@ -1118,7 +1132,8 @@ fn dropping_what_build_returned_releases_it() {
 
 #[test]
 fn a_construct_can_anchor_what_it_sends_out() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (open_in, opened) = graph.build_here(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -1127,7 +1142,6 @@ fn a_construct_can_anchor_what_it_sends_out() {
         });
         (open_in, opened)
     });
-    let (open_in, opened) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     let received = Rc::new(RefCell::new(Vec::new()));
     let log = received.clone();
@@ -1155,7 +1169,8 @@ fn a_construct_can_anchor_what_it_sends_out() {
 /// graph. Sampling must return a value, so it panics in both builds.
 #[test]
 fn operations_on_collected_nodes_follow_the_debug_release_rule() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let held = numbers.hold(b, 0u32);
@@ -1255,7 +1270,8 @@ fn a_panic_in_a_drop_during_collection_poisons_the_graph() {
     impl Trace for Fragile {
         fn trace(&self, _tracer: &mut Tracer) {}
     }
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (_, n_in) = b.input::<u32>();
         (n_in, b.constant(Fragile))
     });
@@ -1286,7 +1302,8 @@ fn an_event_holding_a_token_roots_nothing() {
             self.drops.set(self.drops.get() + 1);
         }
     }
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (parcels, parcels_in) = b.input::<Parcel>();
         let parcels = parcels.share(b);
         ((parcels_in, parcels), b.constant(5u32))
@@ -1311,7 +1328,8 @@ fn an_event_holding_a_token_roots_nothing() {
 /// operations that take any token take a `State` too.
 #[test]
 fn states_are_traced_declared_and_anchored_like_cells() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let boundary = graph.build_anchored(|b| {
         let (names, names_in) = b.input::<String>();
         let names = names.share(b);
         let all = names.accumulate_mut(b, Vec::new(), |n, v: &mut Vec<String>| v.push(n));
@@ -1342,7 +1360,8 @@ fn states_are_traced_declared_and_anchored_like_cells() {
 /// state and an input in one slice without consuming the affine stream.
 #[test]
 fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (n_in, held) = graph.build_here(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let affine: Stream<u32> = n.map(|v| v + 1).node(b);
@@ -1355,7 +1374,6 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
         let _still_mine = affine.hold(b, 0u32);
         (n_in, held)
     });
-    let (n_in, held) = boundary.keep();
     graph.collect_garbage();
     // The input and its share, the affine stream's node, the constant, the
     // state, the declared input and the hold. The hold over the affine
@@ -1373,14 +1391,14 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
 /// declaration: a closure is opaque (RFD 3).
 #[test]
 fn a_token_given_to_map_to_is_kept_by_its_chain() {
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (go_in, shown) = graph.build_here(move |b| {
         let (go, go_in) = b.input::<()>();
         let home = b.constant("home");
         let away = b.constant("away");
         let chosen = go.map_to(away).hold(b, home);
         (go_in, chosen.switch_cell(b))
     });
-    let (go_in, shown) = boundary.keep();
     graph.set_collect_after_every_unit(true);
     graph.send(go_in, ());
     assert_eq!(*graph.sample(shown), "away");
@@ -1413,7 +1431,8 @@ impl Trace for Panels {
 #[test]
 fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
     for declare in [false, true] {
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (pick_in, shown) = graph.build_here(move |b| {
             let (pick, pick_in) = b.input::<usize>();
             let panels = Panels {
                 home: b.constant("home"),
@@ -1435,7 +1454,6 @@ fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
             }
             (pick_in, chosen.switch_cell(b))
         });
-        let (pick_in, shown) = boundary.keep();
         graph.set_collect_after_every_unit(true);
         if declare {
             graph.send(pick_in, 2);
@@ -1460,7 +1478,8 @@ fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
 #[test]
 fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
     for on_long_lived in [true, false] {
-        let (mut graph, boundary) = Runtime::build(move |b| {
+        let mut graph = Runtime::local();
+        let (open_in, _cells) = graph.build_here(move |b| {
             let (open, open_in) = b.input::<u32>();
             let open = open.share(b);
             let registry = open.hold(b, 0u32);
@@ -1474,7 +1493,6 @@ fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
             let current = screens.hold(b, registry).switch_cell(b);
             (open_in, (registry, current))
         });
-        let (open_in, _cells) = boundary.keep();
         graph.set_collection_policy(CollectionPolicy::Manual);
         graph.collect_garbage();
         let before = graph.live_nodes();

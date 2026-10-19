@@ -44,7 +44,8 @@ fn panic_message<R>(f: impl FnOnce() -> R) -> String {
 /// GHC: `counter: (0,[([1],1),([2],2),([3],3),([4],4),([5],5)])`.
 #[test]
 fn a_counter_reads_its_own_forward_token_through_a_snapshot() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, count, next, seen) = graph.build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let (ticks, ticks_in) = b.input::<()>();
         let ticks = ticks.share(b);
@@ -56,7 +57,6 @@ fn a_counter_reads_its_own_forward_token_through_a_snapshot() {
         let seen = ticks.snapshot(count, |_, n| *n).hold(b, 99u32);
         (ticks_in, count, next, seen)
     });
-    let (ticks_in, count, next, seen) = boundary.keep();
     let (values, on_value) = recorder();
     let mut on_value = on_value;
     graph.listen_cell(count, move |n| on_value(*n)).keep();
@@ -76,7 +76,8 @@ fn a_counter_reads_its_own_forward_token_through_a_snapshot() {
 /// counter", 12 evaluations; also `capped` in Stage3.hs).
 #[test]
 fn the_capped_counter_the_lazy_semantics_cannot_run_steps_ten_times() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, count) = graph.build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let (ticks, ticks_in) = b.input::<()>();
         let next = ticks
@@ -86,7 +87,6 @@ fn the_capped_counter_the_lazy_semantics_cannot_run_steps_ten_times() {
         count_loop.close(b, next);
         (ticks_in, count)
     });
-    let (ticks_in, count) = boundary.keep();
     let now = Rc::new(StdCell::new(0u32));
     let (steps, mut on_step) = recorder();
     let clock = now.clone();
@@ -111,7 +111,8 @@ fn the_capped_counter_the_lazy_semantics_cannot_run_steps_ten_times() {
 /// no step.
 #[test]
 fn a_loop_through_a_gate_on_a_read_through_cell_of_its_forward() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, count, below) = graph.build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let below = count.map_cell(b, |n| *n < 3);
         let (ticks, ticks_in) = b.input::<()>();
@@ -122,7 +123,6 @@ fn a_loop_through_a_gate_on_a_read_through_cell_of_its_forward() {
         count_loop.close(b, next);
         (ticks_in, count, below)
     });
-    let (ticks_in, count, below) = boundary.keep();
     let (steps, mut on_step) = recorder();
     graph.listen_steps(count, move |n| on_step(*n)).keep();
     for _ in 0..5 {
@@ -138,7 +138,8 @@ fn a_loop_through_a_gate_on_a_read_through_cell_of_its_forward() {
 /// (0,[([1],2),([2],5),([3],13),([4],37)])`.
 #[test]
 fn a_loop_whose_definition_is_an_accumulate() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, a, b_acc) = graph.build_here(|b| {
         let (a, a_loop) = b.cell_loop::<u64>();
         let (ticks, ticks_in) = b.input::<u64>();
         let ticks = ticks.share(b);
@@ -151,7 +152,6 @@ fn a_loop_whose_definition_is_an_accumulate() {
         a_loop.close(b, a_acc);
         (ticks_in, a, b_acc)
     });
-    let (ticks_in, a, b_acc) = boundary.keep();
     let (a_steps, mut on_a) = recorder();
     graph.listen_steps(a, move |v| on_a(*v)).keep();
     let (b_steps, mut on_b) = recorder();
@@ -171,7 +171,8 @@ fn a_loop_whose_definition_is_an_accumulate() {
 /// (1,[([1],8),([2],25),([3],77)])`.
 #[test]
 fn an_accumulator_reads_itself_through_a_read_through_loop() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, acc, doubled) = graph.build_here(|b| {
         let (forward, forward_loop) = b.cell_loop::<u32>();
         let doubled = forward.map_cell(b, |n| n * 2);
         let (ticks, ticks_in) = b.input::<u32>();
@@ -181,7 +182,6 @@ fn an_accumulator_reads_itself_through_a_read_through_loop() {
         forward_loop.close(b, acc);
         (ticks_in, acc, doubled)
     });
-    let (ticks_in, acc, doubled) = boundary.keep();
     let (steps, mut on_step) = recorder();
     graph.listen_steps(acc, move |v| on_step(*v)).keep();
     for t in [5, 1, 2] {
@@ -197,7 +197,8 @@ fn an_accumulator_reads_itself_through_a_read_through_loop() {
 /// zero: (0,[([0],10),([1],11),([2],12)])`.
 #[test]
 fn a_loop_whose_definition_steps_in_transaction_zero() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, count, views) = graph.build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         // Created before the definition, over the forward.
         let views = count.steps_with_current(b).hold(b, 99u32);
@@ -209,7 +210,6 @@ fn a_loop_whose_definition_steps_in_transaction_zero() {
         count_loop.close(b, next);
         (ticks_in, count, views)
     });
-    let (ticks_in, count, views) = boundary.keep();
     assert_eq!(*graph.sample(count), 10);
     assert_eq!(*graph.sample(views), 10, "one event at [0], after the step");
     graph.send(ticks_in, ());
@@ -225,7 +225,8 @@ fn a_loop_whose_definition_steps_in_transaction_zero() {
 /// fwd at [0]: [([0],0),([1],5),([2],7),([3],7)]`.
 #[test]
 fn stream_views_of_the_forward_carry_the_definitions_steps() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (s_in, forward, forward_steps, tripled_steps, current) = graph.build_here(|b| {
         let (forward, closer) = b.cell_loop::<u32>();
         let forward_steps = forward.steps(b);
         let tripled_steps = forward.map_cell(b, |n| n * 3).steps(b);
@@ -235,7 +236,6 @@ fn stream_views_of_the_forward_carry_the_definitions_steps() {
         closer.close(b, definition);
         (s_in, forward, forward_steps, tripled_steps, current)
     });
-    let (s_in, forward, forward_steps, tripled_steps, current) = boundary.keep();
     assert_eq!(
         *graph.sample(current),
         0,
@@ -268,7 +268,8 @@ fn stream_views_of_the_forward_carry_the_definitions_steps() {
 fn a_steps_view_of_a_forward_closed_with_a_lift_runs_the_function_once_per_step() {
     let calls = Rc::new(StdCell::new(0u32));
     let count = calls.clone();
-    let (mut graph, boundary) = Runtime::build(move |b| {
+    let mut graph = Runtime::local();
+    let (x_in, y_in, forward, view) = graph.build_here(move |b| {
         let (forward, closer) = b.cell_loop::<u32>();
         let view = forward.steps(b);
         let (x, x_in) = b.input_cell(1u32);
@@ -280,7 +281,6 @@ fn a_steps_view_of_a_forward_closed_with_a_lift_runs_the_function_once_per_step(
         closer.close(b, sum);
         (x_in, y_in, forward, view)
     });
-    let (x_in, y_in, forward, view) = boundary.keep();
     let (seen, on) = recorder();
     graph.listen(view, on).keep();
     assert_eq!(calls.get(), 0);
@@ -302,7 +302,8 @@ fn a_steps_view_of_a_forward_closed_with_a_lift_runs_the_function_once_per_step(
 /// nodes to the last definition; a chain of loops is not a cycle.
 #[test]
 fn a_loop_closed_with_another_loops_forward_reads_through_both() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (s_in, outer, view) = graph.build_here(|b| {
         let (outer, outer_loop) = b.cell_loop::<u32>();
         let (inner, inner_loop) = b.cell_loop::<u32>();
         let view = outer.steps(b);
@@ -313,7 +314,6 @@ fn a_loop_closed_with_another_loops_forward_reads_through_both() {
         assert_eq!(*outer.sample(b), 4);
         (s_in, outer, view)
     });
-    let (s_in, outer, view) = boundary.keep();
     let (seen, on) = recorder();
     graph.listen(view, on).keep();
     graph.send(s_in, 8);
@@ -332,7 +332,8 @@ fn a_loop_closed_with_another_loops_forward_reads_through_both() {
 /// refuses it, naming all seven nodes.
 #[test]
 fn a_steps_view_inside_a_loop_is_legal_when_a_snapshot_is_on_the_cycle() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, x, y) = graph.build_here(|b| {
         let (x_fwd, x_loop) = b.cell_loop::<u32>();
         let (y_fwd, y_loop) = b.cell_loop::<u32>();
         let (ticks, ticks_in) = b.input::<u32>();
@@ -343,7 +344,6 @@ fn a_steps_view_inside_a_loop_is_legal_when_a_snapshot_is_on_the_cycle() {
         y_loop.close(b, y);
         (ticks_in, x, y)
     });
-    let (ticks_in, x, y) = boundary.keep();
     let (x_seen, mut on_x) = recorder();
     graph.listen_steps(x, move |v| on_x(*v)).keep();
     let (y_seen, mut on_y) = recorder();
@@ -355,7 +355,7 @@ fn a_steps_view_inside_a_loop_is_legal_when_a_snapshot_is_on_the_cycle() {
     assert_eq!(*y_seen.borrow(), [202, 408, 822]);
 
     let both_steps = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (x_fwd, x_loop) = b.cell_loop::<u32>(); // node 1
             let (y_fwd, y_loop) = b.cell_loop::<u32>(); // node 2
             let (ticks, _ticks_in) = b.input::<u32>(); // node 3
@@ -378,14 +378,14 @@ fn a_steps_view_inside_a_loop_is_legal_when_a_snapshot_is_on_the_cycle() {
 
 #[test]
 fn a_cell_loop_is_one_node_besides_its_definition() {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let _next = graph.build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let (ticks, _ticks_in) = b.input::<()>();
         let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
         count_loop.close(b, next);
         next
     });
-    let _next = boundary.keep();
     assert_eq!(graph.live_nodes(), 3, "the forward, the input, the hold");
 }
 
@@ -403,7 +403,7 @@ fn a_cell_loop_is_one_node_besides_its_definition() {
     expected = "same-instant cycle: node 1 (Loop) -> node 3 (Stream) -> node 4 (Stream) -> node 5 (Hold) -> node 1"
 )]
 fn a_loop_through_a_holds_steps_view_is_refused_at_close() {
-    let _ = Runtime::build(|b| {
+    Runtime::local().build_here(|b| {
         let (c, c_loop) = b.cell_loop::<u32>();
         let (ticks, _ticks_in) = b.input::<u32>();
         let c_steps = c.steps(b);
@@ -419,7 +419,7 @@ fn a_loop_through_a_holds_steps_view_is_refused_at_close() {
 #[test]
 fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     let lift = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (c, c_loop) = b.cell_loop::<u32>(); // node 1
             let (other, _other_in) = b.input_cell(1u32); // nodes 2 and 3
             let sum = (c, other).lift(b, |c, o| c + o); // node 4
@@ -432,7 +432,7 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     );
 
     let map = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (c, c_loop) = b.cell_loop::<u32>();
             let next = c.map_cell(b, |n| n + 1);
             c_loop.close(b, next);
@@ -446,7 +446,7 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     // Sodium's `hold 0 (updates c)`, which has a fixed point at every
     // step list.
     let updates = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (c, c_loop) = b.cell_loop::<u32>();
             let held = c.steps(b).hold(b, 0u32);
             c_loop.close(b, held);
@@ -458,7 +458,7 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     );
 
     let itself = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (c, c_loop) = b.cell_loop::<u32>();
             c_loop.close(b, c);
         })
@@ -469,7 +469,7 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     );
 
     let each_other = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (a, a_loop) = b.cell_loop::<u32>();
             let (c, c_loop) = b.cell_loop::<u32>();
             a_loop.close(b, c);
@@ -489,7 +489,7 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
 #[test]
 fn a_loop_left_open_panics_when_the_build_ends_and_poisons_nothing() {
     let message = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (_count, _count_loop) = b.cell_loop::<u32>();
         })
     });
@@ -497,11 +497,11 @@ fn a_loop_left_open_panics_when_the_build_ends_and_poisons_nothing() {
         message.contains("a loop declared in this scope was never closed"),
         "{message}"
     );
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (numbers_in, latest) = graph.build_here(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
-    let (numbers_in, latest) = boundary.keep();
     graph.send(numbers_in, 3);
     assert_eq!(*graph.sample(latest), 3);
 }
@@ -509,7 +509,7 @@ fn a_loop_left_open_panics_when_the_build_ends_and_poisons_nothing() {
 #[test]
 #[should_panic(expected = "a cell loop sampled before it is closed")]
 fn sampling_a_forward_before_close_panics() {
-    let _ = Runtime::build(|b| {
+    Runtime::local().build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let _ = *count.sample(b);
         let (ticks, _ticks_in) = b.input::<()>();
@@ -521,7 +521,7 @@ fn sampling_a_forward_before_close_panics() {
 #[test]
 #[should_panic(expected = "a cell loop sampled before it is closed")]
 fn sampling_a_read_through_cell_over_an_open_forward_panics() {
-    let _ = Runtime::build(|b| {
+    Runtime::local().build_here(|b| {
         let (count, count_loop) = b.cell_loop::<u32>();
         let doubled = count.map_cell(b, |n| n * 2);
         let _ = *doubled.sample(b);
@@ -540,7 +540,8 @@ fn sampling_a_read_through_cell_over_an_open_forward_panics() {
 /// the hold steps with each.
 #[test]
 fn a_stream_loop_through_a_hold_read_by_snapshot_needs_no_split_or_defer() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, sums, last) = graph.build_here(|b| {
         let (sums, sums_loop) = b.stream_loop::<u32>();
         let sums = sums.share(b);
         let last = sums.hold(b, 0u32);
@@ -548,7 +549,6 @@ fn a_stream_loop_through_a_hold_read_by_snapshot_needs_no_split_or_defer() {
         sums_loop.close(b, ticks.snapshot(last, |t, l| t + l));
         (ticks_in, sums, last)
     });
-    let (ticks_in, sums, last) = boundary.keep();
     let (events, on_event) = recorder();
     graph.listen(sums, on_event).keep();
     let (steps, mut on_step) = recorder();
@@ -565,14 +565,14 @@ fn a_stream_loop_through_a_hold_read_by_snapshot_needs_no_split_or_defer() {
 #[test]
 fn a_stream_loop_moves_its_events_without_clone() {
     struct Coin(u32);
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (minted_in, purse) = graph.build_here(|b| {
         let (coins, coins_loop) = b.stream_loop::<Coin>();
         let purse = coins.accumulate(b, 0u32, |coin, total| total + coin.0);
         let (minted, minted_in) = b.input::<u32>();
         coins_loop.close(b, minted.snapshot(purse, |n, p| Coin(n + p)));
         (minted_in, purse)
     });
-    let (minted_in, purse) = boundary.keep();
     for n in [1, 1, 5] {
         graph.send(minted_in, n);
     }
@@ -585,20 +585,21 @@ fn a_stream_loop_moves_its_events_without_clone() {
 /// (MapS (+100) (Value (Constant 5) [0])) [0]` steps to 105 at `[0]`.
 #[test]
 fn a_stream_loop_whose_definition_fires_in_transaction_zero() {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let held = graph.build_here(|b| {
         let (forward, forward_loop) = b.stream_loop::<u32>();
         let held = forward.hold(b, 0u32);
         let start = b.constant(5u32).steps_with_current(b);
         forward_loop.close(b, start.map(|n| n + 100));
         held
     });
-    let held = boundary.keep();
     assert_eq!(*graph.sample(held), 105);
 }
 
 #[test]
 fn a_stream_loop_is_one_node_its_definition_is_fused_into() {
-    let (graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let _total = graph.build_here(|b| {
         let (sums, sums_loop) = b.stream_loop::<u32>();
         let total = sums.hold(b, 0u32);
         let (numbers, _numbers_in) = b.input::<u32>();
@@ -609,7 +610,6 @@ fn a_stream_loop_is_one_node_its_definition_is_fused_into() {
         sums_loop.close(b, chain);
         total
     });
-    let _total = boundary.keep();
     assert_eq!(
         graph.live_nodes(),
         3,
@@ -623,7 +623,7 @@ fn a_stream_loop_is_one_node_its_definition_is_fused_into() {
 #[test]
 fn stream_loops_whose_chain_depends_on_the_forward_are_refused() {
     let itself = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
             forward_loop.close(b, forward.map(|n| n + 1));
         })
@@ -634,7 +634,7 @@ fn stream_loops_whose_chain_depends_on_the_forward_are_refused() {
     );
 
     let merged = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
             let (ticks, _ticks_in) = b.input::<u32>(); // node 2
             let both = ticks.or_else(b, forward.map(|n| n + 1)); // node 3
@@ -647,7 +647,7 @@ fn stream_loops_whose_chain_depends_on_the_forward_are_refused() {
     );
 
     let steps = panic_message(|| {
-        Runtime::build(|b| {
+        Runtime::local().build_here(|b| {
             let (forward, forward_loop) = b.stream_loop::<u32>(); // node 1
             let (ticks, _ticks_in) = b.input::<u32>(); // node 2
             let last = forward.hold(b, 0u32); // node 3
@@ -668,7 +668,7 @@ fn stream_loops_whose_chain_depends_on_the_forward_are_refused() {
 #[test]
 #[should_panic(expected = "a loop declared in this scope was never closed")]
 fn a_stream_loop_left_open_panics_when_the_build_ends() {
-    let _ = Runtime::build(|b| {
+    Runtime::local().build_here(|b| {
         let (forward, _forward_loop) = b.stream_loop::<u32>();
         let _held = forward.hold(b, 0u32);
     });
@@ -682,7 +682,8 @@ fn a_stream_loop_left_open_panics_when_the_build_ends() {
 /// `([],[([1],[10]),([2],[10,21]),([3],[10,21,32])])`.
 #[test]
 fn an_in_place_accumulator_closes_a_state_loop_read_by_snapshot() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, log, lengths, total) = graph.build_here(|b| {
         let (log, log_loop) = b.state_loop::<Vec<u32>>();
         let (ticks, ticks_in) = b.input::<u32>();
         let ticks = ticks.share(b);
@@ -695,7 +696,6 @@ fn an_in_place_accumulator_closes_a_state_loop_read_by_snapshot() {
         let total = log.map_cell(b, |l| l.iter().sum::<u32>());
         (ticks_in, log, lengths, total)
     });
-    let (ticks_in, log, lengths, total) = boundary.keep();
     let (steps, mut on_step) = recorder();
     graph.listen_steps(log, move |l| on_step(l.clone())).keep();
     let (totals, mut on_total) = recorder();
@@ -713,7 +713,8 @@ fn an_in_place_accumulator_closes_a_state_loop_read_by_snapshot() {
 /// a lift with it is a State.
 #[test]
 fn a_state_loop_closes_with_a_cell_and_its_forward_only_reads() {
-    let (mut graph, boundary) = Runtime::build(|b| {
+    let mut graph = Runtime::local();
+    let (ticks_in, count, scaled) = graph.build_here(|b| {
         let (count, count_loop) = b.state_loop::<u32>();
         let (ticks, ticks_in) = b.input::<()>();
         let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
@@ -722,7 +723,6 @@ fn a_state_loop_closes_with_a_cell_and_its_forward_only_reads() {
         let scaled: bough::State<u32> = (count, factor).lift(b, |c, f| c * f);
         (ticks_in, count, scaled)
     });
-    let (ticks_in, count, scaled) = boundary.keep();
     for _ in 0..4 {
         graph.send(ticks_in, ());
     }
@@ -733,7 +733,7 @@ fn a_state_loop_closes_with_a_cell_and_its_forward_only_reads() {
 #[test]
 #[should_panic(expected = "same-instant cycle: node 1 (Loop) -> node 2 (ReadThrough) -> node 1")]
 fn a_state_loop_closed_with_a_map_cell_of_its_forward_is_refused() {
-    let _ = Runtime::build(|b| {
+    Runtime::local().build_here(|b| {
         let (log, log_loop) = b.state_loop::<Vec<u32>>(); // node 1
         let longer = log.map_cell(b, |l| {
             let mut l = l.clone();
