@@ -204,9 +204,9 @@ impl<M: Mode> BuildContext<M> {
             let live = |i: &u32| hot[*i as usize].flags & LIVE != 0;
             store.relations[n].dependents.retain(live);
             let cold = &mut store.cold[n];
-            let consumer = cold.linear_consumer;
+            let consumer = cold.affine_consumer;
             if consumer != NOOP && !live(&consumer) {
-                cold.linear_consumer = NOOP;
+                cold.affine_consumer = NOOP;
             }
             if hot[n].flags & WATCHED != 0 {
                 cold.watchers.retain(live);

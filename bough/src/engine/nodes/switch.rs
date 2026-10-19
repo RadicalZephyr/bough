@@ -50,7 +50,7 @@ use super::Marker;
 use crate::build::BuildContext;
 use crate::cell::CellRef;
 use crate::engine::{
-    Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_LINEAR, WATCHED, clear_slot,
+    Cx, Data, Kind, LINKED, NodeOps, Ops, Passed, TAKES_AFFINE, WATCHED, clear_slot,
 };
 use crate::mode::Mode;
 use crate::source::Node;
@@ -176,16 +176,16 @@ impl<M: Mode> BuildContext<M> {
         S::Event: 'static,
     {
         let outer = self.check(outer);
-        if S::LINEAR {
+        if S::AFFINE {
             assert!(
-                !self.has_linear_switch(outer),
+                !self.has_affine_switch(outer),
                 "bough: a cell holding linear streams may have exactly one switch_stream, and \
                  this cell, or a cell loop that is the same cell, has one already. A linear \
                  stream has one consumer; share the streams to switch to them from several places"
             );
         }
         let ops = &<SwitchStreamNode<S> as NodeOps<M>>::OPS;
-        let flags = if S::LINEAR { TAKES_LINEAR } else { 0 };
+        let flags = if S::AFFINE { TAKES_AFFINE } else { 0 };
         let n = self.materialize(
             Kind::SwitchStream,
             Data::Slot(slot),
@@ -233,7 +233,7 @@ impl<M: Mode> BuildContext<M> {
     pub(crate) fn link_inner(&mut self, n: u32) {
         let inner = self.selected(n, false);
         self.refuse_switch_cycle(inner, n);
-        self.claim_linear(inner, n);
+        self.claim_affine(inner, n);
         self.link(inner, n);
         self.store.hot[n as usize].flags |= LINKED;
     }
@@ -241,11 +241,11 @@ impl<M: Mode> BuildContext<M> {
     /// A switch_stream over linear streams becomes the one consumer of
     /// `stream`. A stream another switch_stream consumes can only have been
     /// selected through a switch_cell, which no build-time check sees.
-    fn claim_linear(&mut self, stream: u32, n: u32) {
-        if self.store.hot[n as usize].flags & TAKES_LINEAR == 0 {
+    fn claim_affine(&mut self, stream: u32, n: u32) {
+        if self.store.hot[n as usize].flags & TAKES_AFFINE == 0 {
             return;
         }
-        let consumer = &mut self.store.cold[stream as usize].linear_consumer;
+        let consumer = &mut self.store.cold[stream as usize].affine_consumer;
         assert!(
             *consumer == 0 || *consumer == n,
             "bough: a linear stream selected by a second switch_stream: the switch_stream at \
@@ -262,7 +262,7 @@ impl<M: Mode> BuildContext<M> {
     /// cell that is the same by construction: a closed cell loop's forward
     /// and its definition, followed down to the definition that is no
     /// forward and back up through every forward closed with it.
-    pub(crate) fn has_linear_switch(&self, cell: u32) -> bool {
+    pub(crate) fn has_affine_switch(&self, cell: u32) -> bool {
         let mut root = cell;
         while self.store.hot[root as usize].kind == Kind::Loop {
             match self.store.relations[root as usize].deps.first() {
@@ -275,11 +275,11 @@ impl<M: Mode> BuildContext<M> {
         // closing refuses cycles: no node is reached twice.
         let mut same = Vec::from([root]);
         while let Some(c) = same.pop() {
-            let linear = self.store.cold[c as usize]
+            let affine = self.store.cold[c as usize]
                 .watchers
                 .iter()
-                .any(|&w| self.store.hot[w as usize].flags & TAKES_LINEAR != 0);
-            if linear {
+                .any(|&w| self.store.hot[w as usize].flags & TAKES_AFFINE != 0);
+            if affine {
                 return true;
             }
             same.extend(
@@ -338,9 +338,9 @@ impl<M: Mode> BuildContext<M> {
             return false;
         }
         count!(self.s, relinks);
-        let linear = &mut self.store.cold[old as usize].linear_consumer;
-        if *linear == n {
-            *linear = 0;
+        let consumer = &mut self.store.cold[old as usize].affine_consumer;
+        if *consumer == n {
+            *consumer = 0;
         }
         let dependents = &mut self.store.relations[old as usize].dependents;
         let p = dependents
@@ -360,6 +360,6 @@ impl<M: Mode> BuildContext<M> {
         let at = inner_at(self.store.hot[n as usize].kind);
         let inner = self.store.relations[n as usize].deps[at];
         self.refuse_switch_cycle(inner, n);
-        self.claim_linear(inner, n);
+        self.claim_affine(inner, n);
     }
 }

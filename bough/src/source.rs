@@ -793,7 +793,7 @@ impl<M: Mode> BuildContext<M> {
 pub trait Node: Source {
     /// A linear stream, whose one consumer takes the event.
     #[doc(hidden)]
-    const LINEAR: bool;
+    const AFFINE: bool;
 
     /// The node this token names.
     #[doc(hidden)]
@@ -816,7 +816,7 @@ impl<A: 'static> Source for Stream<A> {
     }
 }
 impl<A: 'static> Node for Stream<A> {
-    const LINEAR: bool = true;
+    const AFFINE: bool = true;
     fn node_token(&self) -> Token {
         self.token
     }
@@ -836,7 +836,7 @@ impl<A: Clone + 'static> Source for Shared<A> {
     }
 }
 impl<A: Clone + 'static> Node for Shared<A> {
-    const LINEAR: bool = false;
+    const AFFINE: bool = false;
     fn node_token(&self) -> Token {
         self.token
     }
