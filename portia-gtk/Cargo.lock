@@ -15,30 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
-name = "portia"
-version = "0.1.0"
-dependencies = [
- "portia-derive",
-]
-
-[[package]]
-name = "portia-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "portia-gtk"
-version = "0.0.0"
-dependencies = [
- "portia",
- "gtk4",
-]
-
-[[package]]
 name = "cairo-rs"
 version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -471,6 +447,30 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "portia"
+version = "0.1.0"
+dependencies = [
+ "portia-derive",
+]
+
+[[package]]
+name = "portia-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "portia-gtk"
+version = "0.0.0"
+dependencies = [
+ "gtk4",
+ "portia",
+]
 
 [[package]]
 name = "proc-macro-crate"
