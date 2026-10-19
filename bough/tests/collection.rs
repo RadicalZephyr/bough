@@ -277,7 +277,7 @@ fn splits_and_defers_are_collected_once_their_listeners_are_dropped() {
 }
 
 /// A switch_cell, a switch_stream between shared streams, and a
-/// switch_stream between linear streams in constant cells, selected
+/// switch_stream between affine streams in constant cells, selected
 /// through a switch_cell, each selecting among inners its selector's
 /// closure captured and declared. Twenty nodes, two of them inputs.
 #[test]
@@ -338,7 +338,7 @@ fn switches_are_collected_once_their_listeners_are_dropped() {
 type Shown = (u32, u32, u32);
 
 /// A screen of stage 6's navigation: a counter over the clicks, built with
-/// it, and a linear stream of what the screen shows, two nodes.
+/// it, and an affine stream of what the screen shows, two nodes.
 fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Shown> {
     let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
     clicks
@@ -1339,26 +1339,26 @@ fn states_are_traced_declared_and_anchored_like_cells() {
 
 /// What a token names is one of the five token types, and each is `Trace`:
 /// a heterogeneous declaration takes a stream, a shared stream, a cell, a
-/// state and an input in one slice without consuming the linear stream.
+/// state and an input in one slice without consuming the affine stream.
 #[test]
 fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
     let (mut graph, boundary) = Runtime::build(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
-        let linear: Stream<u32> = n.map(|v| v + 1).node(b);
+        let affine: Stream<u32> = n.map(|v| v + 1).node(b);
         let cell = b.constant(1u32);
         let state = n.accumulate_mut(b, 0u32, |v, s: &mut u32| *s += v);
         let (_, input) = b.input::<u32>();
         let held = n.hold(b, 0u32);
-        let on: [&dyn Trace; 5] = [&linear, &n, &cell, &state, &input];
+        let on: [&dyn Trace; 5] = [&affine, &n, &cell, &state, &input];
         b.depends(&held, &on);
-        let _still_mine = linear.hold(b, 0u32);
+        let _still_mine = affine.hold(b, 0u32);
         (n_in, held)
     });
     let (n_in, held) = boundary.keep();
     graph.collect_garbage();
-    // The input and its share, the linear stream's node, the constant, the
-    // state, the declared input and the hold. The hold over the linear
+    // The input and its share, the affine stream's node, the constant, the
+    // state, the declared input and the hold. The hold over the affine
     // stream, which nothing names, is collected.
     assert_eq!(graph.live_nodes(), 7);
     graph.send(n_in, 2);

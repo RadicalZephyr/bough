@@ -365,7 +365,7 @@ fn a_node_gives_a_chain_an_identity_that_a_later_chain_reads() {
     assert_eq!(*graph.sample(out), 9);
 }
 
-/// An event with no `Clone`, which only a linear path can carry.
+/// An event with no `Clone`, which only an affine path can carry.
 struct Ticket(u32);
 
 impl Trace for Ticket {
@@ -373,7 +373,7 @@ impl Trace for Ticket {
 }
 
 #[test]
-fn an_event_with_no_clone_moves_through_a_linear_path_into_a_hold() {
+fn an_event_with_no_clone_moves_through_a_affine_path_into_a_hold() {
     let (mut graph, boundary) = Runtime::build(|b| {
         let (tickets, tickets_in) = b.input::<Ticket>();
         let nothing = b.never();

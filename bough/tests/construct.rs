@@ -518,7 +518,7 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
 
 /// An input built by a closure reaches I/O code as data: a listener on
 /// the construct's stream receives its token by value, with a cell and a
-/// linear stream built over it, anchored where the closure built them,
+/// affine stream built over it, anchored where the closure built them,
 /// and after `send` returns, I/O code listens to them and sends to the
 /// input (RFD 3: anchor it at the boundary). Stage6.hs:
 ///
@@ -545,7 +545,7 @@ fn an_input_built_by_a_closure_is_received_by_a_listener_and_wired_after_send() 
         let (received, on) = recorder();
         graph.listen(made, on).keep();
         graph.send(go_in, 100);
-        // Receive: the row, anchored, with a linear stream's token among its
+        // Receive: the row, anchored, with an affine stream's token among its
         // tokens.
         let ((sends_in, total, doubled), _row) = received
             .borrow_mut()
@@ -1014,7 +1014,7 @@ struct Event {
 }
 
 /// A screen built at the instant n is navigated to: the clicks it sees,
-/// each numbered by a counter built with it, as a linear stream.
+/// each numbered by a counter built with it, as an affine stream.
 fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Event> {
     let count = clicks.accumulate(b, 0u32, |_, c| c + 1);
     clicks
@@ -1027,7 +1027,7 @@ fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Event> {
 }
 
 /// RFD 4's main dynamic pattern, closed as RFD 2's navigation loop: every
-/// navigation event builds a screen, a linear stream of events that are
+/// navigation event builds a screen, an affine stream of events that are
 /// not `Clone`; a hold keeps the current screen, and one switch_stream
 /// takes its events. A click of 0 navigates to the next screen, through a
 /// stream loop, at the instant of the click: the new screen's counter,
@@ -1087,7 +1087,7 @@ fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
 
 /// The loop through a switch_stream's selection (review-fidelity/hs/
 /// SwitchS.hs) in its construct form: every event of the switch builds
-/// the stream it follows from the next instant on, a linear stream, the
+/// the stream it follows from the next instant on, an affine stream, the
 /// `Clone`-free path, or a shared one. Stage6.hs:
 ///
 /// ```text
@@ -1095,13 +1095,13 @@ fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
 /// ```
 #[test]
 fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct() {
-    for linear in [true, false] {
+    for affine in [true, false] {
         let got = every_order(|order| {
             let (mut graph, boundary) = Runtime::build(move |b| {
                 let (ticks, ticks_in) = b.input::<u32>();
                 let ticks = ticks.share(b);
                 let (selected, selected_loop) = b.stream_loop::<u32>();
-                let out = if linear {
+                let out = if affine {
                     let first = ticks.map(|t| t).node(b);
                     let built =
                         selected.construct(b, move |b, v| ticks.map(move |t| t + v).node(b));
@@ -1121,7 +1121,7 @@ fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct()
             });
             by_instant(1, &observed)
         });
-        assert_eq!(got, [(1, 1), (2, 2), (3, 3), (4, 4)], "linear: {linear}");
+        assert_eq!(got, [(1, 1), (2, 2), (3, 3), (4, 4)], "affine: {affine}");
     }
 }
 

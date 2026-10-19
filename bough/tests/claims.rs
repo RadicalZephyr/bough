@@ -1,5 +1,5 @@
 //! The load-bearing claims of the engine's architecture that stage 1 can
-//! show: an erased arena whose nodes read each other's slots by linear take
+//! show: an erased arena whose nodes read each other's slots by affine take
 //! or shared clone, a chain fused into one node, and `sample` handing out a
 //! reference from `&self` without running anything.
 
@@ -43,7 +43,7 @@ impl Trace for Counted {
     fn trace(&self, _tracer: &mut Tracer) {}
 }
 
-/// An event with no `Clone`, which only a linear path can carry.
+/// An event with no `Clone`, which only an affine path can carry.
 struct NoClone(u32);
 
 impl Trace for NoClone {
@@ -53,7 +53,7 @@ impl Trace for NoClone {
 // ----------------------------------------------------------- claim 1
 
 #[test]
-fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
+fn claim1_an_erased_arena_moves_affine_events_and_clones_shared_ones() {
     let clones = Rc::new(StdCell::new(0));
     let drops = Rc::new(StdCell::new(0));
     let counted = |value| Counted {
@@ -63,9 +63,9 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
     };
     let initial = counted(0);
     let (mut graph, boundary) = Runtime::build(move |b| {
-        // Linear: an input of a type with no Clone, consumed by one hold.
-        let (linear, linear_in) = b.input::<NoClone>();
-        let last_linear = linear.hold(b, NoClone(0));
+        // Affine: an input of a type with no Clone, consumed by one hold.
+        let (affine, affine_in) = b.input::<NoClone>();
+        let last_affine = affine.hold(b, NoClone(0));
         // Shared: one shared node, three consumers of different kinds.
         let (shared, shared_in) = b.input::<Counted>();
         let shared = shared.share(b);
@@ -74,15 +74,15 @@ fn claim1_an_erased_arena_moves_linear_events_and_clones_shared_ones() {
         // Returned, so a root: a hold no root reaches is collected at the
         // first send, and neither clones nor keeps anything.
         let keeps = shared.hold(b, initial);
-        (linear_in, shared_in, last_linear, lengths, bangs, keeps)
+        (affine_in, shared_in, last_affine, lengths, bangs, keeps)
     });
-    let (linear_in, shared_in, last_linear, lengths, bangs, _keeps) = boundary.keep();
+    let (affine_in, shared_in, last_affine, lengths, bangs, _keeps) = boundary.keep();
     let (seen, on) = recorder();
     graph.listen(bangs, on).keep();
 
-    graph.send(linear_in, NoClone(5));
-    graph.send(linear_in, NoClone(7));
-    assert_eq!(graph.sample(last_linear).0, 7);
+    graph.send(affine_in, NoClone(5));
+    graph.send(affine_in, NoClone(7));
+    assert_eq!(graph.sample(last_affine).0, 7);
 
     graph.send(shared_in, counted(3));
     assert_eq!(*graph.sample(lengths), 30);

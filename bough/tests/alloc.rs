@@ -26,7 +26,7 @@
 //! and from stage 5 switches that move at every transaction between inners
 //! seen before: a switch_cell with a steps view and a cell listener, a
 //! switch_stream between shared streams, and a switch_stream between
-//! linear streams in constant cells, selected through a switch_cell, whose
+//! affine streams in constant cells, selected through a switch_cell, whose
 //! one-consumer claim moves with it; and from stage 6 constructs that do
 //! not fire in the steady state, one whose chain rejects every event and
 //! one over an input the drives do not send to. A construct allocates when

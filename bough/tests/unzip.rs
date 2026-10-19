@@ -1,4 +1,4 @@
-//! `unzip`: a stream of pairs into two linear streams, without cloning
+//! `unzip`: a stream of pairs into two affine streams, without cloning
 //! either half (RFD 4). It denotes two maps, one taking each half.
 
 use std::cell::RefCell;

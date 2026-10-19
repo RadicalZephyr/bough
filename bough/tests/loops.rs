@@ -560,7 +560,7 @@ fn a_stream_loop_through_a_hold_read_by_snapshot_needs_no_split_or_defer() {
     assert_eq!(*steps.borrow(), [1, 3, 6, 16]);
 }
 
-/// The forward is linear: its one consumer takes each event, so an event
+/// The forward is affine: its one consumer takes each event, so an event
 /// type without `Clone` goes around the loop.
 #[test]
 fn a_stream_loop_moves_its_events_without_clone() {

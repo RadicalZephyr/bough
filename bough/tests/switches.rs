@@ -827,25 +827,25 @@ fn switch_stream_relinks_on_a_selector_step_while_the_old_inner_is_quiet() {
 /// instant on. With the outer a dependency this would be a cycle, refused
 /// at close; the outer is a watcher, and the loop runs. Without construct
 /// (stage 6), the five streams it can select are built beforehand: shared
-/// streams held directly, and linear streams in constant cells selected
+/// streams held directly, and affine streams in constant cells selected
 /// through a switch_cell, so a switch_stream watches a switch_cell. The
 /// construct form, SwitchS.hs's own, gives the same values. Stage5.hs:
 ///
 /// ```text
 /// probe loop, shared inners held directly: Just ([([1],1),([2],2),([3],3),([4],4)],5)
-/// probe loop, linear inners through a switch cell: Just ([([1],1),([2],2),([3],3),([4],4)],5)
+/// probe loop, affine inners through a switch cell: Just ([([1],1),([2],2),([3],3),([4],4)],5)
 /// probe loop with construct (SwitchS.hs): Just ([([1],1),([2],2),([3],3),([4],4)],5)
 /// ```
 #[test]
 fn switch_stream_loop_through_its_selection() {
-    for linear in [false, true] {
+    for affine in [false, true] {
         let events = every_order(|order| {
             let (mut graph, boundary) = Runtime::build(|b| {
                 let (fwd, closer) = b.stream_loop::<u32>();
                 let out = fwd.share(b);
                 let (ticks, ticks_in) = b.input::<u32>();
                 let ticks = ticks.share(b);
-                let switched = if linear {
+                let switched = if affine {
                     let cells: Vec<Cell<Stream<u32>>> = (0..5u32)
                         .map(|k| {
                             let s = ticks.map(move |t| t + k).node(b);
@@ -882,7 +882,7 @@ fn switch_stream_loop_through_its_selection() {
         assert_eq!(
             events[0],
             [(1, 1), (2, 2), (3, 3), (4, 4)],
-            "linear = {linear}"
+            "affine = {affine}"
         );
     }
 }
@@ -1015,22 +1015,22 @@ fn a_switch_stream_runs_the_inner_it_first_links_at_its_creation() {
 /// A switch_stream whose new inner fires at the switch instant: the old
 /// inner's event is forwarded there and the new one's is not; after a
 /// switch back at [4], z's Z at [5] is not the switch's. Over shared
-/// streams held directly, and over linear streams in constant cells
+/// streams held directly, and over affine streams in constant cells
 /// selected through a switch_cell. Stage5.hs:
 ///
 /// ```text
 /// new inner fires: out: [([1],'a'),([2],'b'),([3],'Y')]
-/// new inner fires: linear, through a switch cell: [([1],'a'),([2],'b'),([3],'Y')]
+/// new inner fires: affine, through a switch cell: [([1],'a'),([2],'b'),([3],'Y')]
 /// ```
 #[test]
 fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
-    for linear in [false, true] {
+    for affine in [false, true] {
         let events = every_order(|order| {
             let (mut graph, boundary) = Runtime::build(|b| {
                 let (a, a_in) = b.input::<char>();
                 let (z, z_in) = b.input::<char>();
                 let (pick, pick_in) = b.input::<bool>();
-                let out = if linear {
+                let out = if affine {
                     let (ca, cz) = (b.constant(a), b.constant(z));
                     let outer = pick.map(move |p| if p { cz } else { ca }).hold(b, ca);
                     b.depends(&outer, &[&cz, &ca]);
@@ -1058,7 +1058,7 @@ fn a_switch_stream_forwards_the_old_inner_at_the_switch_instant() {
         assert_eq!(
             events[0],
             [(1, 'a'), (2, 'b'), (3, 'Y')],
-            "linear = {linear}"
+            "affine = {affine}"
         );
     }
 }
@@ -1527,13 +1527,13 @@ fn send_string(input: Input<String>, value: &'static str) -> Send {
     Box::new(move |tx| tx.send(input, value.to_string()))
 }
 
-// ----------------------------------------------------------- one switch per cell of linear streams
+// ----------------------------------------------------------- one switch per cell of affine streams
 
-/// A linear stream has one consumer, so a cell holding linear streams may
+/// An affine stream has one consumer, so a cell holding affine streams may
 /// have one switch_stream: a second over the same cell panics where it is
 /// built.
 #[test]
-fn a_second_switch_stream_over_a_cell_of_linear_streams_is_refused() {
+fn a_second_switch_stream_over_a_cell_of_affine_streams_is_refused() {
     let message = panic_message(|| {
         Runtime::build(|b| {
             let (clicks, _clicks_in) = b.input::<u32>();
@@ -1607,11 +1607,11 @@ fn a_cell_of_shared_streams_may_have_several_switch_streams() {
 }
 
 /// The run-time backstop: a switch_cell selects, at [2], the cell whose
-/// linear stream another switch_stream takes from, which no build-time
+/// affine stream another switch_stream takes from, which no build-time
 /// check can see. The switch_stream over the switch_cell links it at
 /// commit and panics, which poisons the graph.
 #[test]
-fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_poisons() {
+fn a_switch_cell_selecting_a_affine_stream_that_has_a_switch_stream_panics_and_poisons() {
     let (mut graph, boundary) = Runtime::build(|b| {
         let (s1, s1_in) = b.input::<u32>(); // node 1
         let c1 = b.constant(s1); // node 2
@@ -1645,7 +1645,7 @@ fn a_switch_cell_selecting_a_linear_stream_that_has_a_switch_stream_panics_and_p
 /// The backstop at a first link: the switch_cell selects that cell from
 /// the start, and the build panics.
 #[test]
-fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build() {
+fn a_first_link_to_a_affine_stream_that_has_a_switch_stream_panics_in_the_build() {
     let message = panic_message(|| {
         Runtime::build(|b| {
             let (s1, _s1_in) = b.input::<u32>();
@@ -1662,7 +1662,7 @@ fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build(
     );
 }
 
-/// Two switch_streams trade linear streams in one instant: one moves off
+/// Two switch_streams trade affine streams in one instant: one moves off
 /// s1 as the other moves onto it. Relink gives up every claim before it
 /// makes any, so the trade is accepted in whatever order the switches were
 /// queued, which each seed and send order changes, and each forwards its
@@ -1673,7 +1673,7 @@ fn a_first_link_to_a_linear_stream_that_has_a_switch_stream_panics_in_the_build(
 /// trade: b: [([1],13),([2],23),([3],31)]
 /// ```
 #[test]
-fn two_switch_streams_may_trade_linear_streams_in_one_instant() {
+fn two_switch_streams_may_trade_affine_streams_in_one_instant() {
     let (first, second) = every_order(|order| {
         let (mut graph, boundary) = Runtime::build(|b| {
             let (s1, s1_in) = b.input::<u32>();

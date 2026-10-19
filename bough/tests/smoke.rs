@@ -40,7 +40,7 @@ fn the_smoke_graph_runs_in_every_mode() {
     // so its steps view carries 1 into `switched_steps`; the state switch
     // links the log. n = 1, odd: the switch moves to the constant, a quiet
     // inner, and steps to 3; the state switch moves to the entries, [10];
-    // the shared switch_stream follows the evens, which drop 1; the linear
+    // the shared switch_stream follows the evens, which drop 1; the affine
     // one takes 101 from `plus` and moves to `times`. The transaction
     // steps `level`, which is deselected. n = 2, even: the switch moves
     // back to `level`, 2, and the state switch to the log, [1, 2]; the

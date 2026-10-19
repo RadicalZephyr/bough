@@ -621,7 +621,7 @@ fn every_shuffle_seed_gives_the_same_children_and_events() {
 /// map_cell and a lift, selected by the input that steps two of them, with
 /// a steps view that reads the new inner after the instant and pulls it
 /// when the order has not reached it; a switch_cell over that switch and a
-/// hold; a switch_stream among shared streams; a switch_stream among linear
+/// hold; a switch_stream among shared streams; a switch_stream among affine
 /// streams in constant cells, selected through a switch_cell; and a loop
 /// through a switch_stream's selection. Listeners on every stream and
 /// cell. Besides the events and values, the run counts the calls of the
@@ -777,7 +777,7 @@ fn every_shuffle_seed_gives_the_same_switches_values_and_events() {
 
 /// Stage 6's constructs under the shuffle: a construct whose closure builds
 /// a hold over another input and a lift over it, which a switch_cell with
-/// a steps view follows; a construct whose closure builds a linear merge
+/// a steps view follows; a construct whose closure builds an affine merge
 /// of two inputs, which a switch_stream takes from; a construct whose
 /// closure declares and closes a counter loop; a construct built by a
 /// closure, over the input that runs the outer one, so that it runs at its

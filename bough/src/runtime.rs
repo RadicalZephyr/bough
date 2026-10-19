@@ -2372,24 +2372,24 @@ mod tests {
     /// out of its dependency's slot, and a shared slot keeps its event for
     /// every consumer.
     #[test]
-    fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
+    fn a_affine_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
         // The consumers are returned, so that they are roots: a consumer no
         // root reaches is collected at the first send, and takes nothing.
         let (mut graph, boundary) = Runtime::build(|b| {
-            let (linear, linear_in) = b.input::<u32>();
-            let latest = linear.hold(b, 0u32);
+            let (affine, affine_in) = b.input::<u32>();
+            let latest = affine.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
             let shared = events.share(b);
             let plus = shared.map(|x| x + 1).hold(b, 0u32);
             let same = shared.hold(b, 0u32);
-            (linear_in, shared_in, shared, [latest, plus, same])
+            (affine_in, shared_in, shared, [latest, plus, same])
         });
-        let (linear_in, shared_in, shared, _consumers) = boundary.keep();
+        let (affine_in, shared_in, shared, _consumers) = boundary.keep();
         let data = |graph: &Runtime, index: u32| {
             *slot::<Local, u32>(&graph.build.store.data[index as usize])
         };
-        graph.send(linear_in, 5);
-        assert_eq!(data(&graph, linear_in.token.index), None);
+        graph.send(affine_in, 5);
+        assert_eq!(data(&graph, affine_in.token.index), None);
         graph.send(shared_in, 7);
         // The shared node took its input's event, since its own chain reads
         // an affine stream, and both of its consumers cloned from it.

@@ -201,7 +201,7 @@ fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
 
 /// Every switch kind in a Threaded graph: a switch_cell with a steps view,
 /// a switch_cell over states, a switch_stream among shared streams, and one
-/// among linear streams in constant cells selected through a switch_cell.
+/// among affine streams in constant cells selected through a switch_cell.
 /// switch_stream requires the mode to accept the event type, which u64
 /// satisfies. Built on one thread, driven and sampled on another, where
 /// the switches move: at [2] each moves, the switch_cell to a map_cell
