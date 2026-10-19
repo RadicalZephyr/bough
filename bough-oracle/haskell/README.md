@@ -79,10 +79,13 @@ as a cell loop, which denotes the same cell.
 
 ## Two patches to the text
 
-Both live in `Oracle/Derived.hs`, in the derived layer, and leave
-`Denotational.hs` untouched. `OracleTests.hs` shows each one's case under the
-text and under the patch, and shows the twenty vectors of `sodium.hs`
-unchanged under both.
+The text departs from the two principles Bough holds over it (RFD 1), time
+order and existence from creation, and the oracle follows the principles
+there: F6 departs from both, F7 from time order. Both patches live in
+`Oracle/Derived.hs`, in the derived layer, and leave `Denotational.hs`
+untouched. `OracleTests.hs` shows each one's case under the text and under
+the patch, and shows the twenty vectors of `sodium.hs` unchanged under
+both.
 
 **F6, `switchCell`.** The text's `SwitchC c t0` scans the outer cell `c` from
 its initial value, not from `t0`. A switch cell created at `[3]` over an

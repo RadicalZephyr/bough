@@ -79,7 +79,10 @@
 //!
 //! # Two patches to the text
 //!
-//! Both live in `haskell/Oracle/Derived.hs`, in the derived layer; the
+//! The text departs from the two principles Bough holds over it (RFD 1),
+//! time order and existence from creation, and the oracle follows the
+//! principles there: F6 departs from both, F7 from time order. Both
+//! patches live in `haskell/Oracle/Derived.hs`, in the derived layer; the
 //! vendored file stays untouched. Each has a test in `OracleTests.hs` that
 //! shows the text's answer and the patched one on the case it fixes, and one
 //! that shows the twenty vectors of `sodium.hs` unchanged under both.

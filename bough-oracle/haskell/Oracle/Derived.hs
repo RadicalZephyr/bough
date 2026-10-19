@@ -4,9 +4,10 @@
 -- revision 1.1). That module is imported unchanged.
 --
 -- Ported from the spike's research (research-derived-ops, Derived.hs) with
--- its verification's corrections, and with two patches to defects in the
--- text. The patches live here, in the derived layer; the vendored file stays
--- untouched.
+-- its verification's corrections, and with two patches where the text
+-- departs from the two principles Bough holds over it (RFD 1), time order
+-- and existence from creation. The patches live here, in the derived layer;
+-- the vendored file stays untouched.
 --
 -- * F6, 'switchCell': the text's SwitchC scans the outer cell from its
 --   initial value, so a switch cell created after its outer stepped starts
