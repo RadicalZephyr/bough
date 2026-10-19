@@ -461,7 +461,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// last of them, so a sample then reads what it committed. The build
     /// closure's transaction has children too: a split of a
     /// [`steps_with_current`](Cell::steps_with_current) built there runs
-    /// them before [`Runtime::build`](crate::Runtime::build) returns.
+    /// them before [`Runtime::build_here`](crate::Runtime::build_here) returns.
     ///
     /// ```
     /// use std::cell::RefCell;

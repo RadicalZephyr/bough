@@ -69,9 +69,8 @@ impl<M: Mode> BuildContext<M> {
     }
 
     /// Closes a scope. A loop declared in it and still open is a panic,
-    /// which poisons the graph when it happens inside a transaction; at the
-    /// end of the build closure no graph exists yet, so `Runtime::build`
-    /// panics.
+    /// which poisons the graph: the build closure's scope and a construct
+    /// closure's each end inside a transaction.
     pub(crate) fn pop_scope(&mut self) {
         let start = self.s.scopes.pop().expect("bough engine: a scope is open");
         assert!(

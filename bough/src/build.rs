@@ -43,7 +43,7 @@ fn next_graph_id() -> u32 {
 /// The engine's own builder, for a runtime in mode `M`: it stores
 /// whatever that mode accepts.
 ///
-/// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
+/// It exists inside [`Runtime::build_here`](crate::Runtime::build_here) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
 /// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///

@@ -3,7 +3,7 @@
 //! Bough implements the Sodium FRP denotational semantics with an API that
 //! cleanly separates building FRP logic from driving it with I/O. Every
 //! node-creating operation needs a [`Builder`]: a [`BuildContext`], which
-//! only exists inside [`Runtime::build`] and inside [`Source::construct`]
+//! only exists inside [`Runtime::build_here`] and inside [`Source::construct`]
 //! closures, or the [`Portable`] one lends; sending, listening and sampling
 //! from outside live on [`Runtime`], which only exists once the build
 //! closure has returned. The design is recorded in the RFDs
@@ -35,7 +35,7 @@
 //! scope that must close the loops it declares. Stage 7 adds collection
 //! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
 //! [`Anchor`], or a registration waiting in a handle's queue, and
-//! [`Runtime::build`] anchors what its closure returns; what it reaches is
+//! [`Runtime::build_here`] anchors what its closure returns; what it reaches is
 //! its dependencies, the tokens [`Trace`] finds in a stateful cell's
 //! value, and what [`Builder::depends`] declares; and collection, automatic
 //! by default and never inside a transaction, frees the rest, so that a

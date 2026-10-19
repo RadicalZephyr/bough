@@ -110,16 +110,6 @@ pub struct Runtime<M: Mode = Local> {
     shut_down: bool,
 }
 
-/// Transaction zero: nothing is started, so the new-node phase runs every
-/// node the closure built, dependencies first.
-fn build_graph<M: Mode, R: Trace>(
-    f: impl FnOnce(&mut BuildContext<M>) -> R,
-) -> (Runtime<M>, Anchored<R>) {
-    let mut graph = Runtime::empty();
-    let boundary = graph.build_anchored(f);
-    (graph, boundary)
-}
-
 impl Runtime<Local> {
     /// An empty `Local` runtime: no nodes until a
     /// [`build`](Runtime::build_here) adds them. The empty runtime is no
@@ -127,24 +117,6 @@ impl Runtime<Local> {
     /// `construct` hands them out.
     pub fn local() -> Self {
         Runtime::empty()
-    }
-
-    /// Builds a `Local` graph. The closure gets the only [`BuildContext`];
-    /// whatever it returns is the graph's boundary, which comes back
-    /// [`Anchored`], so `R: Trace`. [`keep`](Anchored::keep) it to hold the
-    /// boundary for the graph's life, or drop it to let collection free what
-    /// only the boundary reached.
-    ///
-    /// The build closure runs as transaction zero. Its child transactions,
-    /// which a [`split`](crate::Source::split) or a
-    /// [`defer`](crate::Source::defer) that fires in it starts, run before
-    /// `build` returns, and so does the collection that is due after it, as
-    /// after any unit: what the build made that nothing reaches is gone
-    /// before I/O code sees the runtime.
-    pub fn build<R: Trace>(
-        f: impl FnOnce(&mut BuildContext<Local>) -> R,
-    ) -> (Runtime<Local>, Anchored<R>) {
-        build_graph(f)
     }
 
     /// A handle for I/O code that can't hold the runtime, such as a GTK
@@ -188,18 +160,6 @@ impl Runtime<Threaded> {
     /// pointer atomics.
     pub fn threaded() -> Self {
         Runtime::empty()
-    }
-
-    /// Builds a `Threaded` graph, which is `Send`; every value and closure it
-    /// stores must be `Send`.
-    ///
-    /// A separate constructor rather than a mode parameter on `build`, because
-    /// a defaulted type parameter takes no part in inferring an associated
-    /// function.
-    pub fn build_threaded<R: Trace + Send>(
-        f: impl FnOnce(&mut BuildContext<Threaded>) -> R,
-    ) -> (Runtime<Threaded>, Anchored<R>) {
-        build_graph(f)
     }
 }
 
@@ -1037,7 +997,7 @@ impl<M: Mode> Runtime<M> {
     /// the two kinds of root. `value` is a token, or any value that holds
     /// tokens, such as the tuple or struct of tokens a
     /// [`construct`](crate::Source::construct) closure made; the anchor roots
-    /// every token its [`Trace`] finds, as [`build`](Runtime::build) does
+    /// every token its [`Trace`] finds, as [`build`](Runtime::build_here) does
     /// for the build closure's return value. The [`Anchored`] it returns carries the value and reads
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
