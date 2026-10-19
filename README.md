@@ -2,10 +2,6 @@
 
 **Lightweight FRP rooted in Rust.**
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/portia-rs/portia/83b68048089c3a5c9f41215d3db3c2868ccb220b/portia-logo.png" width="280" alt="Portia Logo">
-</p>
-
 ---
 
 ## Overview
