@@ -53,7 +53,7 @@ pub struct Shallow {
 impl Shallow {
     pub fn new(share: bool, heavy: bool) -> Self {
         let mut graph = Runtime::local();
-        let (input, out) = graph.build_here(|b| {
+        let (input, out) = graph.build(|b| {
             let (numbers, input) = b.input::<u64>();
             let mapped = numbers.map(move |x| if heavy { payload(x) } else { first(x) });
             let out = if share {
@@ -110,7 +110,7 @@ pub struct Frame {
 impl Frame {
     pub fn new() -> Self {
         let mut graph = Runtime::local();
-        let (inputs, outs) = graph.build_here(|b| {
+        let (inputs, outs) = graph.build(|b| {
             let (open, _open_in) = b.input_cell(true);
             let mut inputs = Vec::with_capacity(FRAME_INPUTS);
             let mut outs = Vec::with_capacity(FRAME_INPUTS * 4);
@@ -217,7 +217,7 @@ pub struct FanOut {
 impl FanOut {
     pub fn new() -> Self {
         let mut graph = Runtime::local();
-        let (input, numbers) = graph.build_here(|b| {
+        let (input, numbers) = graph.build(|b| {
             let (numbers, input) = b.input::<u64>();
             let numbers: Shared<u64> = numbers.share(b);
             (input, numbers)

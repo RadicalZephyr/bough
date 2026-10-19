@@ -63,7 +63,7 @@ fn claim1_an_erased_arena_moves_affine_events_and_clones_shared_ones() {
     };
     let initial = counted(0);
     let mut graph = Runtime::local();
-    let (affine_in, shared_in, last_affine, lengths, bangs, _keeps) = graph.build_here(move |b| {
+    let (affine_in, shared_in, last_affine, lengths, bangs, _keeps) = graph.build(move |b| {
         // Affine: an input of a type with no Clone, consumed by one hold.
         let (affine, affine_in) = b.input::<NoClone>();
         let last_affine = affine.hold(b, NoClone(0));
@@ -108,7 +108,7 @@ fn claim2_a_chain_fuses_into_one_node_whose_snapshot_reads_the_value_before_the_
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
     let mut graph = Runtime::local();
-    let (numbers_in, limit_in, out) = graph.build_here(move |b| {
+    let (numbers_in, limit_in, out) = graph.build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (limit_events, limit_in) = b.input::<u32>();
         let limit = limit_events.hold(b, 10);
@@ -156,7 +156,7 @@ fn claim3_sample_returns_the_same_reference_twice_and_runs_nothing() {
     let calls = Rc::new(StdCell::new(0u32));
     let counter = calls.clone();
     let mut graph = Runtime::local();
-    let (names_in, joined, count) = graph.build_here(move |b| {
+    let (names_in, joined, count) = graph.build(move |b| {
         let (names, names_in) = b.input::<String>();
         let names = names.share(b);
         let joined = names

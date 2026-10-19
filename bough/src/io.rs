@@ -298,7 +298,7 @@ impl IoQueue<Threaded> for NoIo {
 /// use bough::prelude::*;
 ///
 /// let mut graph = Runtime::local();
-/// let (clicks_in, count) = graph.build_here(|b| {
+/// let (clicks_in, count) = graph.build(|b| {
 ///     let (clicks, clicks_in) = b.input::<()>();
 ///     (clicks_in, clicks.accumulate(b, 0u32, |_, n| n + 1))
 /// });

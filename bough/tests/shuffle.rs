@@ -38,7 +38,7 @@ fn schedule() -> Vec<Sends> {
 
 fn run(seed: Option<u64>) -> Run {
     let mut graph = Runtime::local();
-    let (inputs, streams, cells) = graph.build_here(|b| {
+    let (inputs, streams, cells) = graph.build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (bump, bump_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -158,7 +158,7 @@ fn a_merge_of_simultaneous_sends_calls_its_function_once_under_every_seed() {
         let calls = Rc::new(std::cell::Cell::new(0u32));
         let counter = calls.clone();
         let mut graph = Runtime::local();
-        let (left_in, right_in, merged) = graph.build_here(move |b| {
+        let (left_in, right_in, merged) = graph.build(move |b| {
             let (left, left_in) = b.input::<u32>();
             let (right, right_in) = b.input::<u32>();
             let left = left.share(b);
@@ -190,7 +190,7 @@ fn a_merge_of_simultaneous_sends_calls_its_function_once_under_every_seed() {
 fn snapshots_and_gates_read_the_value_before_the_instant_under_every_seed() {
     for seed in [None, Some(0), Some(5), Some(17), Some(1 << 40)] {
         let mut graph = Runtime::local();
-        let (numbers_in, limit_in, open_in, clipped, gated) = graph.build_here(|b| {
+        let (numbers_in, limit_in, open_in, clipped, gated) = graph.build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let numbers = numbers.share(b);
             let (limit, limit_in) = b.input_cell(10u32);
@@ -227,7 +227,7 @@ fn run_cells(seed: Option<u64>) -> (Run, [u32; 5]) {
     };
     let (c0, c1, c2, c3, c4) = (counted(0), counted(1), counted(2), counted(3), counted(4));
     let mut graph = Runtime::local();
-    let (inputs, streams, cells, states) = graph.build_here(move |b| {
+    let (inputs, streams, cells, states) = graph.build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -367,7 +367,7 @@ fn run_loops(seed: Option<u64>) -> (Run, u32) {
     let calls = Rc::new(StdCell::new(0u32));
     let count = calls.clone();
     let mut graph = Runtime::local();
-    let (inputs, streams, cells, states) = graph.build_here(move |b| {
+    let (inputs, streams, cells, states) = graph.build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -519,7 +519,7 @@ fn every_shuffle_seed_gives_the_same_loops_values_and_events() {
 /// shuffled as any transaction is, by its own serial.
 fn run_children(seed: Option<u64>) -> Run {
     let mut graph = Runtime::local();
-    let (inputs, streams, cells) = graph.build_here(|b| {
+    let (inputs, streams, cells) = graph.build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -633,7 +633,7 @@ fn run_switches(seed: Option<u64>) -> (Run, [u32; 2], Option<[u64; 2]>) {
     let calls = [Rc::new(StdCell::new(0u32)), Rc::new(StdCell::new(0u32))];
     let counted = calls.clone();
     let mut graph = Runtime::local();
-    let (inputs, streams, cells) = graph.build_here(move |b| {
+    let (inputs, streams, cells) = graph.build(move |b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);
@@ -792,7 +792,7 @@ fn every_shuffle_seed_gives_the_same_switches_values_and_events() {
 /// or new: each node runs once per instant whatever the order.
 fn run_constructs(seed: Option<u64>, policy: CollectionPolicy) -> (Run, usize, Option<u64>) {
     let mut graph = Runtime::local();
-    let (inputs, streams, cells) = graph.build_here(|b| {
+    let (inputs, streams, cells) = graph.build(|b| {
         let (a, a_in) = b.input::<u64>();
         let (c, c_in) = b.input::<u64>();
         let (d, d_in) = b.input_coalescing(|x: u64, y| x * 10 + y);

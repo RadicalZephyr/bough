@@ -216,7 +216,7 @@ fn claim4_construct_creates_nodes_while_a_closure_runs_in_both_send_orders() {
     let got = every_order(|order| {
         let (inside, mut on_inside) = recorder::<u32>();
         let mut graph = Runtime::local();
-        let (e_in, go_in, made) = graph.build_here(move |b| {
+        let (e_in, go_in, made) = graph.build(move |b| {
             let (e, e_in) = b.input::<u32>();
             let e = e.share(b);
             let (go, go_in) = b.input::<u32>();
@@ -273,7 +273,7 @@ fn claim4_construct_creates_nodes_while_a_closure_runs_in_both_send_orders() {
 fn r1_a_loop_in_a_construct_closure_with_readers_built_before_its_definition() {
     let (values, steps) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (s_in, made) = graph.build_here(|b| {
+        let (s_in, made) = graph.build(|b| {
             let (s, s_in) = b.input::<u32>();
             let s = s.share(b);
             let made = s.construct(b, move |b, _| {
@@ -316,7 +316,7 @@ fn r1_a_loop_in_a_construct_closure_with_readers_built_before_its_definition() {
 fn r2(definition_is_a_node: bool) -> Vec<(usize, Vec<u32>)> {
     every_order(|order| {
         let mut graph = Runtime::local();
-        let (s_in, made) = graph.build_here(move |b| {
+        let (s_in, made) = graph.build(move |b| {
             let (s, s_in) = b.input::<u32>();
             let s = s.share(b);
             let made = s.construct(b, move |b, n| {
@@ -371,7 +371,7 @@ fn r2b_a_stream_loop_whose_definition_is_a_node_built_after_its_forward() {
 fn everything_a_closure_builds_exists_from_its_instant() {
     let (inside, samples) = every_order(|order| {
         let mut graph = Runtime::local();
-        let ((s_in, c_in, q_in, go_in), made) = graph.build_here(|b| {
+        let ((s_in, c_in, q_in, go_in), made) = graph.build(|b| {
             let (s, s_in) = b.input::<u32>();
             let s = s.share(b);
             let (c, c_in) = b.input_cell(10u32);
@@ -472,7 +472,7 @@ fn everything_a_closure_builds_exists_from_its_instant() {
 fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
     let (outs, shown, holds) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (s_in, made, (outs, shown)) = graph.build_here(|b| {
+        let (s_in, made, (outs, shown)) = graph.build(|b| {
             let (s, s_in) = b.input::<u32>();
             let s = s.share(b);
             let (outs, outs_loop) = b.stream_loop::<u32>();
@@ -530,7 +530,7 @@ fn nodes_a_closure_builds_may_depend_on_its_construct_s_own_events() {
 fn an_input_built_by_a_closure_is_received_by_a_listener_and_wired_after_send() {
     let got = every_order(|order| {
         let mut graph = Runtime::local();
-        let (go_in, made) = graph.build_here(|b| {
+        let (go_in, made) = graph.build(|b| {
             let (go, go_in) = b.input::<u32>();
             let made = go.construct(b, |b, k| {
                 let (sends, sends_in) = b.input::<u32>();
@@ -581,7 +581,7 @@ fn an_input_built_by_a_closure_is_received_by_a_listener_and_wired_after_send() 
 fn a_construct_built_by_a_closure_runs_at_its_creation_instant_and_after() {
     let (top, bodies) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (s_in, made, top) = graph.build_here(|b| {
+        let (s_in, made, top) = graph.build(|b| {
             let (s, s_in) = b.input::<u32>();
             let s = s.share(b);
             let c0 = b.constant(0u32);
@@ -645,7 +645,7 @@ fn a_construct_built_by_a_closure_runs_at_its_creation_instant_and_after() {
 fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
     let (logs, holds) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (lists_in, made, logs) = graph.build_here(|b| {
+        let (lists_in, made, logs) = graph.build(|b| {
             let (lists, lists_in) = b.input::<Vec<u32>>();
             let items = lists.split(b).share(b);
             let c0 = b.constant(0u32);
@@ -732,7 +732,7 @@ fn a_construct_fed_by_a_split_runs_its_closure_in_each_child_instant() {
 fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
     let (held, steps) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (go_in, xs_in, made) = graph.build_here(|b| {
+        let (go_in, xs_in, made) = graph.build(|b| {
             let (go, go_in) = b.input::<()>();
             let go = go.share(b);
             let (xs, xs_in) = b.input::<u32>();
@@ -781,7 +781,7 @@ fn r6_a_switch_cell_built_at_t_over_an_outer_and_an_inner_built_at_t() {
 fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
     let got = every_order(|order| {
         let mut graph = Runtime::local();
-        let ((sel_in, go_in, x_in), made) = graph.build_here(|b| {
+        let ((sel_in, go_in, x_in), made) = graph.build(|b| {
             let (sel, sel_in) = b.input::<()>();
             let (go, go_in) = b.input::<()>();
             let (x, x_in) = b.input::<u32>();
@@ -842,7 +842,7 @@ fn a_switch_cell_built_after_its_outer_switched_starts_from_the_new_inner() {
 fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
     let got = every_order(|order| {
         let mut graph = Runtime::local();
-        let ((a_in, z_in, sel_in, go_in), made) = graph.build_here(|b| {
+        let ((a_in, z_in, sel_in, go_in), made) = graph.build(|b| {
             let (a, a_in) = b.input::<char>();
             let a = a.share(b);
             let (z, z_in) = b.input::<char>();
@@ -911,7 +911,7 @@ fn a_switch_stream_built_at_t_forwards_the_inner_selected_before_t() {
 fn switches_built_at_t_start_from_their_outers_values_before_t_and_move_after_t() {
     let (inside, steps, samples) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (inputs, made) = graph.build_here(|b| {
+        let (inputs, made) = graph.build(|b| {
             let (x, x_in) = b.input::<u32>();
             let x = x.share(b);
             let (y, y_in) = b.input::<u32>();
@@ -1043,7 +1043,7 @@ fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Event> {
 fn rfd_2_s_navigation_loop_through_rfd_4_s_dynamic_pattern() {
     let (events, nodes) = every_order(|order| {
         let mut graph = Runtime::local();
-        let (clicks_in, log) = graph.build_here(|b| {
+        let (clicks_in, log) = graph.build(|b| {
             let (clicks, clicks_in) = b.input::<u32>();
             let clicks = clicks.share(b);
             let (navigate, navigate_loop) = b.stream_loop::<u32>();
@@ -1098,7 +1098,7 @@ fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct()
     for affine in [true, false] {
         let got = every_order(|order| {
             let mut graph = Runtime::local();
-            let (ticks_in, log) = graph.build_here(move |b| {
+            let (ticks_in, log) = graph.build(move |b| {
                 let (ticks, ticks_in) = b.input::<u32>();
                 let ticks = ticks.share(b);
                 let (selected, selected_loop) = b.stream_loop::<u32>();
@@ -1132,7 +1132,7 @@ fn a_loop_through_a_switch_stream_s_selection_builds_its_inners_with_construct()
 #[test]
 fn a_loop_left_open_in_a_construct_closure_panics_and_poisons() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
         let made = go.construct(b, |b, _| {
@@ -1157,7 +1157,7 @@ fn a_loop_left_open_in_a_construct_closure_panics_and_poisons() {
 #[test]
 fn a_closer_smuggled_into_a_construct_closure_leaves_its_scope_open() {
     let message = panic_message(|| {
-        Runtime::local().build_here(|b| {
+        Runtime::local().build(|b| {
             let (forward, closer) = b.cell_loop::<u32>();
             let mut closer = Some(closer);
             let (go, _go_in) = b.input::<u32>();
@@ -1182,7 +1182,7 @@ fn a_closer_smuggled_into_a_construct_closure_leaves_its_scope_open() {
 #[test]
 fn a_loop_a_closure_closes_into_a_same_instant_cycle_is_refused_at_close() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>(); // node 1
         let go = go.share(b); // node 2
         let made = go.construct(b, |b, _| {
@@ -1212,7 +1212,7 @@ fn a_loop_a_closure_closes_into_a_same_instant_cycle_is_refused_at_close() {
 #[test]
 fn a_switch_a_closure_builds_whose_first_link_closes_a_cycle_is_refused() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>(); // node 1
         let go = go.share(b); // node 2
         let made = go.construct(b, |b, _| {
@@ -1244,7 +1244,7 @@ fn a_switch_a_closure_builds_whose_first_link_closes_a_cycle_is_refused() {
 #[test]
 fn a_switch_moved_onto_a_stream_a_closure_built_from_it_is_refused_at_relink() {
     let mut graph = Runtime::local();
-    let (go_in, x_in, total) = graph.build_here(|b| {
+    let (go_in, x_in, total) = graph.build(|b| {
         let (x, x_in) = b.input::<u32>(); // node 1
         let x = x.share(b); // node 2
         let (go, go_in) = b.input::<()>(); // node 3
@@ -1279,12 +1279,12 @@ fn a_switch_moved_onto_a_stream_a_closure_built_from_it_is_refused_at_relink() {
 #[test]
 fn a_construct_closure_that_swaps_its_build_context_panics_and_poisons() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
         let made = go.construct(b, |b, _| {
             let nested = catch_unwind(AssertUnwindSafe(|| {
-                Runtime::local().build_here(|other| std::mem::swap(b, other))
+                Runtime::local().build(|other| std::mem::swap(b, other))
             }));
             assert!(nested.is_err(), "the nested build refused the swap");
         });
@@ -1333,7 +1333,7 @@ fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
             *switched.sample(b)
         };
         let mut graph = Runtime::local();
-        let (go_in, latest, _made) = graph.build_here(move |b| {
+        let (go_in, latest, _made) = graph.build(move |b| {
             let (go, go_in) = b.input::<u32>();
             let go = go.share(b);
             let made = go.construct(b, move |b, _| cycle(b));
@@ -1345,7 +1345,7 @@ fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
         assert!(message.contains(MESSAGE), "{message}");
         assert_poisoned(&mut graph, go_in, 2, latest);
 
-        let message = panic_message(|| Runtime::local().build_here(cycle));
+        let message = panic_message(|| Runtime::local().build(cycle));
         assert!(message.contains(MESSAGE), "{message}");
     }
 }
@@ -1360,7 +1360,7 @@ fn a_sample_around_a_cycle_before_a_switch_s_first_link_panics_and_poisons() {
 #[test]
 fn a_node_pulled_before_a_switch_s_first_link_that_reads_around_a_cycle_panics() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
         let made = go.construct(b, move |b, _| {
@@ -1401,7 +1401,7 @@ fn a_read_through_unlinked_switches_without_a_cycle_reads_the_selection() {
         *selected.sample(b)
     }
     let mut graph = Runtime::local();
-    let (go_in, made) = graph.build_here(|b| {
+    let (go_in, made) = graph.build(|b| {
         assert_eq!(chain(b, 7), 7);
         let (go, go_in) = b.input::<u32>();
         let made = go.construct(b, chain);
@@ -1421,7 +1421,7 @@ fn a_read_through_unlinked_switches_without_a_cycle_reads_the_selection() {
 #[test]
 fn a_read_around_a_cycle_panics_however_many_switches_are_unlinked() {
     let mut graph = Runtime::local();
-    let (go_in, latest, _made) = graph.build_here(|b| {
+    let (go_in, latest, _made) = graph.build(|b| {
         let (go, go_in) = b.input::<u32>();
         let go = go.share(b);
         let made = go.construct(b, |b, _| {

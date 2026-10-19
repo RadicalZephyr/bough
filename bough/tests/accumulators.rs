@@ -19,7 +19,7 @@ fn recorder<T: 'static>() -> (Rc<RefCell<Vec<T>>>, impl FnMut(T) + 'static) {
 #[test]
 fn an_accumulator_reads_its_own_value_from_before_the_instant() {
     let mut graph = Runtime::local();
-    let (digits_in, number, seen) = graph.build_here(|b| {
+    let (digits_in, number, seen) = graph.build(|b| {
         let (digits, digits_in) = b.input::<u32>();
         let digits = digits.share(b);
         // The state `f` gets is the accumulator's own committed value.
@@ -39,7 +39,7 @@ fn an_accumulator_reads_its_own_value_from_before_the_instant() {
 #[test]
 fn an_accumulator_steps_only_when_its_chain_fires() {
     let mut graph = Runtime::local();
-    let (numbers_in, total) = graph.build_here(|b| {
+    let (numbers_in, total) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let total = numbers
             .filter(|n| n % 2 == 1)
@@ -59,7 +59,7 @@ fn accumulate_and_accumulate_mut_give_the_same_values_on_the_same_input() {
     let calls = Rc::new(StdCell::new(0u32));
     let count = calls.clone();
     let mut graph = Runtime::local();
-    let (words_in, copied, in_place, lengths) = graph.build_here(move |b| {
+    let (words_in, copied, in_place, lengths) = graph.build(move |b| {
         let (words, words_in) = b.input::<String>();
         let words = words.share(b);
         let copied =
@@ -110,7 +110,7 @@ fn accumulate_and_accumulate_mut_give_the_same_values_on_the_same_input() {
 #[test]
 fn scan_emits_an_output_per_event_and_keeps_its_state() {
     let mut graph = Runtime::local();
-    let (numbers_in, labels, last) = graph.build_here(|b| {
+    let (numbers_in, labels, last) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         // Sodium's collect: the running count and total are the state, and
         // each event emits a label built from the state before it.
@@ -137,7 +137,7 @@ fn two_scans_over_one_stream_keep_their_own_states() {
     // Both advance at every send, and each reads its own state from before
     // the instant.
     let mut graph = Runtime::local();
-    let (numbers_in, sums, products) = graph.build_here(|b| {
+    let (numbers_in, sums, products) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let sums = numbers.scan(b, 0u64, |n, s| (s + n, s + n)).hold(b, 0u64);
@@ -153,7 +153,7 @@ fn two_scans_over_one_stream_keep_their_own_states() {
 #[test]
 fn a_state_is_read_by_sample_snapshot_gate_and_the_cell_listeners() {
     let mut graph = Runtime::local();
-    let (joins_in, lines_in, members, open, said) = graph.build_here(|b| {
+    let (joins_in, lines_in, members, open, said) = graph.build(|b| {
         let (joins, joins_in) = b.input::<String>();
         let (lines, lines_in) = b.input::<String>();
         let joins = joins.share(b);
@@ -198,7 +198,7 @@ fn an_in_place_accumulator_runs_its_function_at_commit() {
     // The listener sees the mutated state; a snapshot in the same instant
     // saw the old one.
     let mut graph = Runtime::local();
-    let (numbers_in, log, before) = graph.build_here(|b| {
+    let (numbers_in, log, before) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let log = numbers.accumulate_mut(b, Vec::new(), |n, log: &mut Vec<u32>| log.push(n));

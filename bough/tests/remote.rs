@@ -56,7 +56,7 @@ type Pair = (Input<u32>, Input<u32>, Stream<u32>);
 
 fn pair() -> (Runtime, Pair) {
     let mut graph = Runtime::local();
-    let pair = graph.build_here(|b| {
+    let pair = graph.build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left.merge(b, right, |l, r| l * 1000 + r);
@@ -107,7 +107,7 @@ fn a_remote_transaction_is_one_unit_whose_sends_are_simultaneous() {
 #[test]
 fn a_unit_coalesces_what_its_input_coalesces() {
     let mut graph = Runtime::local();
-    let (words_in, words) = graph.build_here(|b| {
+    let (words_in, words) = graph.build(|b| {
         let (words, words_in) = b.input_coalescing(|a: String, w: String| a + " " + &w);
         (words_in, words.node(b))
     });
@@ -129,7 +129,7 @@ fn a_unit_coalesces_what_its_input_coalesces() {
 fn slots_drain_before_units() {
     static SENSOR: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &SENSOR, 0);
         (numbers_in, numbers.node(b))
@@ -150,7 +150,7 @@ fn slots_drain_before_units() {
 #[test]
 fn a_local_graph_takes_units_from_several_threads() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<(u32, u32)>();
         (numbers_in, numbers.node(b))
     });
@@ -184,7 +184,7 @@ fn a_local_graph_takes_units_from_several_threads() {
 #[test]
 fn a_remote_send_never_blocks_on_the_graph() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -225,7 +225,7 @@ fn a_remote_send_never_blocks_on_the_graph() {
 #[test]
 fn a_remote_send_from_a_listener_is_a_later_transaction() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -259,7 +259,7 @@ fn a_remote_send_from_a_listener_is_a_later_transaction() {
 #[test]
 fn a_remote_transaction_runs_on_the_driver() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -304,7 +304,7 @@ impl Wake for Counter {
 #[test]
 fn a_remote_call_wakes_the_driver_once_per_burst() {
     let mut graph = Runtime::local();
-    let (numbers_in, _numbers) = graph.build_here(|b| {
+    let (numbers_in, _numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -343,7 +343,7 @@ fn a_remote_call_wakes_the_driver_once_per_burst() {
 #[test]
 fn calls_through_both_handles_run_in_the_order_they_were_made() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -377,7 +377,7 @@ fn calls_through_both_handles_run_in_the_order_they_were_made() {
 fn a_remote_call_made_after_the_pump_began_waits_for_the_next_pump() {
     static TICKS: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (ticks, echoes_in, echoes) = graph.build_here(|b| {
+    let (ticks, echoes_in, echoes) = graph.build(|b| {
         let (ticks, ticks_in) = b.input::<u32>();
         b.connect(ticks_in, &TICKS, 0);
         let (echoes, echoes_in) = b.input::<u32>();
@@ -434,12 +434,12 @@ fn a_double_send_inside_a_unit_drops_the_unit_whole() {
 #[test]
 fn a_foreign_token_is_refused_when_queued_or_at_pump() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
     let mut _other = Runtime::local();
-    let foreign_in = _other.build_here(|b| b.input::<u32>().1);
+    let foreign_in = _other.build(|b| b.input::<u32>().1);
     let seen = log(&mut graph, numbers);
     let remote = graph.remote_io();
     assert_eq!(remote.send(foreign_in, 1), Err(IoError::ForeignGraph));
@@ -472,7 +472,7 @@ fn a_remote_send_to_an_input_collected_before_the_pump_is_stale() {
     // that the return value does not root it.
     let mut lost = None;
     let mut graph = Runtime::local();
-    let (kept_in, kept) = graph.build_here(|b| {
+    let (kept_in, kept) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let _unrooted = numbers.hold(b, 0u32);
         lost = Some(numbers_in);
@@ -528,7 +528,7 @@ fn a_dropped_graph_refuses_remote_sends() {
     }
     let drops = Arc::new(AtomicUsize::new(0));
     let mut graph = Runtime::local();
-    let things_in = graph.build_here(|b| b.input::<Counted>().1);
+    let things_in = graph.build(|b| b.input::<Counted>().1);
     let remote = graph.remote_io();
     remote.send(things_in, Counted(drops.clone())).unwrap();
     drop(graph);
@@ -554,7 +554,7 @@ fn a_dropped_graph_refuses_remote_sends() {
 #[test]
 fn a_panic_in_a_unit_poisons_the_graph() {
     let mut graph = Runtime::local();
-    let (numbers_in, _numbers) = graph.build_here(|b| {
+    let (numbers_in, _numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.node(b))
     });
@@ -577,7 +577,7 @@ fn a_panic_in_a_unit_poisons_the_graph() {
 #[test]
 fn a_listener_registered_from_another_thread_runs_on_the_driver() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -616,7 +616,7 @@ fn a_listener_registered_from_another_thread_runs_on_the_driver() {
 #[test]
 fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
     let mut graph = Runtime::local();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -648,7 +648,7 @@ fn a_remote_listen_cell_fires_at_the_pump_with_the_value_then() {
 #[test]
 fn a_remote_listen_once_hears_the_first_event_after_the_pump_registers_it() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -679,7 +679,7 @@ fn a_remote_listen_once_hears_the_first_event_after_the_pump_registers_it() {
 #[test]
 fn a_remote_listen_cell_once_fires_at_the_pump_with_the_value_then() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -745,7 +745,7 @@ fn a_remote_once_listener_is_a_root_until_it_fires() {
 #[test]
 fn a_listener_tied_to_a_remote_unit_hears_its_children_on_the_driver() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, later, latest) = graph.build_here(|b| {
+    let (numbers_in, later, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let later = numbers.defer(b).share(b);
         (numbers_in, later, later.hold(b, 0u32))
@@ -775,7 +775,7 @@ fn a_listener_tied_to_a_remote_unit_hears_its_children_on_the_driver() {
 #[test]
 fn a_listener_tied_to_a_remote_unit_that_heard_nothing_ends_with_it() {
     let mut graph = Runtime::local();
-    let (numbers_in, big) = graph.build_here(|b| {
+    let (numbers_in, big) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.filter(|n| *n > 5).share(b))
     });
@@ -805,7 +805,7 @@ fn a_remote_unit_whose_tied_listen_fails_is_dropped_whole() {
     let (mut graph, (left_in, _right_in, merged)) = pair();
     let seen = log(&mut graph, merged);
     let mut _other = Runtime::local();
-    let foreign = _other.build_here(|b| b.input::<u32>().0.share(b));
+    let foreign = _other.build(|b| b.input::<u32>().0.share(b));
     let remote = graph.remote_io();
     remote
         .transaction(move |tx| {
@@ -855,7 +855,7 @@ fn a_remote_registrations_foreign_token_is_refused_and_a_stale_one_found_at_the_
     drop(boundary);
     graph.collect_garbage();
     let mut _other = Runtime::local();
-    let (_foreign_in, foreign) = _other.build_here(|b| {
+    let (_foreign_in, foreign) = _other.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -874,7 +874,7 @@ fn a_remote_registrations_foreign_token_is_refused_and_a_stale_one_found_at_the_
 #[test]
 fn a_threaded_runtime_registers_through_remote_io_and_pumps_elsewhere() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, total) = graph.build_here(|b| {
+    let (numbers_in, total) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
@@ -906,7 +906,7 @@ fn open_a_row(
     mut on_row: impl FnMut(&RemoteIo, Row) + Send + 'static,
 ) -> (Runtime<bough::Threaded>, Row) {
     let mut graph = Runtime::threaded();
-    let (open_in, rows) = graph.build_here(|b| {
+    let (open_in, rows) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();
         let rows = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();

@@ -13,7 +13,7 @@ fn a_threaded_graph_is_send_and_runs_on_another_thread() {
     assert_send::<Listener>();
 
     let mut graph = Runtime::threaded();
-    let (numbers_in, words_in, doubled, sentence) = graph.build_here(|b| {
+    let (numbers_in, words_in, doubled, sentence) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let doubled = numbers.map(|n| n * 2).hold(b, 0u64);
         let (words, words_in) = b.input_coalescing(|a: String, b: String| a + " " + &b);
@@ -46,7 +46,7 @@ fn a_threaded_graph_is_send_and_runs_on_another_thread() {
 #[test]
 fn a_threaded_graph_can_live_behind_a_mutex() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -67,25 +67,24 @@ fn a_threaded_graph_can_live_behind_a_mutex() {
 #[test]
 fn a_threaded_graph_runs_every_cell_operation_on_another_thread() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, level_in, (label, product, total, log, labels, steps)) =
-        graph.build_here(|b| {
-            let (numbers, numbers_in) = b.input::<u64>();
-            let numbers = numbers.share(b);
-            let (level, level_in) = b.input_cell(2u64);
-            let label = level.map_cell(b, |l| format!("level {l}"));
-            let product = (level, numbers.hold(b, 1u64)).lift(b, |l, n| l * n);
-            let total = numbers.accumulate(b, 0u64, |n, t| t + n);
-            let log = numbers.accumulate_mut(b, Vec::new(), |n, log: &mut Vec<u64>| log.push(n));
-            let labels = numbers
-                .scan(b, 0u64, |n, k| (format!("#{k}: {n}"), k + 1))
-                .hold(b, String::new());
-            let steps = product.steps_with_current(b).hold(b, 0u64);
-            (
-                numbers_in,
-                level_in,
-                (label, product, total, log, labels, steps),
-            )
-        });
+    let (numbers_in, level_in, (label, product, total, log, labels, steps)) = graph.build(|b| {
+        let (numbers, numbers_in) = b.input::<u64>();
+        let numbers = numbers.share(b);
+        let (level, level_in) = b.input_cell(2u64);
+        let label = level.map_cell(b, |l| format!("level {l}"));
+        let product = (level, numbers.hold(b, 1u64)).lift(b, |l, n| l * n);
+        let total = numbers.accumulate(b, 0u64, |n, t| t + n);
+        let log = numbers.accumulate_mut(b, Vec::new(), |n, log: &mut Vec<u64>| log.push(n));
+        let labels = numbers
+            .scan(b, 0u64, |n, k| (format!("#{k}: {n}"), k + 1))
+            .hold(b, String::new());
+        let steps = product.steps_with_current(b).hold(b, 0u64);
+        (
+            numbers_in,
+            level_in,
+            (label, product, total, log, labels, steps),
+        )
+    });
     let heard = Arc::new(Mutex::new(Vec::new()));
     let writer = heard.clone();
     graph
@@ -127,7 +126,7 @@ fn a_threaded_graph_runs_every_cell_operation_on_another_thread() {
 #[test]
 fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
     let mut graph = Runtime::threaded();
-    let (ticks_in, (count, views, total, log)) = graph.build_here(|b| {
+    let (ticks_in, (count, views, total, log)) = graph.build(|b| {
         let (ticks, ticks_in) = b.input::<u64>();
         let ticks = ticks.share(b);
         let (count, count_loop) = b.cell_loop::<u64>();
@@ -176,7 +175,7 @@ fn a_threaded_graph_runs_every_loop_kind_on_another_thread() {
 #[test]
 fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
     let mut graph = Runtime::threaded();
-    let (lists_in, events, total) = graph.build_here(|b| {
+    let (lists_in, events, total) = graph.build(|b| {
         let (lists, lists_in) = b.input::<Vec<u64>>();
         let (halves, halves_loop) = b.stream_loop::<u64>();
         let again = halves.filter(|n| *n > 1).map(|n| n / 2).defer(b);
@@ -211,7 +210,7 @@ fn a_threaded_graph_runs_split_and_defer_children_on_another_thread() {
 #[test]
 fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, pick_in, cells) = graph.build_here(|b| {
+    let (numbers_in, pick_in, cells) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let (pick, pick_in) = b.input::<bool>();
@@ -291,7 +290,7 @@ fn a_threaded_graph_runs_every_switch_kind_on_another_thread() {
 #[test]
 fn a_threaded_graph_runs_construct_closures_on_another_thread() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, opens_in, made, cells) = graph.build_here(|b| {
+    let (numbers_in, opens_in, made, cells) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let (opens, opens_in) = b.input::<u64>();
@@ -353,13 +352,13 @@ fn a_threaded_graph_runs_construct_closures_on_another_thread() {
 #[test]
 fn a_threaded_runtime_made_empty_is_built_moved_and_built_again() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         (numbers_in, numbers.share(b))
     });
     graph.send(numbers_in, 1);
     let total = thread::spawn(move || {
-        let total = graph.build_here(|b| numbers.accumulate(b, 0u64, |n, t| t + n));
+        let total = graph.build(|b| numbers.accumulate(b, 0u64, |n, t| t + n));
         graph.send(numbers_in, 2);
         graph.send(numbers_in, 3);
         *graph.sample(total)

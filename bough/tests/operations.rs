@@ -16,7 +16,7 @@ fn counter() -> (Rc<StdCell<u32>>, Rc<StdCell<u32>>) {
 #[test]
 fn a_hold_starts_at_its_initial_value_and_keeps_the_latest_event() {
     let mut graph = Runtime::local();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let latest = numbers.hold(b, 7u32);
         // Sampling in graph code reads the value before the instant.
@@ -34,7 +34,7 @@ fn a_hold_starts_at_its_initial_value_and_keeps_the_latest_event() {
 #[test]
 fn map_filter_and_hold_fuse_into_one_node() {
     let mut graph = Runtime::local();
-    let (numbers_in, out) = graph.build_here(|b| {
+    let (numbers_in, out) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let out = numbers
             .map(|n| n * 2)
@@ -55,7 +55,7 @@ fn map_filter_and_hold_fuse_into_one_node() {
 #[test]
 fn filter_map_maps_and_filters_in_one_step() {
     let mut graph = Runtime::local();
-    let (text_in, parsed) = graph.build_here(|b| {
+    let (text_in, parsed) = graph.build(|b| {
         let (text, text_in) = b.input::<String>();
         let parsed = text.filter_map(|t| t.parse::<i64>().ok()).hold(b, -1i64);
         (text_in, parsed)
@@ -71,7 +71,7 @@ fn filter_map_maps_and_filters_in_one_step() {
 #[test]
 fn filter_map_with_the_identity_is_sodiums_filter_optional() {
     let mut graph = Runtime::local();
-    let (maybe_in, held) = graph.build_here(|b| {
+    let (maybe_in, held) = graph.build(|b| {
         let (maybe, maybe_in) = b.input::<Option<u32>>();
         (maybe_in, maybe.filter_map(|o| o).hold(b, 0u32))
     });
@@ -83,7 +83,7 @@ fn filter_map_with_the_identity_is_sodiums_filter_optional() {
 #[test]
 fn map_to_replaces_each_event_with_a_clone_of_one_value() {
     let mut graph = Runtime::local();
-    let (clicks_in, label) = graph.build_here(|b| {
+    let (clicks_in, label) = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         (
             clicks_in,
@@ -98,7 +98,7 @@ fn map_to_replaces_each_event_with_a_clone_of_one_value() {
 #[test]
 fn snapshot_reads_the_cell_as_it_was_before_the_instant() {
     let mut graph = Runtime::local();
-    let (numbers_in, limit_in, out) = graph.build_here(|b| {
+    let (numbers_in, limit_in, out) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (limit, limit_in) = b.input_cell(10u32);
         let out = numbers.snapshot(limit, |n, l| n.min(*l)).hold(b, 0u32);
@@ -125,7 +125,7 @@ fn snapshot_reads_the_cell_as_it_was_before_the_instant() {
 #[test]
 fn gate_keeps_the_events_during_which_the_cell_was_true_before_the_instant() {
     let mut graph = Runtime::local();
-    let (numbers_in, open_in, out) = graph.build_here(|b| {
+    let (numbers_in, open_in, out) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (open, open_in) = b.input_cell(true);
         (numbers_in, open_in, numbers.gate(open).hold(b, 0u32))
@@ -154,7 +154,7 @@ fn gate_keeps_the_events_during_which_the_cell_was_true_before_the_instant() {
 #[test]
 fn once_keeps_only_the_first_event() {
     let mut graph = Runtime::local();
-    let (numbers_in, first) = graph.build_here(|b| {
+    let (numbers_in, first) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.once().hold(b, 0u32))
     });
@@ -168,7 +168,7 @@ fn once_before_a_gate_takes_its_first_event_even_when_the_gate_drops_it() {
     // `gate (once s) c` against `once (gate s c)`: the first loses the
     // first event to the closed gate, the second waits for the gate.
     let mut graph = Runtime::local();
-    let (numbers_in, open_in, gated_once, once_gated) = graph.build_here(|b| {
+    let (numbers_in, open_in, gated_once, once_gated) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let (open, open_in) = b.input_cell(false);
@@ -188,7 +188,7 @@ fn once_before_a_gate_takes_its_first_event_even_when_the_gate_drops_it() {
 fn merge_combines_simultaneous_events_once_with_the_left_event_first() {
     let (calls, count) = counter();
     let mut graph = Runtime::local();
-    let (left_in, right_in, merged) = graph.build_here(move |b| {
+    let (left_in, right_in, merged) = graph.build(move |b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left
@@ -224,7 +224,7 @@ fn merge_combines_simultaneous_events_once_with_the_left_event_first() {
 fn merge_of_two_chains_from_one_shared_stream_fires_once() {
     let (calls, count) = counter();
     let mut graph = Runtime::local();
-    let (numbers_in, merged) = graph.build_here(move |b| {
+    let (numbers_in, merged) = graph.build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let merged = numbers
@@ -244,7 +244,7 @@ fn merge_of_two_chains_from_one_shared_stream_fires_once() {
 #[test]
 fn or_else_keeps_the_left_event() {
     let mut graph = Runtime::local();
-    let (left_in, right_in, merged) = graph.build_here(|b| {
+    let (left_in, right_in, merged) = graph.build(|b| {
         let (left, left_in) = b.input::<&'static str>();
         let (right, right_in) = b.input::<&'static str>();
         (left_in, right_in, left.or_else(b, right).hold(b, ""))
@@ -261,7 +261,7 @@ fn or_else_keeps_the_left_event() {
 #[test]
 fn coalescing_inputs_fold_in_send_order_with_the_first_send_on_the_left() {
     let mut graph = Runtime::local();
-    let (words_in, folded) = graph.build_here(|b| {
+    let (words_in, folded) = graph.build(|b| {
         let (words, words_in) = b.input_coalescing(|a: String, b: String| format!("({a}{b})"));
         (words_in, words.hold(b, String::new()))
     });
@@ -278,7 +278,7 @@ fn coalescing_inputs_fold_in_send_order_with_the_first_send_on_the_left() {
 #[test]
 fn an_input_cell_starts_at_its_initial_value_and_steps_on_each_send() {
     let mut graph = Runtime::local();
-    let (level, level_in) = graph.build_here(|b| b.input_cell(3u8));
+    let (level, level_in) = graph.build(|b| b.input_cell(3u8));
     assert_eq!(graph.live_nodes(), 2, "an input and a hold over it");
     assert_eq!(*graph.sample(level), 3);
     graph.send(level_in, 4);
@@ -288,8 +288,7 @@ fn an_input_cell_starts_at_its_initial_value_and_steps_on_each_send() {
 #[test]
 fn a_coalescing_input_cell_folds_the_sends_of_one_transaction() {
     let mut graph = Runtime::local();
-    let (digits, digits_in) =
-        graph.build_here(|b| b.input_cell_coalescing(0u32, |a, b| a * 10 + b));
+    let (digits, digits_in) = graph.build(|b| b.input_cell_coalescing(0u32, |a, b| a * 10 + b));
     graph.transaction(|tx| {
         tx.send(digits_in, 1);
         tx.send(digits_in, 2);
@@ -301,7 +300,7 @@ fn a_coalescing_input_cell_folds_the_sends_of_one_transaction() {
 #[test]
 fn a_constant_never_changes_and_can_be_snapshotted() {
     let mut graph = Runtime::local();
-    let (numbers_in, scale, scaled) = graph.build_here(|b| {
+    let (numbers_in, scale, scaled) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let scale = b.constant(3u32);
         (
@@ -319,7 +318,7 @@ fn a_constant_never_changes_and_can_be_snapshotted() {
 fn never_never_fires() {
     let (calls, count) = counter();
     let mut graph = Runtime::local();
-    let (numbers_in, merged, held) = graph.build_here(move |b| {
+    let (numbers_in, merged, held) = graph.build(move |b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let nothing = b.never::<u32>();
         let merged = numbers
@@ -340,7 +339,7 @@ fn never_never_fires() {
 #[test]
 fn a_shared_stream_gives_every_consumer_the_event() {
     let mut graph = Runtime::local();
-    let (words_in, lengths, shouts) = graph.build_here(|b| {
+    let (words_in, lengths, shouts) = graph.build(|b| {
         let (words, words_in) = b.input::<String>();
         let words = words.share(b);
         let lengths = words.map(|w| w.len()).hold(b, 0usize);
@@ -355,7 +354,7 @@ fn a_shared_stream_gives_every_consumer_the_event() {
 #[test]
 fn a_node_gives_a_chain_an_identity_that_a_later_chain_reads() {
     let mut graph = Runtime::local();
-    let (numbers_in, out) = graph.build_here(|b| {
+    let (numbers_in, out) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let doubled = numbers.map(|n| n * 2).node(b);
         (numbers_in, doubled.map(|n| n + 1).hold(b, 0u32))
@@ -375,7 +374,7 @@ impl Trace for Ticket {
 #[test]
 fn an_event_with_no_clone_moves_through_a_affine_path_into_a_hold() {
     let mut graph = Runtime::local();
-    let (tickets_in, last) = graph.build_here(|b| {
+    let (tickets_in, last) = graph.build(|b| {
         let (tickets, tickets_in) = b.input::<Ticket>();
         let nothing = b.never();
         let last = tickets
@@ -392,7 +391,7 @@ fn an_event_with_no_clone_moves_through_a_affine_path_into_a_hold() {
 #[test]
 fn cell_values_are_read_by_reference_without_clone() {
     let mut graph = Runtime::local();
-    let (names_in, names) = graph.build_here(|b| {
+    let (names_in, names) = graph.build(|b| {
         let (names, names_in) = b.input::<Leaf<Vec<String>>>();
         (names_in, names.hold(b, Leaf(Vec::new())))
     });
@@ -406,7 +405,7 @@ fn cell_values_are_read_by_reference_without_clone() {
 #[test]
 fn a_threaded_graph_runs_every_first_order_operation() {
     let mut graph = Runtime::threaded();
-    let (numbers_in, limit_in, words_in, out, words) = graph.build_here(|b| {
+    let (numbers_in, limit_in, words_in, out, words) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let (limit, limit_in) = b.input_cell(10u32);

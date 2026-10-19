@@ -4171,7 +4171,7 @@ pub fn refusal<M: EngineMode>(
     let checked = checked(program)?;
     let built = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut graph = M::runtime();
-        let boundary = graph.build_here(|b| build_program(b, program, &checked, None));
+        let boundary = graph.build(|b| build_program(b, program, &checked, None));
         (graph, boundary)
     }));
     let (mut graph, boundary) = match built {
@@ -4332,7 +4332,7 @@ fn execute<M: EngineMode>(
 ) -> Result<EngineRun, BuildError> {
     let checked = checked(program)?;
     let mut graph = M::runtime();
-    let boundary = graph.build_here(|b| build_program(b, program, &checked, slot));
+    let boundary = graph.build(|b| build_program(b, program, &checked, slot));
     let live_nodes = graph.live_nodes();
     graph.set_shuffle_seed(options.shuffle_seed);
     graph.set_collect_after_every_unit(options.collect_every_unit);

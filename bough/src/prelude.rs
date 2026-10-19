@@ -4,7 +4,7 @@
 //! use bough::prelude::*;
 //!
 //! let mut graph = Runtime::local();
-//! let (numbers_in, doubled) = graph.build_here(|b| {
+//! let (numbers_in, doubled) = graph.build(|b| {
 //!     let (numbers, numbers_in) = b.input::<u32>();
 //!     (numbers_in, numbers.map(|n| n * 2).hold(b, 0))
 //! });
@@ -29,7 +29,7 @@
 //! struct Builder; // the app's own, as `gtk::Builder` would be
 //!
 //! let mut graph = Runtime::local();
-//! let (numbers_in, total) = graph.build_here(|b| {
+//! let (numbers_in, total) = graph.build(|b| {
 //!     let (numbers, numbers_in) = b.input::<u32>();
 //!     let offset = b.constant(1u32);
 //!     let total = numbers.snapshot(offset, |n, o| n + o).hold(b, 0);

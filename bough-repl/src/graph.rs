@@ -104,7 +104,7 @@ impl Graph {
     /// Builds the graph: an input of commands and the construct over it.
     pub fn new() -> Graph {
         let mut runtime = Runtime::local();
-        let (commands, made_events) = runtime.build_here(|b| {
+        let (commands, made_events) = runtime.build(|b| {
             let (commands, commands_in) = b.input::<Command>();
             let made = commands.construct(b, make);
             (commands_in, made)

@@ -11,7 +11,7 @@
 //! use bough::prelude::*;
 //!
 //! let mut graph = Runtime::local();
-//! let total = graph.build_here(|b| {
+//! let total = graph.build(|b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let (limit, _limit_in) = b.input_cell(10u32);
 //!     numbers
@@ -28,7 +28,7 @@
 //! use bough::prelude::*;
 //!
 //! let mut graph = Runtime::local();
-//! let _ = graph.build_here(|b| {
+//! let _ = graph.build(|b| {
 //!     let (numbers, _in) = b.input::<u32>();
 //!     let doubled = numbers.map(|n| n * 2);
 //!     let a = doubled.hold(b, 0u32);
@@ -43,7 +43,7 @@
 //! use bough::prelude::*;
 //!
 //! let mut graph = Runtime::local();
-//! let _ = graph.build_here(|b| {
+//! let _ = graph.build(|b| {
 //!     let (mut numbers, _in) = b.input::<u32>();
 //!     let _ = numbers.pull(&mut bough::Cx::new(b)); // error: no `Cx` in `bough`
 //! });
@@ -147,7 +147,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// struct Label(&'static str);
     ///
     /// let mut graph = Runtime::local();
-    /// let _ = graph.build_here(|b| {
+    /// let _ = graph.build(|b| {
     ///     let (clicks, _clicks_in) = b.input::<()>();
     ///     let _ = clicks.map_to(Label("clicked")).node(b); // error: Label is not Trace
     /// });
@@ -259,7 +259,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _count = numbers
     ///         .map(Rc::new)
@@ -307,7 +307,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
@@ -359,7 +359,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
     /// });
@@ -391,7 +391,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _halves = numbers.map(|n| (Rc::new(n), n)).unzip(b); // error: Rc is not Send
     /// });
@@ -461,7 +461,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// last of them, so a sample then reads what it committed. The build
     /// closure's transaction has children too: a split of a
     /// [`steps_with_current`](Cell::steps_with_current) built there runs
-    /// them before [`Runtime::build_here`](crate::Runtime::build_here) returns.
+    /// them before [`Runtime::build`](crate::Runtime::build) returns.
     ///
     /// ```
     /// use std::cell::RefCell;
@@ -470,7 +470,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (words_in, letters, count) = graph.build_here(|b| {
+    /// let (words_in, letters, count) = graph.build(|b| {
     ///     let (words, words_in) = b.input::<Vec<char>>();
     ///     let letters = words.split(b).share(b);
     ///     let count = letters.accumulate(b, 0u32, |_, n| n + 1);
@@ -507,7 +507,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
     /// });
@@ -556,7 +556,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (starts_in, counts) = graph.build_here(|b| {
+    /// let (starts_in, counts) = graph.build(|b| {
     ///     let (counts, counts_loop) = b.stream_loop::<u32>();
     ///     let again = counts.filter(|n| *n > 1).map(|n| n - 1).defer(b);
     ///     let (starts, starts_in) = b.input::<u32>();
@@ -589,7 +589,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
     /// });
@@ -642,7 +642,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///
     /// // Each event opens a counter of its own: an input and a hold over it.
     /// let mut graph = Runtime::local();
-    /// let (open_in, opened) = graph.build_here(|b| {
+    /// let (open_in, opened) = graph.build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -686,7 +686,7 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
     /// });

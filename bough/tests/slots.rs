@@ -58,7 +58,7 @@ fn concat(a: String, b: String) -> String {
 fn a_burst_between_pumps_is_one_event_folded_left_to_right() {
     static WORDS: InputSlot<String> = InputSlot::new(concat);
     let mut graph = Runtime::local();
-    let words = graph.build_here(|b| {
+    let words = graph.build(|b| {
         let (words, words_in) = b.input::<String>();
         b.connect(words_in, &WORDS, 0);
         words.node(b)
@@ -84,7 +84,7 @@ fn a_burst_between_pumps_is_one_event_folded_left_to_right() {
 fn keep_latest_drops_the_older_event() {
     static LEVEL: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let level = graph.build_here(|b| {
+    let level = graph.build(|b| {
         let (level, level_in) = b.input::<u32>();
         b.connect(level_in, &LEVEL, 0);
         level.hold(b, 0u32)
@@ -104,7 +104,7 @@ fn pending_slots_run_one_transaction_each_in_connection_order() {
     static FIRST: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     static SECOND: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let mut graph = Runtime::local();
-    let merged = graph.build_here(|b| {
+    let merged = graph.build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         b.connect(right_in, &FIRST, 0);
@@ -127,7 +127,7 @@ fn slots_drain_by_priority_then_connection_order() {
     static ALSO_HIGH: InputSlot<u32> = InputSlot::keep_latest();
     static MIDDLE: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let numbers = graph.build_here(|b| {
+    let numbers = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &LOW, 1);
         b.connect(numbers_in, &HIGH, 3);
@@ -153,7 +153,7 @@ fn a_slot_drains_once_per_pump_even_when_a_slot_is_connected_ahead_of_it() {
     static ONCE: InputSlot<u32> = InputSlot::keep_latest();
     static AHEAD: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (numbers, _connected) = graph.build_here(|b| {
+    let (numbers, _connected) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &ONCE, 1);
         let numbers = numbers.share(b);
@@ -187,7 +187,7 @@ fn two_slots_on_one_input_are_two_transactions() {
     static ONE: InputSlot<u32> = InputSlot::keep_latest();
     static TWO: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let numbers = graph.build_here(|b| {
+    let numbers = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &ONE, 0);
         b.connect(numbers_in, &TWO, 0);
@@ -206,7 +206,7 @@ fn two_slots_on_one_input_are_two_transactions() {
 fn a_slot_never_makes_a_coalescing_input_coalesce() {
     static PARTS: InputSlot<u32> = InputSlot::new(|a, b| a * 10 + b);
     let mut graph = Runtime::local();
-    let (numbers, numbers_in) = graph.build_here(|b| {
+    let (numbers, numbers_in) = graph.build(|b| {
         let (numbers, numbers_in) = b.input_coalescing(|a: u32, b| a + b);
         b.connect(numbers_in, &PARTS, 0);
         (numbers.node(b), numbers_in)
@@ -250,7 +250,7 @@ fn a_write_wakes_the_waker_the_driver_registered() {
         "unconnected, its own waker"
     );
     let mut graph = Runtime::local();
-    let ((open_in, latest), shown) = graph.build_here(|b| {
+    let ((open_in, latest), shown) = graph.build(|b| {
         let (early, early_in) = b.input::<u32>();
         b.connect(early_in, &EARLY, 0);
         let (open, open_in) = b.input::<()>();
@@ -289,7 +289,7 @@ fn a_write_wakes_the_waker_the_driver_registered() {
 fn registering_the_same_waker_again_changes_nothing() {
     static TICKS: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let mut graph = Runtime::local();
-    let ticks = graph.build_here(|b| {
+    let ticks = graph.build(|b| {
         let (ticks, ticks_in) = b.input::<u32>();
         b.connect(ticks_in, &TICKS, 0);
         ticks.accumulate(b, 0u32, |n, t| t + n)
@@ -310,13 +310,13 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
     static SHARED: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     static TWICE: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let mut first = Runtime::local();
-    let (first_in, first_total) = first.build_here(|b| {
+    let (first_in, first_total) = first.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &SHARED, 0);
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
     let message = panic_message(|| {
-        Runtime::local().build_here(|b| {
+        Runtime::local().build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             b.connect(numbers_in, &SHARED, 0);
             numbers.hold(b, 0u32)
@@ -327,7 +327,7 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
         "{message}"
     );
     let message = panic_message(|| {
-        Runtime::local().build_here(|b| {
+        Runtime::local().build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             let (other, other_in) = b.input::<u32>();
             b.connect(numbers_in, &TWICE, 0);
@@ -347,7 +347,7 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
     drop(first);
     // The pending 5 was the dropped graph's; the next graph starts empty.
     let mut second = Runtime::local();
-    let second_total = second.build_here(|b| {
+    let second_total = second.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &SHARED, 0);
         b.connect(numbers_in, &TWICE, 0);
@@ -367,7 +367,7 @@ fn a_slot_feeds_one_input_and_a_dropped_graph_lets_it_go() {
 fn a_panicking_build_lets_its_slots_go() {
     static AFTER_PANIC: InputSlot<u32> = InputSlot::keep_latest();
     let message = panic_message(|| {
-        Runtime::local().build_here(|b| {
+        Runtime::local().build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             b.connect(numbers_in, &AFTER_PANIC, 0);
             let _ = numbers.hold(b, 0u32);
@@ -378,7 +378,7 @@ fn a_panicking_build_lets_its_slots_go() {
     });
     assert!(message.contains("the build closure failed"));
     let mut graph = Runtime::local();
-    let latest = graph.build_here(|b| {
+    let latest = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &AFTER_PANIC, 0);
         numbers.hold(b, 0u32)
@@ -399,7 +399,7 @@ fn a_slot_whose_input_was_collected_is_stale_at_pump() {
     static ORPHAN_TOO: InputSlot<u32> = InputSlot::keep_latest();
     static KEPT: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let kept = graph.build_here(|b| {
+    let kept = graph.build(|b| {
         let (lost, lost_in) = b.input::<u32>();
         let _unrooted = lost.hold(b, 0u32);
         b.connect(lost_in, &ORPHAN, 0);
@@ -431,7 +431,7 @@ fn a_slot_whose_input_was_collected_is_stale_at_pump() {
     assert_eq!(*graph.sample(kept), 4, "the graph stays usable");
     // Both stale slots were let go.
     let mut _other = Runtime::local();
-    let _ = _other.build_here(|b| {
+    let _ = _other.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &ORPHAN, 0);
         b.connect(numbers_in, &ORPHAN_TOO, 0);
@@ -449,7 +449,7 @@ fn a_slot_written_during_a_pump_drains_in_it_unless_it_drained_already() {
     static SOURCE: InputSlot<u32> = InputSlot::keep_latest();
     static AFTER: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (source, before, after) = graph.build_here(|b| {
+    let (source, before, after) = graph.build(|b| {
         let (before, before_in) = b.input::<u32>();
         b.connect(before_in, &BEFORE, 0);
         let (source, source_in) = b.input::<u32>();
@@ -494,7 +494,7 @@ fn a_higher_slot_written_during_a_unit_runs_next() {
     static B: InputSlot<u32> = InputSlot::keep_latest();
     static H: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &A, 1);
         b.connect(numbers_in, &B, 1);
@@ -524,7 +524,7 @@ fn a_higher_slot_written_during_a_unit_runs_next() {
 fn a_slot_written_during_a_call_runs_before_the_next_call() {
     static WRITTEN: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &WRITTEN, 0);
         (numbers_in, numbers)
@@ -554,7 +554,7 @@ fn a_slot_written_during_a_call_runs_before_the_next_call() {
 fn a_listener_that_keeps_writing_its_slot_cannot_keep_a_pump_from_returning() {
     static LOOP: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let numbers = graph.build_here(|b| {
+    let numbers = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &LOOP, 0);
         numbers
@@ -586,7 +586,7 @@ fn a_listener_that_keeps_writing_its_slot_cannot_keep_a_pump_from_returning() {
 fn a_slot_written_in_a_child_transaction_waits_for_the_whole_unit() {
     static H: InputSlot<u32> = InputSlot::new(|a, b| a + b);
     let mut graph = Runtime::local();
-    let (lists_in, items, h) = graph.build_here(|b| {
+    let (lists_in, items, h) = graph.build(|b| {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         let items = lists.split(b);
         let (h, h_in) = b.input::<u32>();
@@ -619,7 +619,7 @@ fn a_slot_written_in_a_child_transaction_waits_for_the_whole_unit() {
 fn a_panic_in_a_slot_s_transaction_poisons_the_graph() {
     static FRAGILE: InputSlot<u32> = InputSlot::keep_latest();
     let mut graph = Runtime::local();
-    let numbers = graph.build_here(|b| {
+    let numbers = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         b.connect(numbers_in, &FRAGILE, 0);
         numbers.node(b)
@@ -673,7 +673,7 @@ fn a_write_from_another_thread_wakes_a_driver_blocked_on_a_condition_variable() 
     let waker = Waker::from(signal.clone());
     let driver = thread::spawn(move || {
         let mut graph = Runtime::local();
-        let readings = graph.build_here(|b| {
+        let readings = graph.build(|b| {
             let (readings, readings_in) = b.input::<u32>();
             b.connect(readings_in, &SENSOR, 0);
             readings.node(b)

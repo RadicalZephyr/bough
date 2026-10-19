@@ -354,7 +354,7 @@ fn screen(b: &mut BuildContext, clicks: Shared<u32>, n: u32) -> Stream<Shown> {
 /// input and the log, and the rest is reached from the log.
 fn navigation() -> (Runtime, Input<u32>, Cell<Vec<Shown>>) {
     let mut graph = Runtime::local();
-    let (clicks_in, log) = graph.build_here(|b| {
+    let (clicks_in, log) = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let clicks = clicks.share(b);
         let (navigate, navigate_loop) = b.stream_loop::<u32>();
@@ -533,7 +533,7 @@ fn a_cycle_through_a_value_is_collected_once_unrooted() {
 #[test]
 fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
     let mut graph = Runtime::local();
-    let (clicks_in, pick_in, shown) = graph.build_here(|b| {
+    let (clicks_in, pick_in, shown) = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let clicks = clicks.share(b);
         let counters: Vec<Cell<u32>> = (0..3)
@@ -566,7 +566,7 @@ fn a_deselected_inner_that_a_cell_names_keeps_accumulating() {
 #[test]
 fn a_deselected_inner_that_nothing_names_is_collected() {
     let mut graph = Runtime::local();
-    let (clicks_in, open_in, made, shown) = graph.build_here(|b| {
+    let (clicks_in, open_in, made, shown) = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<()>();
         let clicks = clicks.share(b);
         let (open, open_in) = b.input::<u32>();
@@ -608,7 +608,7 @@ fn a_deselected_inner_that_nothing_names_is_collected() {
 fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
     let program = |declare: bool| {
         let mut graph = Runtime::local();
-        let boundary = graph.build_here(move |b| {
+        let boundary = graph.build(move |b| {
             let (clicks, clicks_in) = b.input::<u32>();
             let (sums, sums_loop) = b.stream_loop::<u32>();
             let total = sums.hold(b, 0u32);
@@ -649,7 +649,7 @@ fn an_undeclared_backward_capture_is_a_stale_token_on_the_first_transaction() {
 fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaration() {
     for declare in [false, true] {
         let mut graph = Runtime::local();
-        let (clicks_in, open_in, back_in, shown) = graph.build_here(move |b| {
+        let (clicks_in, open_in, back_in, shown) = graph.build(move |b| {
             let (clicks, clicks_in) = b.input::<()>();
             let clicks = clicks.share(b);
             let (open, open_in) = b.input::<u32>();
@@ -695,7 +695,7 @@ fn a_map_that_emits_a_token_after_its_node_became_unreachable_needs_a_declaratio
 fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
     for declare in [false, true] {
         let mut graph = Runtime::local();
-        let (clicks_in, timer_in, log) = graph.build_here(move |b| {
+        let (clicks_in, timer_in, log) = graph.build(move |b| {
             let (clicks, clicks_in) = b.input::<u32>();
             let clicks = clicks.share(b);
             let (timer, timer_in) = b.input::<u32>();
@@ -743,7 +743,7 @@ fn a_capture_upstream_only_through_a_switch_s_selection_needs_a_declaration() {
 #[test]
 fn a_token_a_listener_delivers_is_gone_after_its_unit_unless_anchored() {
     let mut graph = Runtime::local();
-    let (open_in, opened) = graph.build_here(|b| {
+    let (open_in, opened) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -771,7 +771,7 @@ fn a_trace_that_misses_a_token_makes_it_stale() {
         fn trace(&self, _tracer: &mut Tracer) {}
     }
     let mut graph = Runtime::local();
-    let (forgetful, honest) = graph.build_here(|b| {
+    let (forgetful, honest) = graph.build(|b| {
         let one = b.constant(1u32);
         let two = b.constant(2u32);
         (b.constant(Forgetful(one)), b.constant((two,)))
@@ -1102,7 +1102,7 @@ fn into_parts_leaves_the_root_with_the_anchor_and_keep_keeps_it() {
 #[test]
 fn the_build_collects_what_nothing_reaches() {
     let mut graph = Runtime::local();
-    let _n_in = graph.build_here(|b| {
+    let _n_in = graph.build(|b| {
         let (n, n_in) = b.input::<u32>();
         let _unreached = n.hold(b, 0u32);
         n_in
@@ -1133,7 +1133,7 @@ fn dropping_what_build_returned_releases_it() {
 #[test]
 fn a_construct_can_anchor_what_it_sends_out() {
     let mut graph = Runtime::local();
-    let (open_in, opened) = graph.build_here(|b| {
+    let (open_in, opened) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -1361,7 +1361,7 @@ fn states_are_traced_declared_and_anchored_like_cells() {
 #[test]
 fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
     let mut graph = Runtime::local();
-    let (n_in, held) = graph.build_here(|b| {
+    let (n_in, held) = graph.build(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         let affine: Stream<u32> = n.map(|v| v + 1).node(b);
@@ -1392,7 +1392,7 @@ fn a_declaration_takes_every_kind_of_token_without_consuming_a_stream() {
 #[test]
 fn a_token_given_to_map_to_is_kept_by_its_chain() {
     let mut graph = Runtime::local();
-    let (go_in, shown) = graph.build_here(move |b| {
+    let (go_in, shown) = graph.build(move |b| {
         let (go, go_in) = b.input::<()>();
         let home = b.constant("home");
         let away = b.constant("away");
@@ -1432,7 +1432,7 @@ impl Trace for Panels {
 fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
     for declare in [false, true] {
         let mut graph = Runtime::local();
-        let (pick_in, shown) = graph.build_here(move |b| {
+        let (pick_in, shown) = graph.build(move |b| {
             let (pick, pick_in) = b.input::<usize>();
             let panels = Panels {
                 home: b.constant("home"),
@@ -1479,7 +1479,7 @@ fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
 fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
     for on_long_lived in [true, false] {
         let mut graph = Runtime::local();
-        let (open_in, _cells) = graph.build_here(move |b| {
+        let (open_in, _cells) = graph.build(move |b| {
             let (open, open_in) = b.input::<u32>();
             let open = open.share(b);
             let registry = open.hold(b, 0u32);
@@ -1511,12 +1511,12 @@ fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
 #[test]
 fn build_anchored_releases_what_only_it_reached_and_build_keeps_its_value() {
     let mut graph = Runtime::local();
-    let (n_in, kept) = graph.build_here(|b| {
+    let (n_in, kept) = graph.build(|b| {
         let (n, n_in) = b.input::<u32>();
         let n = n.share(b);
         (n_in, n)
     });
-    let kept_hold = graph.build_here(|b| kept.hold(b, 0u32));
+    let kept_hold = graph.build(|b| kept.hold(b, 0u32));
     assert_eq!(graph.live_nodes(), 3);
     let part = graph.build_anchored(|b| {
         let doubled = kept.map(|v| v * 2).hold(b, 0u32);
@@ -1545,7 +1545,7 @@ fn build_anchored_releases_what_only_it_reached_and_build_keeps_its_value() {
 #[test]
 fn a_due_collection_runs_before_a_later_build_returns() {
     let mut graph = Runtime::local();
-    let numbers = graph.build_here(|b| b.input::<u32>().0.share(b));
+    let numbers = graph.build(|b| b.input::<u32>().0.share(b));
     let part = graph.build_anchored(|b| numbers.hold(b, 0u32));
     let hold = *part;
     assert_eq!(graph.live_nodes(), 3);
@@ -1554,7 +1554,7 @@ fn a_due_collection_runs_before_a_later_build_returns() {
     // allocated and the guards released since the last one exceed the
     // live count it left, the input and the share: here one hold and two
     // constants, and one release.
-    let _more = graph.build_here(|b| (b.constant(1u32), b.constant(2u32)));
+    let _more = graph.build(|b| (b.constant(1u32), b.constant(2u32)));
     assert_eq!(graph.try_sample(hold).err(), Some(TokenError::Stale));
     assert_eq!(graph.live_nodes(), 4, "the input, the share, the constants");
 }

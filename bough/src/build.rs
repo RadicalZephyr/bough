@@ -43,7 +43,7 @@ fn next_graph_id() -> u32 {
 /// The engine's own builder, for a runtime in mode `M`: it stores
 /// whatever that mode accepts.
 ///
-/// It exists inside [`Runtime::build_here`](crate::Runtime::build_here) and inside
+/// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
 /// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///
@@ -158,7 +158,7 @@ impl<M: Mode> BuildContext<M> {
 /// ```compile_fail,E0382
 /// use bough::prelude::*;
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (count, count_loop) = b.cell_loop::<u32>();
 ///     let (ticks, _ticks_in) = b.input::<()>();
 ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
@@ -173,7 +173,7 @@ impl<M: Mode> BuildContext<M> {
 /// use bough::prelude::*;
 ///
 /// let mut graph = Runtime::local();
-/// let _ = graph.build_here(|b| {
+/// let _ = graph.build(|b| {
 ///     let (events, _in) = b.input::<u32>();
 ///     let (forward, closer) = b.cell_loop::<u32>();
 ///     let _out = events.construct(b, move |b, n| {
@@ -220,7 +220,7 @@ impl<A: 'static> CellLoop<A> {
 /// ```compile_fail,E0599
 /// use bough::prelude::*;
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (members, _members_loop) = b.state_loop::<Vec<String>>();
 ///     let _joins = members.steps(b); // error: no method named `steps` found for struct `State`
 /// });
@@ -232,7 +232,7 @@ impl<A: 'static> CellLoop<A> {
 /// ```compile_fail,E0308
 /// use bough::prelude::*;
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (_members, members_loop) = b.cell_loop::<Vec<String>>();
 ///     let (names, _names_in) = b.input::<String>();
 ///     let joined = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
@@ -300,7 +300,7 @@ impl<A: 'static> StreamLoop<A> {
     /// use bough::prelude::*;
     /// use std::rc::Rc;
     ///
-    /// let _ = Runtime::threaded().build_here(|b| {
+    /// let _ = Runtime::threaded().build(|b| {
     ///     let (_counts, counts_loop) = b.stream_loop::<Rc<u32>>();
     ///     let (numbers, _numbers_in) = b.input::<u32>();
     ///     counts_loop.close(b, numbers.map(Rc::new)); // error: Rc is not Send

@@ -232,7 +232,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (open_in, opened) = graph.build_here(|b| {
+    /// let (open_in, opened) = graph.build(|b| {
     ///     let (open, open_in) = b.input::<u32>();
     ///     let opened = open.construct(b, |b, start| {
     ///         let (bumps, bumps_in) = b.input::<u32>();
@@ -343,7 +343,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (ticks_in, count) = graph.build_here(|b| {
+    /// let (ticks_in, count) = graph.build(|b| {
     ///     let (count, count_loop) = b.cell_loop::<u32>();      // declare
     ///     let (ticks, ticks_in) = b.input::<()>();
     ///     let next = ticks.snapshot(count, |_, n| n + 1).hold(b, 0u32);
@@ -394,7 +394,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (names_in, members) = graph.build_here(|b| {
+    /// let (names_in, members) = graph.build(|b| {
     ///     let (members, members_loop) = b.state_loop::<Vec<String>>();
     ///     let (names, names_in) = b.input::<String>();
     ///     // A name joins once: the snapshot reads the members before the instant.
@@ -428,7 +428,7 @@ pub trait Builder: sealed::Sealed + Sized {
     ///
     /// // A running total, fed back through a hold that a snapshot reads.
     /// let mut graph = Runtime::local();
-    /// let (numbers_in, total) = graph.build_here(|b| {
+    /// let (numbers_in, total) = graph.build(|b| {
     ///     let (sums, sums_loop) = b.stream_loop::<u32>();
     ///     let total = sums.hold(b, 0u32);
     ///     let (numbers, numbers_in) = b.input::<u32>();
@@ -475,7 +475,7 @@ pub trait Builder: sealed::Sealed + Sized {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (pick_in, shown) = graph.build_here(|b| {
+    /// let (pick_in, shown) = graph.build(|b| {
     ///     let english = b.constant("hello".to_string());
     ///     let french = b.constant("bonjour".to_string());
     ///     let (pick, pick_in) = b.input::<bool>();
@@ -704,7 +704,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 /// }
 ///
 /// let mut graph = Runtime::local();
-/// let (numbers_in, latest) = graph.build_here(|b| {
+/// let (numbers_in, latest) = graph.build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, plus_one(&mut b.portable(), numbers))
 /// });
@@ -712,7 +712,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 /// assert_eq!(*graph.sample(latest), 42);
 ///
 /// let mut graph = Runtime::threaded();
-/// let (numbers_in, latest) = graph.build_here(|b| {
+/// let (numbers_in, latest) = graph.build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, plus_one(&mut b.portable(), numbers))
 /// });
@@ -733,7 +733,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 ///     numbers.map(move |n| n + *by).hold(b, 0) // error: Rc is not Send
 /// }
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (numbers, _numbers_in) = b.input::<u32>();
 ///     offset(&mut b.portable(), numbers)
 /// });
@@ -752,7 +752,7 @@ impl<M: Mode> Builder for BuildContext<M> {
 ///     numbers.construct(b, move |b, n| b.constant(n + *by)) // error: Rc is not Send
 /// }
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (numbers, _numbers_in) = b.input::<u32>();
 ///     spawner(&mut b.portable(), numbers)
 /// });

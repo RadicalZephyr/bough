@@ -44,7 +44,7 @@ type Pair = (Input<u32>, Input<u32>, Stream<u32>);
 
 fn pair() -> (Runtime, Pair) {
     let mut graph = Runtime::local();
-    let pair = graph.build_here(|b| {
+    let pair = graph.build(|b| {
         let (left, left_in) = b.input::<u32>();
         let (right, right_in) = b.input::<u32>();
         let merged = left.merge(b, right, |l, r| l * 1000 + r);
@@ -57,7 +57,7 @@ fn pair() -> (Runtime, Pair) {
 #[test]
 fn a_call_waits_for_the_next_pump() {
     let mut graph = Runtime::local();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -75,7 +75,7 @@ fn a_call_waits_for_the_next_pump() {
 #[test]
 fn a_call_a_listener_makes_during_a_pump_waits_for_the_next_one() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers, latest) = graph.build_here(|b| {
+    let (numbers_in, numbers, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
@@ -98,7 +98,7 @@ fn a_call_a_listener_makes_during_a_pump_waits_for_the_next_one() {
 #[test]
 fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
     let mut graph = Runtime::local();
-    let (first_in, second_in, first, second) = graph.build_here(|b| {
+    let (first_in, second_in, first, second) = graph.build(|b| {
         let (first, first_in) = b.input::<u32>();
         let (second, second_in) = b.input::<u32>();
         let first = first.share(b);
@@ -120,7 +120,7 @@ fn a_call_made_while_the_pump_runs_the_units_waits_for_the_next_pump() {
 #[test]
 fn calls_run_in_the_order_they_were_made() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -188,7 +188,7 @@ fn dropping_a_guard_before_the_pump_cancels_its_registration() {
 #[test]
 fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
     let mut graph = Runtime::local();
-    let (numbers_in, latest) = graph.build_here(|b| {
+    let (numbers_in, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -218,7 +218,7 @@ fn a_queued_listen_cell_fires_at_the_pump_with_the_value_then() {
 #[test]
 fn a_queued_listen_once_hears_the_first_event_after_the_pump_registers_it() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers) = graph.build_here(|b| {
+    let (numbers_in, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.share(b))
     });
@@ -241,7 +241,7 @@ fn a_queued_listen_once_hears_the_first_event_after_the_pump_registers_it() {
 #[test]
 fn a_queued_listen_cell_once_fires_at_the_pump_with_the_value_then() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers, latest) = graph.build_here(|b| {
+    let (numbers_in, numbers, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers, numbers.hold(b, 0u32))
@@ -404,7 +404,7 @@ type Row = (Input<u32>, Cell<u32>);
 /// transaction, so a row nothing keeps is gone by then.
 fn open_a_row(mut on_row: impl FnMut(&Io, Row) + 'static) -> (Runtime, Row) {
     let mut graph = Runtime::local();
-    let (open_in, rows) = graph.build_here(|b| {
+    let (open_in, rows) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();
         let rows = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();
@@ -525,7 +525,7 @@ fn a_queued_transactions_sends_are_simultaneous() {
 #[test]
 fn a_listener_tied_to_a_queued_unit_hears_its_children_and_needn_t_be_send() {
     let mut graph = Runtime::local();
-    let (numbers_in, later, latest) = graph.build_here(|b| {
+    let (numbers_in, later, latest) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let later = numbers.defer(b).share(b);
         (numbers_in, later, later.hold(b, 0u32))
@@ -554,7 +554,7 @@ fn a_listener_tied_to_a_queued_unit_hears_its_children_and_needn_t_be_send() {
 #[test]
 fn a_listener_tied_to_a_queued_unit_that_heard_nothing_ends_with_it() {
     let mut graph = Runtime::local();
-    let (numbers_in, big) = graph.build_here(|b| {
+    let (numbers_in, big) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.filter(|n| *n > 5).share(b))
     });
@@ -587,7 +587,7 @@ fn a_dropped_unit_takes_its_tied_listeners_and_a_stale_one_drops_it() {
     let heard = Rc::new(RefCell::new(Vec::new()));
     let (stream_sink, cell_sink) = (heard.clone(), heard.clone());
     let mut _other = Runtime::local();
-    let foreign = _other.build_here(|b| b.input::<u32>().0.hold(b, 0u32));
+    let foreign = _other.build(|b| b.input::<u32>().0.hold(b, 0u32));
     io.transaction(move |tx| {
         tx.listen_once(merged, move |n| stream_sink.borrow_mut().push(n));
         tx.listen_cell_once(foreign, move |n| cell_sink.borrow_mut().push(*n));
@@ -692,9 +692,9 @@ fn a_stale_token_is_found_at_the_pump() {
 #[test]
 fn a_foreign_token_is_refused_when_queued_or_found_at_the_pump() {
     let mut graph = Runtime::local();
-    let _numbers_in = graph.build_here(|b| b.input::<u32>().1);
+    let _numbers_in = graph.build(|b| b.input::<u32>().1);
     let mut _other = Runtime::local();
-    let (foreign_in, foreign) = _other.build_here(|b| {
+    let (foreign_in, foreign) = _other.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.hold(b, 0u32))
     });
@@ -723,7 +723,7 @@ fn a_call_from_graph_code_is_refused() {
     let io_cell: Rc<RefCell<Option<Io>>> = Rc::new(RefCell::new(None));
     let refused = Rc::new(RefCell::new(Vec::new()));
     let mut graph = Runtime::local();
-    let (numbers_in, echoes_in, mapped, echoes) = graph.build_here({
+    let (numbers_in, echoes_in, mapped, echoes) = graph.build({
         let io_cell = io_cell.clone();
         let refused = refused.clone();
         move |b| {
@@ -757,7 +757,7 @@ fn a_call_from_graph_code_is_refused() {
 #[test]
 fn a_call_after_the_runtime_drops_is_gone() {
     let mut graph = Runtime::local();
-    let numbers_in = graph.build_here(|b| b.input::<Rc<u32>>().1);
+    let numbers_in = graph.build(|b| b.input::<Rc<u32>>().1);
     let io = graph.io();
     let value = Rc::new(1u32);
     io.send(numbers_in, value.clone()).unwrap();
@@ -773,7 +773,7 @@ fn a_call_after_the_runtime_drops_is_gone() {
 #[test]
 fn a_call_after_an_entry_finds_the_poison_is_poisoned() {
     let mut graph = Runtime::local();
-    let (numbers_in, _checked) = graph.build_here(|b| {
+    let (numbers_in, _checked) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers.map(|n: u32| {
             assert_ne!(n, 13, "unlucky");
@@ -814,7 +814,7 @@ fn a_handle_transaction_reports_each_of_its_three_failures() {
     let handles: Handles = Rc::new(RefCell::new(None));
     let refused = Rc::new(RefCell::new(Vec::new()));
     let mut graph = Runtime::local();
-    let (numbers_in, _checked) = graph.build_here({
+    let (numbers_in, _checked) = graph.build({
         let (handles, refused) = (handles.clone(), refused.clone());
         move |b| {
             let (numbers, numbers_in) = b.input::<u32>();
@@ -853,11 +853,11 @@ fn a_handle_transaction_reports_each_of_its_three_failures() {
 #[test]
 fn a_call_reports_the_first_failure_in_a_fixed_order() {
     let mut _other = Runtime::local();
-    let foreign_in = _other.build_here(|b| b.input::<u32>().1);
+    let foreign_in = _other.build(|b| b.input::<u32>().1);
     let io_cell: Rc<RefCell<Option<Io>>> = Rc::new(RefCell::new(None));
     let found = Rc::new(RefCell::new(Vec::new()));
     let mut graph = Runtime::local();
-    let (numbers_in, _checked) = graph.build_here({
+    let (numbers_in, _checked) = graph.build({
         let io_cell = io_cell.clone();
         let found = found.clone();
         move |b| {
@@ -900,7 +900,7 @@ impl Wake for Counter {
 #[test]
 fn queuing_wakes_the_driver_once_per_burst() {
     let mut graph = Runtime::local();
-    let (first_in, second_in, first, second) = graph.build_here(|b| {
+    let (first_in, second_in, first, second) = graph.build(|b| {
         let (first, first_in) = b.input::<u32>();
         let (second, second_in) = b.input::<u32>();
         let first = first.share(b);

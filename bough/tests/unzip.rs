@@ -20,7 +20,7 @@ struct Solo(u32);
 #[test]
 fn unzip_moves_each_half_into_its_own_stream() {
     let mut graph = Runtime::local();
-    let (numbers_in, firsts, seconds) = graph.build_here(|b| {
+    let (numbers_in, firsts, seconds) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (firsts, seconds) = numbers.map(|n| (Solo(n), Solo(n * 10))).unzip(b);
         (numbers_in, firsts, seconds)
@@ -43,7 +43,7 @@ fn unzip_moves_each_half_into_its_own_stream() {
 #[test]
 fn unzip_denotes_two_maps() {
     let mut graph = Runtime::local();
-    let (numbers_in, (firsts, seconds), (fsts, snds)) = graph.build_here(|b| {
+    let (numbers_in, (firsts, seconds), (fsts, snds)) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let pairs = numbers.filter(|n| n % 3 != 0).map(|n| (n, n * n)).share(b);
         let (firsts, seconds) = pairs.unzip(b);
@@ -83,7 +83,7 @@ fn unzip_denotes_two_maps() {
 #[test]
 fn a_screen_goes_into_a_hold_while_its_input_goes_out() {
     let mut graph = Runtime::local();
-    let (opens_in, inputs, shown) = graph.build_here(|b| {
+    let (opens_in, inputs, shown) = graph.build(|b| {
         let (opens, opens_in) = b.input::<u32>();
         let (idle, _idle_in) = b.input::<u32>();
         let made = opens.construct(b, |b, id: u32| {

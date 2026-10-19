@@ -482,7 +482,7 @@ fn a_remote_send_from_a_thread() {
 /// so both survive.
 fn rows_one_pump_opens() {
     let mut graph = Runtime::local();
-    let (open_in, opened) = graph.build_here(|b| {
+    let (open_in, opened) = graph.build(|b| {
         let (open, open_in) = b.input::<u32>();
         let opened = open.construct(b, |b, start| {
             let (bumps, bumps_in) = b.input::<u32>();

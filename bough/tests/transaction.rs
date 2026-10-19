@@ -25,7 +25,7 @@ fn panic_text(result: Result<impl Sized, Box<dyn Any + Send>>) -> String {
 #[test]
 fn the_build_closure_runs_as_transaction_zero_and_returns_its_edge() {
     let mut graph = Runtime::local();
-    let (_numbers_in, _limit, _never) = graph.build_here(|b| {
+    let (_numbers_in, _limit, _never) = graph.build(|b| {
         let (_numbers, numbers_in) = b.input::<u32>();
         let limit = b.constant(10u32);
         let never = b.never::<u32>();
@@ -37,7 +37,7 @@ fn the_build_closure_runs_as_transaction_zero_and_returns_its_edge() {
 #[test]
 fn a_second_send_to_a_non_coalescing_input_is_a_double_send() {
     let mut graph = Runtime::local();
-    let (a_in, b_in) = graph.build_here(|b| {
+    let (a_in, b_in) = graph.build(|b| {
         let (_a, a_in) = b.input::<u32>();
         let (_b, b_in) = b.input::<u32>();
         (a_in, b_in)
@@ -60,7 +60,7 @@ fn a_second_send_to_a_non_coalescing_input_is_a_double_send() {
 #[test]
 fn a_double_send_through_send_panics_and_poisons_the_graph() {
     let mut graph = Runtime::local();
-    let a_in = graph.build_here(|b| b.input::<u32>().1);
+    let a_in = graph.build(|b| b.input::<u32>().1);
     let result = catch_unwind(AssertUnwindSafe(|| {
         graph.transaction(|tx| {
             tx.send(a_in, 1);
@@ -77,7 +77,7 @@ fn a_double_send_through_send_panics_and_poisons_the_graph() {
 #[test]
 fn a_coalescing_input_accepts_several_sends_in_one_transaction() {
     let mut graph = Runtime::local();
-    let a_in = graph.build_here(|b| b.input_coalescing(|x: u32, y| x + y).1);
+    let a_in = graph.build(|b| b.input_coalescing(|x: u32, y| x + y).1);
     let results = graph.transaction(|tx| (tx.try_send(a_in, 1), tx.try_send(a_in, 2)));
     assert_eq!(results, (Ok(()), Ok(())));
     graph.transaction(|tx| {
@@ -90,7 +90,7 @@ fn a_coalescing_input_accepts_several_sends_in_one_transaction() {
 #[test]
 fn a_panic_in_a_coalescing_function_poisons_the_graph() {
     let mut graph = Runtime::local();
-    let a_in = graph.build_here(|b| {
+    let a_in = graph.build(|b| {
         b.input_coalescing(|_: u32, _: u32| -> u32 { panic!("user code") })
             .1
     });
@@ -107,9 +107,9 @@ fn a_panic_in_a_coalescing_function_poisons_the_graph() {
 #[test]
 fn a_token_from_another_graph_is_an_error_and_leaves_the_graph_usable() {
     let mut first = Runtime::local();
-    let first_in = first.build_here(|b| b.input::<u32>().1);
+    let first_in = first.build(|b| b.input::<u32>().1);
     let mut second = Runtime::local();
-    let second_in = second.build_here(|b| b.input::<u32>().1);
+    let second_in = second.build(|b| b.input::<u32>().1);
     assert_eq!(first.try_send(second_in, 1), Err(SendError::ForeignGraph));
     assert_eq!(
         first.transaction(|tx| tx.try_send(second_in, 1)),
@@ -126,9 +126,9 @@ fn a_token_from_another_graph_is_an_error_and_leaves_the_graph_usable() {
 #[test]
 fn a_foreign_token_in_graph_code_panics() {
     let mut _other = Runtime::local();
-    let stranger = _other.build_here(|b| b.constant(1u32));
+    let stranger = _other.build(|b| b.constant(1u32));
     let result = catch_unwind(|| {
-        Runtime::local().build_here(|b| {
+        Runtime::local().build(|b| {
             let _ = stranger.sample(b);
         })
     });
@@ -138,8 +138,8 @@ fn a_foreign_token_in_graph_code_panics() {
 #[test]
 fn swapping_the_build_context_for_another_graphs_is_caught() {
     let result = catch_unwind(|| {
-        Runtime::local().build_here(|outer| {
-            Runtime::local().build_here(|inner| core::mem::swap(outer, inner));
+        Runtime::local().build(|outer| {
+            Runtime::local().build(|inner| core::mem::swap(outer, inner));
         })
     });
     assert!(panic_text(result).contains("swapped for another graph's"));
@@ -149,7 +149,7 @@ fn swapping_the_build_context_for_another_graphs_is_caught() {
 #[test]
 fn statistics_count_instants_and_nothing_else_on_an_unconsumed_input() {
     let mut graph = Runtime::local();
-    let a_in = graph.build_here(|b| b.input::<u32>().1);
+    let a_in = graph.build(|b| b.input::<u32>().1);
     let built: bough::Statistics = graph.statistics();
     assert_eq!(built.transactions, 1, "transaction zero");
     assert_eq!(built.new_nodes, 1, "the input ran once in transaction zero");
@@ -168,7 +168,7 @@ fn statistics_count_instants_and_nothing_else_on_an_unconsumed_input() {
 fn an_empty_runtime_from_each_constructor_builds_sends_and_listens() {
     let mut local = Runtime::local();
     assert_eq!(local.live_nodes(), 0, "empty");
-    let (numbers_in, total) = local.build_here(|b| {
+    let (numbers_in, total) = local.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
@@ -183,7 +183,7 @@ fn an_empty_runtime_from_each_constructor_builds_sends_and_listens() {
 
     let mut threaded = Runtime::threaded();
     assert_eq!(threaded.live_nodes(), 0, "empty");
-    let (numbers_in, total) = threaded.build_here(|b| {
+    let (numbers_in, total) = threaded.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
@@ -204,7 +204,7 @@ fn an_empty_runtime_from_each_constructor_builds_sends_and_listens() {
 #[test]
 fn a_later_build_samples_the_values_from_before_it() {
     let mut graph = Runtime::local();
-    let (numbers_in, latest, numbers) = graph.build_here(|b| {
+    let (numbers_in, latest, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         (numbers_in, numbers.hold(b, 0u32), numbers)
@@ -217,7 +217,7 @@ fn a_later_build_samples_the_values_from_before_it() {
     graph.send(numbers_in, 5);
     assert_eq!(fired.get(), 1);
 
-    let (seen, doubled) = graph.build_here(|b| {
+    let (seen, doubled) = graph.build(|b| {
         let seen = *latest.sample(b);
         (seen, numbers.map(|n| n * 2).hold(b, seen * 2))
     });
@@ -238,11 +238,11 @@ fn a_later_build_samples_the_values_from_before_it() {
 #[test]
 fn a_later_build_runs_its_child_transactions_before_it_returns() {
     let mut graph = Runtime::local();
-    let (count_in, count) = graph.build_here(|b| {
+    let (count_in, count) = graph.build(|b| {
         let (count, count_in) = b.input_cell(3u32);
         (count_in, count)
     });
-    let later = graph.build_here(|b| count.steps_with_current(b).defer(b).hold(b, 0u32));
+    let later = graph.build(|b| count.steps_with_current(b).defer(b).hold(b, 0u32));
     assert_eq!(*graph.sample(later), 3, "the child transaction ran");
     graph.send(count_in, 4);
     assert_eq!(*graph.sample(later), 4);
@@ -254,9 +254,9 @@ fn a_later_build_runs_its_child_transactions_before_it_returns() {
 #[test]
 fn a_later_build_refuses_a_same_instant_cycle() {
     let mut graph = Runtime::local();
-    let numbers_in = graph.build_here(|b| b.input::<u32>().1);
+    let numbers_in = graph.build(|b| b.input::<u32>().1);
     let result = catch_unwind(AssertUnwindSafe(|| {
-        graph.build_here(|b| {
+        graph.build(|b| {
             let (count, count_loop) = b.cell_loop::<u32>();
             let next = count.map_cell(b, |n| n + 1);
             count_loop.close(b, next);
@@ -270,7 +270,7 @@ fn a_later_build_refuses_a_same_instant_cycle() {
 #[test]
 fn a_poisoned_runtime_refuses_a_build() {
     let mut graph = Runtime::local();
-    let a_in = graph.build_here(|b| b.input::<u32>().1);
+    let a_in = graph.build(|b| b.input::<u32>().1);
     let _ = catch_unwind(AssertUnwindSafe(|| {
         graph.transaction(|tx| {
             tx.send(a_in, 1);
@@ -278,7 +278,7 @@ fn a_poisoned_runtime_refuses_a_build() {
         })
     }));
     let result = catch_unwind(AssertUnwindSafe(|| {
-        graph.build_here(|b| b.constant(1u32));
+        graph.build(|b| b.constant(1u32));
     }));
     assert!(panic_text(result).contains("poisoned"));
 }

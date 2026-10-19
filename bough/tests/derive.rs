@@ -37,7 +37,7 @@ struct Screen {
 #[test]
 fn a_derived_struct_roots_its_tokens_and_skips_what_it_is_told() {
     let mut graph = Runtime::local();
-    let screen = graph.build_here(|b| {
+    let screen = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         let events = clicks.share(b);
         let first = events.hold(b, 0u32);
@@ -190,7 +190,7 @@ struct Shadow {
 #[test]
 fn degenerate_shapes_derive_and_trace() {
     let mut graph = Runtime::local();
-    let cells = graph.build_here(|b| {
+    let cells = graph.build(|b| {
         let unit = b.constant(Unit);
         let skipped = b.constant(AllSkipped { opaque: Opaque(5) });
         let empty = b.constant(None::<Empty>);
@@ -230,7 +230,7 @@ struct Members {
 #[test]
 fn rfd_6_s_chat_room_members_derive_trace_and_route_every_line() {
     let mut graph = Runtime::threaded();
-    let (joins, messages, outbound) = graph.build_here(|b| {
+    let (joins, messages, outbound) = graph.build(|b| {
         let (joins, joins_in) = b.input::<(User, mpsc::Sender<String>)>();
         let (messages, messages_in) = b.input::<(User, String)>();
         let members = joins.accumulate_mut(

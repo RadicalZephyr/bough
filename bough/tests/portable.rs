@@ -18,13 +18,13 @@ fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
 #[test]
 fn a_core_that_stores_its_own_closure_builds_in_both_modes() {
     let mut local = Runtime::local();
-    let (local_in, local_out) = local.build_here(|b| {
+    let (local_in, local_out) = local.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, plus_one(&mut b.portable(), numbers))
     });
 
     let mut threaded = Runtime::threaded();
-    let (threaded_in, threaded_out) = threaded.build_here(|b| {
+    let (threaded_in, threaded_out) = threaded.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, plus_one(&mut b.portable(), numbers))
     });
@@ -65,7 +65,7 @@ fn longest(b: &mut Portable<'_>, label: Cell<String>) -> Cell<usize> {
 #[test]
 fn a_local_host_mixes_graph_code_that_is_not_send_with_a_portable_core() {
     let mut graph = Runtime::local();
-    let (clicks_in, step_in, total, label, logged, widest) = graph.build_here(|b| {
+    let (clicks_in, step_in, total, label, logged, widest) = graph.build(|b| {
         let prefix: Rc<str> = Rc::from("total ");
         let (clicks, clicks_in) = b.input::<()>();
         let (step, step_in) = b.input_cell(1u32);
@@ -298,7 +298,7 @@ fn the_petrol_pump_core_gives_the_same_answers_in_both_modes() {
     use Nozzle::{Down, Up};
 
     let mut local = Runtime::local();
-    let (lh, lo) = local.build_here(|b| {
+    let (lh, lo) = local.build(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });
@@ -309,7 +309,7 @@ fn the_petrol_pump_core_gives_the_same_answers_in_both_modes() {
         .keep();
 
     let mut threaded = Runtime::threaded();
-    let (th, to) = threaded.build_here(|b| {
+    let (th, to) = threaded.build(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });
@@ -415,7 +415,7 @@ macro_rules! navigate {
 #[test]
 fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
     let mut local = Runtime::local();
-    let (local_in, local_events) = local.build_here(|b| {
+    let (local_in, local_events) = local.build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         (clicks_in, navigation(&mut b.portable(), clicks))
     });
@@ -427,7 +427,7 @@ fn nodes_a_portable_construct_builds_are_freed_after_the_switch_leaves_them() {
     let local_counts = navigate!(local, local_in, local_heard, 10);
 
     let mut threaded = Runtime::threaded();
-    let (threaded_in, threaded_events) = threaded.build_here(|b| {
+    let (threaded_in, threaded_events) = threaded.build(|b| {
         let (clicks, clicks_in) = b.input::<u32>();
         (clicks_in, navigation(&mut b.portable(), clicks))
     });
@@ -462,7 +462,7 @@ fn a_threaded_runtime_with_a_portable_core_moves_to_another_thread() {
     fn assert_send<T: Send>(_: &T) {}
 
     let mut graph = Runtime::threaded();
-    let (h, out) = graph.build_here(|b| {
+    let (h, out) = graph.build(|b| {
         let (handles, inputs) = pump_in!(b);
         (handles, pump_core(&mut b.portable(), inputs))
     });

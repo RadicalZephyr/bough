@@ -37,7 +37,7 @@
 //! use std::rc::Rc;
 //!
 //! let offset = Rc::new(5u32);
-//! let _ = Runtime::threaded().build_here(move |b| {
+//! let _ = Runtime::threaded().build(move |b| {
 //!     let (numbers, _numbers_in) = b.input::<u32>();
 //!     let _held = numbers.map(move |n| n + *offset).hold(b, 0u32); // error: Rc is not Send
 //! });

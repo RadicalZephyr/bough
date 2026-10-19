@@ -57,7 +57,7 @@ fn feedback(remote: RemoteIo, input: Input<u32>, results: Results) -> impl FnMut
 #[test]
 fn a_remote_send_from_a_map_closure_or_accumulate_mut_is_inside_transaction() {
     let mut graph = Runtime::local();
-    let (remotes_in, numbers_in, mapped, accumulated) = graph.build_here(|b| {
+    let (remotes_in, numbers_in, mapped, accumulated) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let remotes = remotes.share(b);
@@ -108,7 +108,7 @@ fn construct_closures_and_child_instants_are_guarded() {
         }
     }
     let mut graph = Runtime::local();
-    let (remotes_in, built, deferred, split) = graph.build_here(|b| {
+    let (remotes_in, built, deferred, split) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let remotes = remotes.share(b);
@@ -149,7 +149,7 @@ fn construct_closures_and_child_instants_are_guarded() {
 #[test]
 fn listeners_and_transaction_closures_queue() {
     let mut graph = Runtime::local();
-    let (numbers_in, numbers, later) = graph.build_here(|b| {
+    let (numbers_in, numbers, later) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let numbers = numbers.share(b);
         let later = numbers.defer(b);
@@ -191,7 +191,7 @@ fn listeners_and_transaction_closures_queue() {
 #[test]
 fn another_thread_queues_while_the_driver_runs_graph_code() {
     let mut graph = Runtime::local();
-    let (remotes_in, found, numbers) = graph.build_here(|b| {
+    let (remotes_in, found, numbers) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
@@ -220,13 +220,13 @@ fn another_thread_queues_while_the_driver_runs_graph_code() {
 #[test]
 fn the_guard_is_per_graph() {
     let mut other = Runtime::local();
-    let (other_in, other_total) = other.build_here(|b| {
+    let (other_in, other_total) = other.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
     });
     let elsewhere = other.remote_io();
     let mut graph = Runtime::local();
-    let (numbers_in, sent) = graph.build_here(|b| {
+    let (numbers_in, sent) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let sent = numbers
             .map(move |n| elsewhere.send(other_in, n).is_ok())
@@ -246,9 +246,9 @@ fn the_guard_is_per_graph() {
 #[test]
 fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
     let mut _other = Runtime::local();
-    let foreign_in = _other.build_here(|b| b.input::<u32>().1);
+    let foreign_in = _other.build(|b| b.input::<u32>().1);
     let mut graph = Runtime::local();
-    let (numbers_in, remotes_in, found, _checked) = graph.build_here(|b| {
+    let (numbers_in, remotes_in, found, _checked) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let (remotes, remotes_in) = b.input::<RemoteIo>();
         let found = remotes
@@ -281,7 +281,7 @@ fn a_remote_call_reports_the_first_failure_in_a_fixed_order() {
 #[test]
 fn poisoning_makes_every_later_remote_send_fail() {
     let mut graph = Runtime::local();
-    let (numbers_in, _checked) = graph.build_here(|b| {
+    let (numbers_in, _checked) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         let checked = numbers
             .map(|n| {

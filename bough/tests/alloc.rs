@@ -118,7 +118,7 @@ fn relinks(_: &Runtime) -> Option<u64> {
 fn steady_state_transactions_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
     let mut graph = Runtime::local();
-    let ((numbers_in, bumps_in, open_in), (total, both, merged), later) = graph.build_here(|b| {
+    let ((numbers_in, bumps_in, open_in), (total, both, merged), later) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         let numbers = numbers.share(b);
         let total = numbers
@@ -461,7 +461,7 @@ fn steady_state_transactions_do_not_allocate() {
 fn steady_state_collections_do_not_allocate() {
     DRIVER.with(|driver| driver.set(true));
     let mut graph = Runtime::local();
-    let (go_in, clicks_in, made, shown) = graph.build_here(|b| {
+    let (go_in, clicks_in, made, shown) = graph.build(|b| {
         let (clicks, clicks_in) = b.input::<u64>();
         let clicks = clicks.share(b);
         let (go, go_in) = b.input::<u64>();
@@ -537,7 +537,7 @@ fn slot_writes_and_pumps_do_not_allocate() {
     static LEVEL: InputSlot<u64> = InputSlot::keep_latest();
     DRIVER.with(|driver| driver.set(true));
     let mut graph = Runtime::local();
-    let total = graph.build_here(|b| {
+    let total = graph.build(|b| {
         let (sensor, sensor_in) = b.input::<u64>();
         b.connect(sensor_in, &SENSOR, 0);
         let (level, level_in) = b.input::<u64>();
@@ -583,7 +583,7 @@ fn a_remote_unit_allocates_once_on_its_sender_and_never_on_the_driver() {
     const UNITS: u64 = 1_000;
     DRIVER.with(|driver| driver.set(true));
     let mut graph = Runtime::local();
-    let (numbers_in, total) = graph.build_here(|b| {
+    let (numbers_in, total) = graph.build(|b| {
         let (numbers, numbers_in) = b.input::<u64>();
         (numbers_in, numbers.accumulate(b, 0u64, |n, t| t + n))
     });
@@ -640,7 +640,7 @@ fn keeping_a_guard_leaks_nothing_once_the_runtime_drops() {
     DRIVER.with(|driver| driver.set(true));
     let round = || {
         let mut graph = Runtime::local();
-        let (numbers_in, held) = graph.build_here(|b| {
+        let (numbers_in, held) = graph.build(|b| {
             let (numbers, numbers_in) = b.input::<u64>();
             (numbers_in, numbers.hold(b, 0u64))
         });

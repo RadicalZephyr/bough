@@ -20,7 +20,7 @@ mod sealed {
 /// use bough::prelude::*;
 ///
 /// let mut graph = Runtime::local();
-/// let (price_in, quantity_in, total) = graph.build_here(|b| {
+/// let (price_in, quantity_in, total) = graph.build(|b| {
 ///     let (price, price_in) = b.input_cell(3u32);
 ///     let (quantity, quantity_in) = b.input_cell(2u32);
 ///     let total: Cell<u32> = (price, quantity).lift(b, |p, q| p * q);
@@ -42,7 +42,7 @@ mod sealed {
 /// ```compile_fail,E0599
 /// use bough::prelude::*;
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (names, _names_in) = b.input::<String>();
 ///     let members = names.accumulate_mut(b, Vec::new(), |name, m: &mut Vec<String>| m.push(name));
 ///     let (extra, _extra_in) = b.input_cell(1usize);

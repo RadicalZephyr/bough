@@ -112,7 +112,7 @@ pub struct Runtime<M: Mode = Local> {
 
 impl Runtime<Local> {
     /// An empty `Local` runtime: no nodes until a
-    /// [`build`](Runtime::build_here) adds them. The empty runtime is no
+    /// [`build`](Runtime::build) adds them. The empty runtime is no
     /// hazard, since `send` and `listen` need tokens, and only a build or a
     /// `construct` hands them out.
     pub fn local() -> Self {
@@ -268,10 +268,10 @@ impl<M: Mode> Runtime<M> {
     /// use bough::prelude::*;
     ///
     /// let mut runtime = Runtime::local();
-    /// let numbers_in = runtime.build_here(|b| b.input::<u32>().1);
+    /// let numbers_in = runtime.build(|b| b.input::<u32>().1);
     /// runtime.transaction(|tx| {
     ///     tx.send(numbers_in, 1);
-    ///     let _more = runtime.build_here(|b| b.constant(1u32)); // error: runtime is borrowed by the transaction
+    ///     let _more = runtime.build(|b| b.constant(1u32)); // error: runtime is borrowed by the transaction
     /// });
     /// ```
     ///
@@ -281,11 +281,11 @@ impl<M: Mode> Runtime<M> {
     ///
     /// Panics on a poisoned runtime. A panic inside the closure, or a loop
     /// it leaves open, escapes the transaction and poisons the runtime.
-    pub fn build_here<R: Trace>(&mut self, f: impl FnOnce(&mut BuildContext<M>) -> R) -> R {
+    pub fn build<R: Trace>(&mut self, f: impl FnOnce(&mut BuildContext<M>) -> R) -> R {
         self.build_anchored(f).keep()
     }
 
-    /// [`build`](Runtime::build_here), but what the closure returned comes
+    /// [`build`](Runtime::build), but what the closure returned comes
     /// back [`Anchored`]: dropping it releases the root, and the next
     /// collection frees what only it reached. Part of it can be kept by
     /// anchoring that part and dropping the rest. The bounds are
@@ -568,7 +568,7 @@ impl<M: Mode> Runtime<M> {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let events = graph.build_here(|b| b.input::<u32>().0);
+    /// let events = graph.build(|b| b.input::<u32>().0);
     /// let _l = graph.listen(events.map(|n| n + 1), |n| println!("{n}")); // error: Map<..> is not a Node
     /// ```
     ///
@@ -578,7 +578,7 @@ impl<M: Mode> Runtime<M> {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let events = graph.build_here(|b| b.input::<u32>().0);
+    /// let events = graph.build(|b| b.input::<u32>().0);
     /// let _a = graph.listen(events, |n| println!("{n}"));
     /// let _b = graph.listen(events, |n| println!("{n}")); // error: use of moved value
     /// ```
@@ -997,7 +997,7 @@ impl<M: Mode> Runtime<M> {
     /// the two kinds of root. `value` is a token, or any value that holds
     /// tokens, such as the tuple or struct of tokens a
     /// [`construct`](crate::Source::construct) closure made; the anchor roots
-    /// every token its [`Trace`] finds, as [`build`](Runtime::build_here) does
+    /// every token its [`Trace`] finds, as [`build`](Runtime::build) does
     /// for the build closure's return value. The [`Anchored`] it returns carries the value and reads
     /// as it. Dropping the last of its clones removes the root, and
     /// [`keep`](Anchored::keep) keeps it for the graph's life.
@@ -1077,7 +1077,7 @@ impl<M: Mode> Runtime<M> {
     /// use bough::prelude::*;
     ///
     /// let mut graph = Runtime::local();
-    /// let (numbers_in, latest) = graph.build_here(|b| {
+    /// let (numbers_in, latest) = graph.build(|b| {
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     (numbers_in, numbers.hold(b, 0u32))
     /// });
@@ -1794,7 +1794,7 @@ impl Drop for Anchor {
 /// ```compile_fail,E0277
 /// use bough::prelude::*;
 ///
-/// let _ = Runtime::local().build_here(|b| {
+/// let _ = Runtime::local().build(|b| {
 ///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
 ///     let _latest = rows.map(Some).hold(b, None); // error: Anchored is not Trace
 /// });
@@ -1905,7 +1905,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// use bough::prelude::*;
 ///
 /// let mut graph = Runtime::local();
-/// let (numbers_in, total) = graph.build_here(|b| {
+/// let (numbers_in, total) = graph.build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
 /// });
@@ -1933,7 +1933,7 @@ impl<M: Mode> Drop for Runtime<M> {
 /// use bough::prelude::*;
 ///
 /// let mut graph = Runtime::local();
-/// let shared_in = graph.build_here(|b| b.input::<Rc<u32>>().1);
+/// let shared_in = graph.build(|b| b.input::<Rc<u32>>().1);
 /// graph.remote_io().send(shared_in, Rc::new(1)).unwrap(); // error: Rc is not Send
 /// ```
 ///
@@ -2319,7 +2319,7 @@ impl<M: Mode> Driver for Runtime<M> {
 /// use std::rc::Rc;
 ///
 /// let mut graph = Runtime::local();
-/// let (numbers_in, numbers) = graph.build_here(|b| {
+/// let (numbers_in, numbers) = graph.build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.share(b))
 /// });
@@ -2417,7 +2417,7 @@ mod tests {
         // The consumers are returned, so that they are roots: a consumer no
         // root reaches is collected at the first send, and takes nothing.
         let mut graph = Runtime::local();
-        let (affine_in, shared_in, shared, _consumers) = graph.build_here(|b| {
+        let (affine_in, shared_in, shared, _consumers) = graph.build(|b| {
             let (affine, affine_in) = b.input::<u32>();
             let latest = affine.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
@@ -2445,12 +2445,12 @@ mod tests {
     #[test]
     fn a_later_build_runs_in_a_transaction_of_its_own() {
         let mut graph = Runtime::local();
-        let first = graph.build_here(|b| b.constant(1u32));
+        let first = graph.build(|b| b.constant(1u32));
         assert_eq!(graph.build.tx, 1, "the first build is serial 1");
-        let numbers_in = graph.build_here(|b| b.input::<u32>().1);
+        let numbers_in = graph.build(|b| b.input::<u32>().1);
         graph.send(numbers_in, 1);
         let before = graph.build.tx;
-        let later = graph.build_here(|b| b.constant(2u32));
+        let later = graph.build(|b| b.constant(2u32));
         assert_eq!(graph.build.tx, before + 1);
         assert!(!graph.build.in_tx, "and it finished");
         let created =
@@ -2465,7 +2465,7 @@ mod tests {
     #[test]
     fn dispatch_prunes_a_node_s_entries_only_when_one_died_there() {
         let mut graph = Runtime::local();
-        let (numbers_in, numbers) = graph.build_here(|b| {
+        let (numbers_in, numbers) = graph.build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             (numbers_in, numbers.share(b))
         });

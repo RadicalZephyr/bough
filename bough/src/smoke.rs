@@ -13,7 +13,7 @@ use crate::{Builder, CollectionPolicy, Lift, Runtime, Source};
 macro_rules! smoke_graph {
     ($new:expr) => {{
         let mut graph = $new;
-        let boundary = graph.build_here(|b| {
+        let boundary = graph.build(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
             let (level, level_in) = b.input_cell(1u32);
@@ -281,7 +281,7 @@ macro_rules! smoke_boundary {
         {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
             let mut graph = $new;
-            let (presses_in, total) = graph.build_here(|b| {
+            let (presses_in, total) = graph.build(|b| {
                 let (presses, presses_in) = b.input::<u32>();
                 b.connect(presses_in, &PRESSES, 0);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
@@ -306,7 +306,7 @@ macro_rules! smoke_boundary {
         #[cfg(not(any(feature = "std", feature = "critical-section")))]
         {
             let mut graph = $new;
-            let _presses_in = graph.build_here(|b| b.input::<u32>().1);
+            let _presses_in = graph.build(|b| b.input::<u32>().1);
             graph.set_waker(core::task::Waker::noop().clone());
             graph.pump();
             let _ = graph.try_pump();
