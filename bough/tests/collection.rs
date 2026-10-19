@@ -1469,40 +1469,139 @@ fn a_struct_of_tokens_a_closure_captures_is_declared_with_one_depends() {
     }
 }
 
-/// A leak the model allows: a declaration has no inverse. A construct
-/// closure that declares, on a node that lives as long as the graph, that
-/// it keeps the screen the closure built, keeps every screen ever built:
-/// the node's reach grows by one entry a run, and no collection frees a
-/// screen. Declared on the closure's own node, as RFD 3 asks, the old
-/// screens go.
+/// F63, the leak a declaration with no inverse allowed, refused at the
+/// call (RFD 3). A construct closure that declared, on a node that lives
+/// as long as the graph, that it keeps the screen the closure built, kept
+/// every screen ever built: the node's reach grew by one entry a run, and
+/// no collection freed a screen. The screen is younger than the node, so
+/// `depends` refuses it now, at the call, which poisons the graph since it
+/// runs in a transaction. Undeclared, the old screens go.
 #[test]
-fn a_declaration_on_a_long_lived_node_keeps_every_node_it_names() {
-    for on_long_lived in [true, false] {
-        let mut graph = Runtime::local();
-        let (open_in, _cells) = graph.build(move |b| {
-            let (open, open_in) = b.input::<u32>();
-            let open = open.share(b);
-            let registry = open.hold(b, 0u32);
-            let screens = open.construct(b, move |b, n| {
-                let screen = b.constant(n);
-                if on_long_lived {
-                    b.depends(&registry, &[&screen]);
-                }
-                screen
-            });
-            let current = screens.hold(b, registry).switch_cell(b);
-            (open_in, (registry, current))
+fn a_declaration_of_a_younger_token_on_a_long_lived_node_panics_at_the_call() {
+    let mut graph = Runtime::local();
+    let (open_in, registry) = graph.build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let open = open.share(b);
+        let registry = open.hold(b, 0u32);
+        let screens = open.construct(b, move |b, n| {
+            let screen = b.constant(n);
+            if n == 2 {
+                DECLARED_AT.with(|at| at.set(Some(line!() + 1)));
+                b.depends(&registry, &[&screen]);
+            }
+            screen
         });
-        graph.set_collection_policy(CollectionPolicy::Manual);
-        graph.collect_garbage();
-        let before = graph.live_nodes();
-        for n in 1..=50 {
-            graph.send(open_in, n);
-        }
-        graph.collect_garbage();
-        let grown = graph.live_nodes() - before;
-        assert_eq!(grown, if on_long_lived { 50 } else { 1 });
+        let current = screens.hold(b, registry).switch_cell(b);
+        (open_in, (registry, current))
+    });
+    graph.send(open_in, 1);
+    let (message, line) = panic_message_and_line(|| graph.send(open_in, 2));
+    // The build is transaction 1, the sends 2 and 3.
+    assert!(
+        message.contains("from transaction 3")
+            && message.contains("from transaction 1")
+            && message.contains("belongs in a cell's value"),
+        "{message}"
+    );
+    assert_eq!(
+        line,
+        DECLARED_AT.with(StdCell::get),
+        "the panic is at the depends call"
+    );
+    assert_eq!(
+        graph.try_sample(registry.0).err(),
+        Some(TokenError::Poisoned)
+    );
+
+    let mut graph = Runtime::local();
+    let (open_in, _cells) = graph.build(|b| {
+        let (open, open_in) = b.input::<u32>();
+        let open = open.share(b);
+        let registry = open.hold(b, 0u32);
+        let screens = open.construct(b, |b, n| b.constant(n));
+        let current = screens.hold(b, registry).switch_cell(b);
+        (open_in, (registry, current))
+    });
+    graph.set_collection_policy(CollectionPolicy::Manual);
+    graph.collect_garbage();
+    let before = graph.live_nodes();
+    for n in 1..=50 {
+        graph.send(open_in, n);
     }
+    graph.collect_garbage();
+    assert_eq!(graph.live_nodes() - before, 1, "only the newest screen");
+}
+
+thread_local! {
+    /// The line of the `depends` call a test expects a panic at.
+    static DECLARED_AT: StdCell<Option<u32>> = const { StdCell::new(None) };
+    /// The line of this thread's last panic in this file.
+    static PANICKED_AT: StdCell<Option<u32>> = const { StdCell::new(None) };
+}
+
+/// A caught panic's message, and the line in this file it was raised at,
+/// which a hook records for the panicking thread before the previous hook
+/// runs.
+fn panic_message_and_line<R>(f: impl FnOnce() -> R) -> (String, Option<u32>) {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(location) = info.location()
+                && location.file().ends_with("collection.rs")
+            {
+                PANICKED_AT.with(|at| at.set(Some(location.line())));
+            }
+            previous(info);
+        }));
+    });
+    PANICKED_AT.with(|at| at.set(None));
+    let message = panic_message(f);
+    (message, PANICKED_AT.with(StdCell::get))
+}
+
+/// The direction check refuses only tokens younger than the node: a
+/// declaration of tokens from the node's own transaction or earlier ones
+/// works in the first build, in a later build and inside a construct, and
+/// what it declares is kept.
+#[test]
+fn a_declaration_of_tokens_from_the_same_or_earlier_transactions_works() {
+    let mut graph = Runtime::local();
+    graph.set_collect_after_every_unit(true);
+    let (english, first) = graph.build(|b| {
+        let english = b.constant("hello".to_string());
+        let (numbers, _numbers_in) = b.input::<u32>();
+        let first = numbers.hold(b, 0u32);
+        b.depends(&first, &[&english]); // the same transaction
+        (english, first)
+    });
+    let (pick_in, shown) = graph.build(move |b| {
+        let french = b.constant("bonjour".to_string());
+        let (pick, pick_in) = b.input::<bool>();
+        let language = pick
+            .map(move |fr| if fr { french } else { english })
+            .hold(b, english);
+        b.depends(&language, &[&french, &english]); // the same, and earlier
+        b.depends(&first, &[&english]); // earlier, on an earlier node
+        (pick_in, language.switch_cell(b))
+    });
+    graph.send(pick_in, true);
+    assert_eq!(graph.sample(shown), "bonjour");
+    let (open_in, screen) = graph.build(move |b| {
+        let (open, open_in) = b.input::<u32>();
+        let made = open.construct(b, move |b, n| {
+            let label = b.constant(n);
+            let (clicks, _clicks_in) = b.input::<()>();
+            let screen = clicks.map(move |_| label).hold(b, label);
+            b.depends(&screen, &[&label, &english]); // this run, and earlier
+            screen
+        });
+        let zero = b.constant(0u32);
+        let none = b.constant(zero);
+        (open_in, made.hold(b, none).switch_cell(b).switch_cell(b))
+    });
+    graph.send(open_in, 7);
+    assert_eq!(*graph.sample(screen), 7);
 }
 
 /// `build_anchored` returns what its closure returned anchored: dropping

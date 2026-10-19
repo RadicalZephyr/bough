@@ -211,6 +211,10 @@ pub trait Builder: sealed::Sealed + Sized {
     #[doc(hidden)]
     fn extend_reach(&mut self, n: u32, reach: Vec<u32>);
 
+    /// The transaction that created node `n`.
+    #[doc(hidden)]
+    fn created(&self, n: u32) -> u64;
+
     /// Roots the nodes until the anchor this returns drops.
     #[doc(hidden)]
     fn root(&mut self, nodes: Vec<u32>) -> Anchor;
@@ -497,6 +501,15 @@ pub trait Builder: sealed::Sealed + Sized {
     /// can close no cycle. Every token is checked before any is recorded,
     /// and a stale or foreign one panics, as every build-time use of one
     /// does.
+    ///
+    /// A declaration points backward in creation order: a closure can
+    /// capture only a token that already exists. So `depends` refuses a
+    /// token created in a later transaction than `node`, with a panic here,
+    /// at the call. Tokens from `node`'s own transaction or earlier ones are
+    /// fine. A token younger than what keeps it belongs in a cell's value,
+    /// where [`Trace`] reaches it, and putting a new value without it is
+    /// the inverse a declaration doesn't have (RFD 3).
+    #[track_caller]
     fn depends(&mut self, node: &impl TokenRef, on: &[&dyn Trace]) {
         let n = self.check_token(node.token());
         let mut tracer = Tracer::new();
@@ -508,6 +521,17 @@ pub trait Builder: sealed::Sealed + Sized {
             .into_iter()
             .map(|token| self.check_token(token))
             .collect();
+        let made = self.created(n);
+        for &r in &reach {
+            let younger = self.created(r);
+            assert!(
+                younger <= made,
+                "bough: `depends` was given a token from transaction {younger}, younger than \
+                 the node it was declared on, from transaction {made}. A node keeps only \
+                 tokens from its own transaction or earlier ones; a token younger than what \
+                 keeps it belongs in a cell's value, where `Trace` reaches it"
+            );
+        }
         self.extend_reach(n, reach);
     }
 }
@@ -677,6 +701,10 @@ impl<M: Mode> Builder for BuildContext<M> {
 
     fn extend_reach(&mut self, n: u32, reach: Vec<u32>) {
         self.store.cold[n as usize].reach.extend(reach);
+    }
+
+    fn created(&self, n: u32) -> u64 {
+        self.store.hot[n as usize].created
     }
 
     fn root(&mut self, nodes: Vec<u32>) -> Anchor {
@@ -975,6 +1003,10 @@ impl<'a> Builder for Portable<'a> {
 
     fn extend_reach(&mut self, n: u32, reach: Vec<u32>) {
         dispatch!(&mut self.arm, |b, _into| b.extend_reach(n, reach))
+    }
+
+    fn created(&self, n: u32) -> u64 {
+        dispatch!(&self.arm, |b, _into| Builder::created(&**b, n))
     }
 
     fn root(&mut self, nodes: Vec<u32>) -> Anchor {
