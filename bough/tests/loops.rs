@@ -482,20 +482,26 @@ fn loops_that_define_a_cell_by_itself_at_the_same_instant_are_refused() {
     );
 }
 
-/// A loop left open panics where its scope ends. For the build closure
-/// that is inside `Runtime::build`, before any graph exists, so the panic
-/// leaves nothing poisoned: `Runtime::build` panics, and the next build and
-/// its transactions work.
+/// A loop left open panics where its scope ends. For a build closure
+/// that is the end of the build's transaction, so the panic poisons the
+/// runtime it builds on, as one left open in a construct does. Another
+/// runtime and its transactions work.
 #[test]
-fn a_loop_left_open_panics_when_the_build_ends_and_poisons_nothing() {
+fn a_loop_left_open_panics_when_the_build_ends_and_poisons_its_runtime() {
+    let mut open = Runtime::local();
+    let numbers_in = open.build_here(|b| b.input::<u32>().1);
     let message = panic_message(|| {
-        Runtime::local().build_here(|b| {
+        open.build_here(|b| {
             let (_count, _count_loop) = b.cell_loop::<u32>();
         })
     });
     assert!(
         message.contains("a loop declared in this scope was never closed"),
         "{message}"
+    );
+    assert_eq!(
+        open.try_send(numbers_in, 1),
+        Err(bough::SendError::Poisoned)
     );
     let mut graph = Runtime::local();
     let (numbers_in, latest) = graph.build_here(|b| {
