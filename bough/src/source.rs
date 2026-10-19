@@ -847,6 +847,7 @@ impl<A: Clone + 'static> Node for Shared<A> {
 }
 
 /// The adapter returned by [`Source::map`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct Map<S, F> {
     source: S,
     f: F,
@@ -869,6 +870,7 @@ impl<S: Trace, F> Trace for Map<S, F> {
 }
 
 /// The adapter returned by [`Source::filter`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct Filter<S, P> {
     source: S,
     predicate: P,
@@ -891,6 +893,7 @@ impl<S: Trace, P> Trace for Filter<S, P> {
 }
 
 /// The adapter returned by [`Source::filter_map`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct FilterMap<S, F> {
     source: S,
     f: F,
@@ -913,6 +916,7 @@ impl<S: Trace, F> Trace for FilterMap<S, F> {
 }
 
 /// The adapter returned by [`Source::map_to`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct MapTo<S, B> {
     source: S,
     value: B,
@@ -937,6 +941,7 @@ impl<S: Trace, B: Trace> Trace for MapTo<S, B> {
 
 /// The adapter returned by [`Source::snapshot`]. `C` is the type of the
 /// cell token it reads, a [`Cell`] or a [`State`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct Snapshot<S, C, F> {
     source: S,
     cell: C,
@@ -971,6 +976,7 @@ impl<S: Trace, C: CellRef, F> Trace for Snapshot<S, C, F> {
 
 /// The adapter returned by [`Source::gate`]. `C` is the type of the cell
 /// token it reads, a [`Cell`] or a [`State`] of `bool`.
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct Gate<S, C> {
     source: S,
     cell: C,
@@ -998,6 +1004,7 @@ impl<S: Trace, C: CellRef> Trace for Gate<S, C> {
 }
 
 /// The adapter returned by [`Source::once`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
 pub struct Once<S> {
     source: S,
     done: bool,

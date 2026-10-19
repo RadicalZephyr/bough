@@ -674,13 +674,13 @@ fn a_split_and_a_defer_are_two_nodes_each() {
         let (lists, lists_in) = b.input::<Vec<u32>>();
         (lists_in, lists.map(|l| l).split(b))
     });
-    boundary.keep();
+    let _ = boundary.keep();
     assert_eq!(graph.live_nodes(), 3);
     let (graph, boundary) = Runtime::build(|b| {
         let (numbers, numbers_in) = b.input::<u32>();
         (numbers_in, numbers.map(|n| n + 1).defer(b))
     });
-    boundary.keep();
+    let _ = boundary.keep();
     assert_eq!(graph.live_nodes(), 3);
 }
 

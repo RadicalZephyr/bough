@@ -40,6 +40,7 @@ pub trait TokenRef: sealed::Sealed {}
 /// [`share`](crate::Source::share) it. A toolkit's event becomes a Bough
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
 /// token `Send` and `Sync` whatever `A` is; a token is three integers.
+#[must_use = "streams do nothing unless consumed"]
 pub struct Stream<A> {
     pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
@@ -48,6 +49,7 @@ pub struct Stream<A> {
 /// A stream with any number of consumers, each of which clones the event.
 ///
 /// Produced by [`share`](crate::Source::share), which requires `A: Clone`.
+#[must_use = "shared streams do nothing unless consumed"]
 pub struct Shared<A> {
     pub(crate) token: Token,
     event: PhantomData<fn() -> A>,
