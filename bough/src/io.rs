@@ -297,11 +297,11 @@ impl IoQueue<Threaded> for NoIo {
 /// ```
 /// use bough::prelude::*;
 ///
-/// let (mut graph, edge) = Runtime::build(|b| {
+/// let (mut graph, boundary) = Runtime::build(|b| {
 ///     let (clicks, clicks_in) = b.input::<()>();
 ///     (clicks_in, clicks.accumulate(b, 0u32, |_, n| n + 1))
 /// });
-/// let (clicks_in, count) = edge.keep();
+/// let (clicks_in, count) = boundary.keep();
 /// let io = graph.io();
 /// let on_click = move || io.send(clicks_in, ()).unwrap(); // what a handler holds
 /// on_click();

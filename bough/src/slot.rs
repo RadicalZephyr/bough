@@ -40,12 +40,12 @@ use crate::engine::boundary::{Drain, Lock};
 ///
 /// static PRESSES: InputSlot<u32> = InputSlot::new(|a, b| a + b);
 ///
-/// let (mut graph, edge) = Runtime::build(|b| {
+/// let (mut graph, boundary) = Runtime::build(|b| {
 ///     let (presses, presses_in) = b.input::<u32>();
 ///     b.connect(presses_in, &PRESSES, 0);
 ///     presses.accumulate(b, 0u32, |n, total| total + n)
 /// });
-/// let total = edge.keep();
+/// let total = boundary.keep();
 ///
 /// // from an interrupt handler, or any other context: a burst
 /// PRESSES.send(1);

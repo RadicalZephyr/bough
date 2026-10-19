@@ -128,7 +128,7 @@ fn build_graph<M: Mode, R: Trace>(
     );
     build.pop_scope();
     build.finish();
-    let edge = build.anchor(r);
+    let boundary = build.anchor(r);
     let mut graph = Runtime {
         build,
         released_before: 0,
@@ -142,7 +142,7 @@ fn build_graph<M: Mode, R: Trace>(
     // Transaction zero is a unit like any other: a collection that is due
     // runs after it, and frees what the build made that nothing reaches.
     graph.collect_if_due();
-    (graph, edge)
+    (graph, boundary)
 }
 
 impl Runtime<Local> {
@@ -526,8 +526,8 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0277
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
-    /// let events = edge.keep();
+    /// let (mut graph, boundary) = Runtime::build(|b| b.input::<u32>().0);
+    /// let events = boundary.keep();
     /// let _l = graph.listen(events.map(|n| n + 1), |n| println!("{n}")); // error: Map<..> is not a Node
     /// ```
     ///
@@ -536,8 +536,8 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0382
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, edge) = Runtime::build(|b| b.input::<u32>().0);
-    /// let events = edge.keep();
+    /// let (mut graph, boundary) = Runtime::build(|b| b.input::<u32>().0);
+    /// let events = boundary.keep();
     /// let _a = graph.listen(events, |n| println!("{n}"));
     /// let _b = graph.listen(events, |n| println!("{n}")); // error: use of moved value
     /// ```
@@ -968,14 +968,14 @@ impl<M: Mode> Runtime<M> {
     /// use bough::prelude::*;
     /// use bough::TokenError;
     ///
-    /// let (mut graph, edge) = Runtime::build(|b| {
+    /// let (mut graph, boundary) = Runtime::build(|b| {
     ///     let (n, n_in) = b.input::<u32>();
     ///     let n = n.share(b);
     ///     (n_in, n.hold(b, 0u32), n.map(|v| v * 2).hold(b, 0u32))
     /// });
-    /// let (n_in, latest, doubled) = *edge;
+    /// let (n_in, latest, doubled) = *boundary;
     /// let _kept = graph.anchor((n_in, latest)); // the part to keep
-    /// drop(edge);
+    /// drop(boundary);
     /// graph.collect_garbage(); // what only the boundary reached goes
     /// graph.send(n_in, 1);
     /// assert_eq!(*graph.sample(latest), 1);
@@ -1034,11 +1034,11 @@ impl<M: Mode> Runtime<M> {
     /// ```compile_fail,E0502
     /// use bough::prelude::*;
     ///
-    /// let (mut graph, edge) = Runtime::build(|b| {
+    /// let (mut graph, boundary) = Runtime::build(|b| {
     ///     let (numbers, numbers_in) = b.input::<u32>();
     ///     (numbers_in, numbers.hold(b, 0u32))
     /// });
-    /// let (numbers_in, latest) = edge.keep();
+    /// let (numbers_in, latest) = boundary.keep();
     /// let before = graph.sample(latest);
     /// graph.send(numbers_in, 1); // error: graph is also borrowed as immutable
     /// assert_eq!(*before, 0);
@@ -1752,11 +1752,11 @@ impl Drop for Anchor {
 /// ```compile_fail,E0277
 /// use bough::prelude::*;
 ///
-/// let (_graph, edge) = Runtime::build(|b| {
+/// let (_graph, boundary) = Runtime::build(|b| {
 ///     let (rows, _rows_in) = b.input::<Anchored<Input<u32>>>();
 ///     let _latest = rows.map(Some).hold(b, None); // error: Anchored is not Trace
 /// });
-/// edge.keep();
+/// boundary.keep();
 /// ```
 pub struct Anchored<T> {
     value: T,
@@ -1863,11 +1863,11 @@ impl<M: Mode> Drop for Runtime<M> {
 ///
 /// use bough::prelude::*;
 ///
-/// let (mut graph, edge) = Runtime::build(|b| {
+/// let (mut graph, boundary) = Runtime::build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.accumulate(b, 0u32, |n, t| t + n))
 /// });
-/// let (numbers_in, total) = edge.keep();
+/// let (numbers_in, total) = boundary.keep();
 /// let heard = Rc::new(RefCell::new(Vec::new())); // a Local runtime keeps its Rc
 /// let sink = heard.clone();
 /// graph.listen_steps(total, move |t| sink.borrow_mut().push(*t)).keep();
@@ -1891,8 +1891,8 @@ impl<M: Mode> Drop for Runtime<M> {
 ///
 /// use bough::prelude::*;
 ///
-/// let (graph, edge) = Runtime::build(|b| b.input::<Rc<u32>>().1);
-/// let shared_in = edge.keep();
+/// let (graph, boundary) = Runtime::build(|b| b.input::<Rc<u32>>().1);
+/// let shared_in = boundary.keep();
 /// graph.remote_io().send(shared_in, Rc::new(1)).unwrap(); // error: Rc is not Send
 /// ```
 ///
@@ -2277,11 +2277,11 @@ impl<M: Mode> Driver for Runtime<M> {
 /// use bough::prelude::*;
 /// use std::rc::Rc;
 ///
-/// let (graph, edge) = Runtime::build(|b| {
+/// let (graph, boundary) = Runtime::build(|b| {
 ///     let (numbers, numbers_in) = b.input::<u32>();
 ///     (numbers_in, numbers.share(b))
 /// });
-/// let (numbers_in, numbers) = edge.keep();
+/// let (numbers_in, numbers) = boundary.keep();
 /// graph.remote_io().transaction(move |tx| {
 ///     let seen = Rc::new(0);
 ///     tx.listen_once(numbers, move |_| drop(seen)); // error: Rc is not Send
@@ -2375,7 +2375,7 @@ mod tests {
     fn a_linear_consumer_empties_the_slot_and_a_shared_slot_keeps_its_event() {
         // The consumers are returned, so that they are roots: a consumer no
         // root reaches is collected at the first send, and takes nothing.
-        let (mut graph, edge) = Runtime::build(|b| {
+        let (mut graph, boundary) = Runtime::build(|b| {
             let (linear, linear_in) = b.input::<u32>();
             let latest = linear.hold(b, 0u32);
             let (events, shared_in) = b.input::<u32>();
@@ -2384,7 +2384,7 @@ mod tests {
             let same = shared.hold(b, 0u32);
             (linear_in, shared_in, shared, [latest, plus, same])
         });
-        let (linear_in, shared_in, shared, _consumers) = edge.keep();
+        let (linear_in, shared_in, shared, _consumers) = boundary.keep();
         let data = |graph: &Runtime, index: u32| {
             *slot::<Local, u32>(&graph.build.store.data[index as usize])
         };
@@ -2402,11 +2402,11 @@ mod tests {
     /// guard was dropped outside a dispatch goes at the node's next.
     #[test]
     fn dispatch_prunes_a_node_s_entries_only_when_one_died_there() {
-        let (mut graph, edge) = Runtime::build(|b| {
+        let (mut graph, boundary) = Runtime::build(|b| {
             let (numbers, numbers_in) = b.input::<u32>();
             (numbers_in, numbers.share(b))
         });
-        let (numbers_in, numbers) = edge.keep();
+        let (numbers_in, numbers) = boundary.keep();
         let entries =
             |graph: &Runtime| graph.build.store.listeners[numbers.token.index as usize].len();
         graph.listen(numbers, |_| ()).keep();

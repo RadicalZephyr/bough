@@ -13,7 +13,7 @@ use crate::{Builder, CollectionPolicy, Lift, Runtime, Source};
 /// mode cannot name the `Accepts` bound their types need.
 macro_rules! smoke_graph {
     ($build:path) => {{
-        let (mut graph, edge) = $build(|b| {
+        let (mut graph, boundary) = $build(|b| {
             let (n, n_in) = b.input::<u32>();
             let n = n.share(b);
             let (level, level_in) = b.input_cell(1u32);
@@ -181,7 +181,7 @@ macro_rules! smoke_graph {
             )
         });
         let ((n_in, words_in, level_in, digits_in), (total, words, out, merged), later) =
-            edge.keep();
+            boundary.keep();
         let (
             stage2,
             (ticks, tick_steps, running, entry_count),
@@ -276,17 +276,17 @@ macro_rules! smoke_graph {
 /// burst folded into one event, a pump and a waker; and where the target
 /// has a `RemoteIo`, remote sends and remote transactions, pumped after
 /// the slot. Each expansion has a slot of its own.
-macro_rules! smoke_edge {
+macro_rules! smoke_boundary {
     ($build:path) => {{
         #[cfg(any(feature = "std", feature = "critical-section"))]
         {
             static PRESSES: crate::InputSlot<u32> = crate::InputSlot::new(|a, b| a + b);
-            let (mut graph, edge) = $build(|b| {
+            let (mut graph, boundary) = $build(|b| {
                 let (presses, presses_in) = b.input::<u32>();
                 b.connect(presses_in, &PRESSES, 0);
                 (presses_in, presses.accumulate(b, 0u32, |n, t| t + n))
             });
-            let (presses_in, total) = edge.keep();
+            let (presses_in, total) = boundary.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             PRESSES.send(1);
             PRESSES.send(2);
@@ -306,8 +306,8 @@ macro_rules! smoke_edge {
         }
         #[cfg(not(any(feature = "std", feature = "critical-section")))]
         {
-            let (mut graph, edge) = $build(|b| b.input::<u32>().1);
-            edge.keep();
+            let (mut graph, boundary) = $build(|b| b.input::<u32>().1);
+            boundary.keep();
             graph.set_waker(core::task::Waker::noop().clone());
             graph.pump();
             let _ = graph.try_pump();
@@ -320,9 +320,9 @@ macro_rules! smoke_edge {
 /// each mode the target has, and returns a sum of the final values.
 #[doc(hidden)]
 pub fn smoke() -> u32 {
-    let local = smoke_graph!(Runtime::build) + smoke_edge!(Runtime::build);
+    let local = smoke_graph!(Runtime::build) + smoke_boundary!(Runtime::build);
     #[cfg(target_has_atomic = "ptr")]
-    let threaded = smoke_graph!(Runtime::build_threaded) + smoke_edge!(Runtime::build_threaded);
+    let threaded = smoke_graph!(Runtime::build_threaded) + smoke_boundary!(Runtime::build_threaded);
     #[cfg(not(target_has_atomic = "ptr"))]
     let threaded = local;
     local + threaded
