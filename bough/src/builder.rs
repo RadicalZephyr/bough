@@ -1,5 +1,5 @@
 //! Builders: [`Builder`], the one trait every materializer takes, and
-//! [`Portable`], the builder a mode-agnostic core is written against.
+//! [`Portable`], the builder a core is written against.
 //!
 //! A materializer takes `&mut C` for any [`Builder`] `C`, and asks
 //! [`Stores<T>`] of `C` for each value and closure it keeps. A
