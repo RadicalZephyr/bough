@@ -59,7 +59,7 @@ pub trait Lift<F, R>: sealed::Sealed + Sized {
     /// A read-through cell of these cells: `f` over their values, computed on
     /// read and memoized until one of them steps. Two inputs stepping in one
     /// instant are one step of the result.
-    fn lift<X>(self, build: &mut X, f: F) -> Self::Output
+    fn lift<X>(self, builder: &mut X, f: F) -> Self::Output
     where
         X: Builder + Stores<F> + Stores<R>;
 }
@@ -85,12 +85,12 @@ macro_rules! lift_tuple {
         {
             type Output = <join!($($cell),+) as CellKind>::Ref<R>;
 
-            fn lift<X>(self, build: &mut X, f: F) -> Self::Output
+            fn lift<X>(self, builder: &mut X, f: F) -> Self::Output
             where
                 X: Builder + Stores<F> + Stores<R>,
             {
-                let inputs = [$(build.check_token(self.$i.token()),)+];
-                let token = read_through::<X, ($($cell::Value,)+), R, F>(build, &inputs, f);
+                let inputs = [$(builder.check_token(self.$i.token()),)+];
+                let token = read_through::<X, ($($cell::Value,)+), R, F>(builder, &inputs, f);
                 <join!($($cell),+) as CellKind>::wrap::<R>(token)
             }
         }

@@ -113,7 +113,7 @@ impl CellKind for NoSteps {
 /// A read-through cell over the cells at `inputs`: `f` of their values,
 /// computed on read. Its function and its memo live in the node's data; it
 /// has no program.
-pub(crate) fn read_through<C, V, R, F>(build: &mut C, inputs: &[u32], f: F) -> Token
+pub(crate) fn read_through<C, V, R, F>(builder: &mut C, inputs: &[u32], f: F) -> Token
 where
     C: Builder + Stores<F> + Stores<R>,
     V: 'static,
@@ -124,7 +124,7 @@ where
         f: <C as Stores<F>>::erase(Erase::Value(f)),
         memo: <C as Stores<R>>::erase(Erase::Memo),
     };
-    let n = build.make::<ReadNode<V, R, F>>(
+    let n = builder.make::<ReadNode<V, R, F>>(
         Kind::ReadThrough,
         data,
         Box::new([]),
@@ -132,7 +132,7 @@ where
         0,
         Vec::new(),
     );
-    build.token_of(n)
+    builder.token_of(n)
 }
 
 impl<A: 'static> State<A> {
@@ -140,8 +140,8 @@ impl<A: 'static> State<A> {
     /// state between transactions. An in-place accumulator's function runs
     /// at commit, so every read during a transaction sees the state from
     /// before it, as [`Cell::sample`] does.
-    pub fn sample<C: Builder>(self, build: &C) -> &A {
-        build.read::<A>(self.token)
+    pub fn sample<C: Builder>(self, builder: &C) -> &A {
+        builder.read::<A>(self.token)
     }
 
     /// A read-through cell over the state, as [`Cell::map_cell`]. It is a
@@ -159,14 +159,14 @@ impl<A: 'static> State<A> {
     /// });
     /// boundary.keep();
     /// ```
-    pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> State<B>
+    pub fn map_cell<C, B, F>(self, builder: &mut C, f: F) -> State<B>
     where
         C: Builder + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
-        let input = build.check_token(self.token);
-        State::from_token(read_through::<C, (A,), B, F>(build, &[input], f))
+        let input = builder.check_token(self.token);
+        State::from_token(read_through::<C, (A,), B, F>(builder, &[input], f))
     }
 }
 
@@ -191,8 +191,8 @@ impl<A: 'static> Cell<A> {
     /// });
     /// boundary.keep();
     /// ```
-    pub fn sample<C: Builder>(self, build: &C) -> &A {
-        build.read::<A>(self.token)
+    pub fn sample<C: Builder>(self, builder: &C) -> &A {
+        builder.read::<A>(self.token)
     }
 
     /// A read-through cell: `f` of this cell's value, computed on read and
@@ -206,14 +206,14 @@ impl<A: 'static> Cell<A> {
     /// view computes the value after the instant during the instant, and
     /// that value becomes the memo at commit, so the view and the listeners
     /// share one call per step.
-    pub fn map_cell<C, B, F>(self, build: &mut C, f: F) -> Cell<B>
+    pub fn map_cell<C, B, F>(self, builder: &mut C, f: F) -> Cell<B>
     where
         C: Builder + Stores<F> + Stores<B>,
         B: 'static,
         F: Fn(&A) -> B + 'static,
     {
-        let input = build.check_token(self.token);
-        Cell::from_token(read_through::<C, (A,), B, F>(build, &[input], f))
+        let input = builder.check_token(self.token);
+        Cell::from_token(read_through::<C, (A,), B, F>(builder, &[input], f))
     }
 }
 
@@ -235,11 +235,11 @@ impl<A: Clone + 'static> Cell<A> {
     /// after the instant and kept, and at commit it becomes the cell's
     /// memo, so the cell's function runs once per step, however many steps
     /// views and listeners the cell has.
-    pub fn steps<C>(self, build: &mut C) -> Stream<A>
+    pub fn steps<C>(self, builder: &mut C) -> Stream<A>
     where
         C: Builder + Stores<A>,
     {
-        Stream::from_token(steps_node::<C, A, false>(self, build))
+        Stream::from_token(steps_node::<C, A, false>(self, builder))
     }
 
     /// Sodium's `value`: fires once at its creation instant with the
@@ -251,24 +251,24 @@ impl<A: Clone + 'static> Cell<A> {
     /// built there over it starts the graph at the cell's value. A creation
     /// and a step in one instant are one event, carrying the value after
     /// the step.
-    pub fn steps_with_current<C>(self, build: &mut C) -> Stream<A>
+    pub fn steps_with_current<C>(self, builder: &mut C) -> Stream<A>
     where
         C: Builder + Stores<A>,
     {
-        Stream::from_token(steps_node::<C, A, true>(self, build))
+        Stream::from_token(steps_node::<C, A, true>(self, builder))
     }
 }
 
 /// The node of `steps` and `steps_with_current`: a stream node whose one
 /// dependency is the cell, and which has no program of its own.
-fn steps_node<C, A, const CURRENT: bool>(cell: Cell<A>, build: &mut C) -> Token
+fn steps_node<C, A, const CURRENT: bool>(cell: Cell<A>, builder: &mut C) -> Token
 where
     C: Builder + Stores<A>,
     A: Clone + 'static,
 {
-    let input = build.check_token(cell.token);
+    let input = builder.check_token(cell.token);
     let data = Plane::Slot(<C as Stores<A>>::erase(Erase::Slot));
-    let n = build.make::<StepsNode<A, CURRENT>>(
+    let n = builder.make::<StepsNode<A, CURRENT>>(
         Kind::Stream,
         data,
         Box::new([]),
@@ -276,7 +276,7 @@ where
         0,
         Vec::new(),
     );
-    build.token_of(n)
+    builder.token_of(n)
 }
 
 impl<A: 'static> Cell<Cell<A>> {
@@ -337,8 +337,8 @@ impl<A: 'static> Cell<Cell<A>> {
     /// may be a loop that is not closed yet. Its first link and every move
     /// to another inner check that no cycle forms, and one that does is a
     /// panic that poisons the graph, naming the cycle's nodes.
-    pub fn switch_cell<C: Builder>(self, build: &mut C) -> Cell<A> {
-        Cell::from_token(build.make_switch_cell::<Cell<A>>(self.token))
+    pub fn switch_cell<C: Builder>(self, builder: &mut C) -> Cell<A> {
+        Cell::from_token(builder.make_switch_cell::<Cell<A>>(self.token))
     }
 }
 
@@ -371,8 +371,8 @@ impl<A: 'static> Cell<State<A>> {
     /// graph.send(pick_in, true);
     /// assert_eq!(*graph.sample(current), ["ada"]);
     /// ```
-    pub fn switch_cell<C: Builder>(self, build: &mut C) -> State<A> {
-        State::from_token(build.make_switch_cell::<State<A>>(self.token))
+    pub fn switch_cell<C: Builder>(self, builder: &mut C) -> State<A> {
+        State::from_token(builder.make_switch_cell::<State<A>>(self.token))
     }
 }
 
@@ -473,11 +473,11 @@ where
     /// });
     /// boundary.keep();
     /// ```
-    pub fn switch_stream<C>(self, build: &mut C) -> Stream<S::Event>
+    pub fn switch_stream<C>(self, builder: &mut C) -> Stream<S::Event>
     where
         C: Builder + Stores<S::Event>,
     {
         let slot = <C as Stores<S::Event>>::erase(Erase::Slot);
-        Stream::from_token(build.make_switch_stream::<S>(self.token, slot))
+        Stream::from_token(builder.make_switch_stream::<S>(self.token, slot))
     }
 }

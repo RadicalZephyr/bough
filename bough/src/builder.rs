@@ -515,17 +515,17 @@ pub trait Builder: sealed::Sealed + Sized {
 /// The hold of an input cell. Its chain is the input's own stream token,
 /// which is `Send` whatever `A` is, so it is erased through `erase_send`
 /// and needs no `Stores<Stream<A>>` bound.
-fn hold_input<C, A>(build: &mut C, stream: Stream<A>, initial: A) -> Cell<A>
+fn hold_input<C, A>(builder: &mut C, stream: Stream<A>, initial: A) -> Cell<A>
 where
     C: Builder + Stores<A>,
     A: Trace + 'static,
 {
-    let input = build.check_token(stream.token);
+    let input = builder.check_token(stream.token);
     let data = Plane::Cell(<C as Stores<A>>::erase(Erase::Cell(initial)));
     let parts: Box<[C::Erased]> = Box::new([C::erase_send(stream)]);
     let n =
-        build.make::<HoldNode<Stream<A>>>(Kind::Hold, data, parts, &[input], COMMITS, Vec::new());
-    Cell::from_token(build.token_of(n))
+        builder.make::<HoldNode<Stream<A>>>(Kind::Hold, data, parts, &[input], COMMITS, Vec::new());
+    Cell::from_token(builder.token_of(n))
 }
 
 /// Whether a builder may store a `T`: a `BuildContext<M>` when `M:`

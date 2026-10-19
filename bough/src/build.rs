@@ -207,8 +207,8 @@ impl<A: 'static> CellLoop<A> {
     /// forward and the definition become one cell, so a loop of affine
     /// streams panics too if each has a
     /// [`switch_stream`](Cell::switch_stream).
-    pub fn close<C: Builder>(self, build: &mut C, definition: Cell<A>) {
-        build.close_cell(self.token, definition.token);
+    pub fn close<C: Builder>(self, builder: &mut C, definition: Cell<A>) {
+        builder.close_cell(self.token, definition.token);
     }
 }
 
@@ -262,12 +262,12 @@ impl<A: 'static> StateLoop<A> {
     ///
     /// Panics if the loop was declared in another scope, and if the new
     /// dependency would close a cycle, naming the cycle's nodes.
-    pub fn close<X, C>(self, build: &mut X, definition: C)
+    pub fn close<X, C>(self, builder: &mut X, definition: C)
     where
         X: Builder,
         C: CellRef<Value = A>,
     {
-        build.close_cell(self.token, definition.token());
+        builder.close_cell(self.token, definition.token());
     }
 }
 
@@ -313,14 +313,14 @@ impl<A: 'static> StreamLoop<A> {
     ///
     /// Panics if the loop was declared in another scope, and if the chain's
     /// source is the forward or depends on it, naming the cycle's nodes.
-    pub fn close<C, S>(self, build: &mut C, definition: S)
+    pub fn close<C, S>(self, builder: &mut C, definition: S)
     where
         C: Builder + Stores<S> + Stores<A>,
         S: Source<Event = A>,
     {
-        let (dependency, cells) = build.reach_of(&definition);
+        let (dependency, cells) = builder.reach_of(&definition);
         let slot = <C as Stores<A>>::erase(Erase::Slot);
         let chain = <C as Stores<S>>::erase(Erase::Value(definition));
-        build.close_stream::<ChainNode<S>>(self.token, dependency, cells, slot, chain);
+        builder.close_stream::<ChainNode<S>>(self.token, dependency, cells, slot, chain);
     }
 }
