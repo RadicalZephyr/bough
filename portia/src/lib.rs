@@ -1,58 +1,95 @@
 //! Lightweight FRP rooted in Rust.
 //!
 //! Portia implements the Sodium FRP denotational semantics with an API that
-//! cleanly separates building FRP logic from driving it with I/O. Every
-//! node-creating operation needs a [`Builder`]: a [`BuildContext`], which
-//! only exists inside a [`Runtime::build`] closure and inside
-//! [`Source::construct`] closures, or the [`Portable`] one lends; sending,
-//! listening and sampling from outside live on [`Runtime`], which is made
-//! empty, with [`Runtime::local`] or [`Runtime::threaded`], and built on
-//! between transactions. The design is recorded in the RFDs
-//! at <https://github.com/portia-rs/rfd>.
+//! separates building FRP logic from driving it with I/O.
+//!
+//! Building needs a [`Builder`]: a [`BuildContext`], which only exists
+//! inside a [`Runtime::build`] closure and inside [`Source::construct`]
+//! closures, or the one a [`Portable`] lends. Driving lives on [`Runtime`]:
+//! sending, listening and sampling from outside. A runtime starts empty,
+//! from [`Runtime::local`] or [`Runtime::threaded`], and you can build on it
+//! between transactions.
+//!
+//! The design is recorded in the RFDs at <https://github.com/portia-rs/rfd>.
+//!
+//! # Example
+//!
+//! Read lines from stdin and keep a running word count and the longest line
+//! so far, printing both after every line. In a clone of the repository,
+//! `cargo run --example word_count_mut` runs it.
+//!
+//! ```no_run
+//! use portia::prelude::*;
+//!
+//! fn main() -> std::io::Result<()> {
+//!     let mut rt = Runtime::local();
+//!     let (lines_in, summary) = rt.build(|b| {
+//!         let (lines, lines_in) = b.input::<String>();
+//!         let lines = lines.share(b); // two consumers below
+//!         let words = lines.accumulate_mut(b, 0_usize, |line, n: &mut usize| {
+//!             *n += line.split_whitespace().count();
+//!         });
+//!         let longest = lines.accumulate_mut(b, String::new(), |line, best: &mut String| {
+//!             if line.chars().count() > best.chars().count() {
+//!                 *best = line;
+//!             }
+//!         });
+//!         let summary = (words, longest).lift(b, |n, l| format!("{n} words, longest: {l:?}"));
+//!         (lines_in, summary)
+//!     });
+//!
+//!     // Fires once now, with the initial values, then again on every step.
+//!     let _listener = rt.listen_cell(summary, |s| println!("{s}"));
+//!     for line in std::io::stdin().lines() {
+//!         rt.send(lines_in, line?);
+//!     }
+//!     Ok(())
+//! }
+//! ```
 //!
 //! # Status
 //!
-//! The engine is being built behind these signatures in stages. Stage 1,
-//! the first-order core, works: inputs, coalescing or not, input cells,
-//! constants and `never`; the adapters `map`, `filter`, `filter_map`,
-//! `map_to`, `snapshot`, `gate` and `once`, which fuse into the one node
-//! that materializes them; the materializers `hold`, `node`, `share`,
-//! `merge` and `or_else`; and on [`Runtime`] transactions, listeners and
-//! `sample`. Stage 2 adds the cells: the accumulators `accumulate`,
-//! `accumulate_mut` and `scan`, read-through cells with `map_cell` and
-//! `lift`, and the stream views `steps` and `steps_with_current`, with
-//! [`State`] and [`CellRef`]. Stage 3 adds loops, `cell_loop` with
-//! [`CellLoop`], `state_loop` with [`StateLoop`] and `stream_loop` with
-//! [`StreamLoop`], closed under the rule that the dependency graph stays
-//! acyclic. Stage 4 adds child transactions: `split` emits the elements of
-//! an event in the children of its transaction, and `defer` the event in
-//! its first child, and the children run depth first before `send`
-//! returns. Stage 5 adds the switches, `switch_cell`, over cells and over
-//! states, and `switch_stream`, whose selection is not a dependency; each
-//! follows the inner its outer selects and moves at commit. Stage 6 adds
-//! [`construct`](Source::construct), which runs a closure with a builder
-//! at each event of a stream, in the middle of its transaction:
-//! what the closure builds exists from that instant on, and each run is a
-//! scope that must close the loops it declares. Stage 7 adds collection
-//! (RFD 3): a node lives while a root reaches it, a live [`Listener`] or
-//! [`Anchor`], or a registration waiting in a handle's queue, and
-//! [`Runtime::build`] roots what its closure returns for the runtime's
-//! life, or [`Runtime::build_anchored`] until the [`Anchored`] it returns
-//! drops; what a node reaches is its dependencies, the tokens [`Trace`]
-//! finds in a stateful cell's value, and what [`Builder::depends`]
-//! declares; and collection, automatic by default and never inside a
-//! transaction, frees the rest, so that a stale token is an error. Stage 8
-//! adds the I/O boundary (RFD 6, RFD 7): an
-//! [`InputSlot`] holds one pending event folded in place, and
-//! [`pump`](Runtime::pump) runs each pending slot as a transaction of its
-//! own, higher priority first; two handles queue calls, an [`Io`] on the
-//! runtime's thread for I/O code that can't hold the runtime and a
-//! [`RemoteIo`] on any thread, and `pump` then runs both handles' calls in
-//! the order they were made, a send or a transaction as one transaction;
-//! a write or a call through either handle wakes the waker the driver
-//! registered with [`set_waker`](Runtime::set_waker). No body is `todo!()`
-//! any more. The examples in the documentation run, and the guarantees the
-//! RFDs make are fixed by `compile_fail` doc tests.
+//! This release works and is usable. Nothing is `todo!()`, the examples in
+//! the documentation run, and the guarantees the RFDs make are fixed by
+//! `compile_fail` doc tests.
+//!
+//! An agent wrote it: 0.0.1 is a spike written by Claude, and I'm rewriting
+//! the engine underneath by hand. The tests pin its behavior, hand-made
+//! mutations of the engine show the tests would catch a change in it, and
+//! differential tests against Sodium's denotational semantics, run by GHC
+//! as an oracle, show it's the right behavior.
+//!
+//! 0.0.1 is a frozen snapshot with no patch releases planned. The next
+//! release is 0.1.0, written by hand, and it aims to keep this API close.
+//! Bug reports and API feedback go in
+//! [GitHub issues](https://github.com/portia-rs/portia/issues).
+//!
+//! # What's in the box
+//!
+//! - **Inputs:** inputs, coalescing or not, input cells, constants and
+//!   `never`.
+//! - **Adapters**, which fuse into the one node that materializes them:
+//!   `map`, `filter`, `filter_map`, `map_to`, `snapshot`, `gate` and `once`.
+//! - **Materializers:** `hold`, `node`, `share`, `merge` and `or_else`.
+//! - **Cells:** the accumulators `accumulate`, `accumulate_mut` and `scan`;
+//!   read-through cells with `map_cell` and `lift`; the stream views `steps`
+//!   and `steps_with_current`; and [`State`] and [`CellRef`].
+//! - **Loops:** `cell_loop` with [`CellLoop`], `state_loop` with
+//!   [`StateLoop`] and `stream_loop` with [`StreamLoop`], with the
+//!   dependency graph kept acyclic.
+//! - **Child transactions:** `split` emits the elements of an event in the
+//!   children of its transaction, and `defer` the event in its first child.
+//! - **Switches:** `switch_cell`, over cells and over states, and
+//!   `switch_stream`.
+//! - **[`construct`](Source::construct)**, which runs a closure with a
+//!   builder at each event of a stream, in the middle of its transaction.
+//! - **Collection** (RFD 3): a node lives while a root reaches it, a live
+//!   [`Listener`] or [`Anchor`] or a registration waiting in a handle's
+//!   queue, with [`Runtime::build_anchored`] and [`Anchored`] for roots
+//!   that end, and [`Trace`] for tokens held in a stateful cell's value.
+//! - **The I/O boundary** (RFD 6, RFD 7): [`InputSlot`],
+//!   [`pump`](Runtime::pump), the [`Io`] and [`RemoteIo`] handles, and
+//!   [`set_waker`](Runtime::set_waker).
 //!
 //! # Targets
 //!
@@ -69,8 +106,11 @@
 //! [`set_waker`](Runtime::set_waker) and the [`Io`], whose queue is the
 //! runtime's own and needs no lock.
 //!
-//! RFD 2's example: a click counter and its label, a listener that fires
-//! now and on every step, one send, and a transaction.
+//! # Transactions
+//!
+//! Every `send` from outside is a transaction of its own, and
+//! [`Runtime::transaction`] puts several sends in one instant. RFD 2's
+//! click counter shows both:
 //!
 //! ```
 //! use std::cell::RefCell;
@@ -80,8 +120,8 @@
 //!
 //! struct Click;
 //!
-//! let mut graph = Runtime::local();
-//! let (clicks_in, label) = graph.build(|b| {
+//! let mut rt = Runtime::local();
+//! let (clicks_in, label) = rt.build(|b| {
 //!     let (clicks, clicks_in) = b.input::<Click>();
 //!     let count = clicks.accumulate(b, 0u32, |_, n| n + 1);
 //!     let label = count.map_cell(b, |n| n.to_string());
@@ -89,16 +129,16 @@
 //! });
 //!
 //! let shown = Rc::new(RefCell::new(Vec::new()));
-//! let _listener = graph.listen_cell(label, {
+//! let _listener = rt.listen_cell(label, {
 //!     let shown = shown.clone();
 //!     move |text| shown.borrow_mut().push(text.clone()) // fires now, then on every step
 //! });
-//! graph.send(clicks_in, Click); // one transaction
-//! graph.transaction(|tx| {
+//! rt.send(clicks_in, Click); // one transaction
+//! rt.transaction(|tx| {
 //!     tx.send(clicks_in, Click); // several sends, one instant
 //! });
 //! assert_eq!(*shown.borrow(), ["0", "1", "2"]);
-//! assert_eq!(graph.sample(label), "2");
+//! assert_eq!(rt.sample(label), "2");
 //! ```
 
 #![warn(missing_docs)]
