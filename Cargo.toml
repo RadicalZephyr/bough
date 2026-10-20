@@ -5,7 +5,7 @@ members = ["portia", "portia-derive", "portia-oracle", "portia-bench", "portia-r
 exclude = ["portia-gtk"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 authors = ["Zefira Shannon"]
 edition = "2024"
 rust-version = "1.85"
@@ -13,9 +13,9 @@ license = "Apache-2.0"
 repository = "https://github.com/portia-rs/portia"
 
 [workspace.dependencies]
-portia = { path = "portia", version = "0.1.0" }
-portia-derive = { path = "portia-derive", version = "0.1.0" }
-portia-oracle = { path = "portia-oracle", version = "0.1.0" }
+portia = { path = "portia", version = "0.0.1" }
+portia-derive = { path = "portia-derive", version = "0.0.1" }
+portia-oracle = { path = "portia-oracle", version = "0.0.1" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

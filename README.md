@@ -41,7 +41,7 @@ Add Portia to your project using Cargo:
 
 ```toml
 [dependencies]
-portia = "0.1"
+portia = "0.0.1"
 ```
 
 ---

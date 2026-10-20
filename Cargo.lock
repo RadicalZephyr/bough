@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "portia"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "critical-section",
  "portia-derive",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "portia-bench"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "gungraun",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "portia-derive"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "portia-oracle"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "portia",
  "proptest",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "portia-repl"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "portia",
  "rustyline",
