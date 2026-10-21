@@ -1,6 +1,6 @@
 # **Portia**
 
-**Lightweight FRP rooted in Rust.**
+**Lightweight FRP, spun from Rust.**
 
 ## Overview
 
