@@ -2,8 +2,6 @@
 
 **Lightweight FRP rooted in Rust.**
 
----
-
 ## Overview
 
 **Portia** is a modern, idiomatic Rust implementation of **Functional Reactive Programming
@@ -25,8 +23,6 @@ for you.
 [na]: https://github.com/sodiumFRP/sodium
 [na-sem]: https://github.com/SodiumFRP/sodium/tree/master/denotational
 
----
-
 ## Status
 
 Portia v0.0.1 is an initial spike built entirely by an LLM agent to prove the interface
@@ -46,8 +42,6 @@ Here's how the spike is checked, where each step covers what the one before leav
 written by hand, and it aims to keep this API close.  If you try it, I'd like to hear how
 it went: bug reports and API feedback go in [GitHub
 issues](https://github.com/portia-rs/portia/issues), and they'll shape 0.1.
-
----
 
 ## Usage
 
@@ -71,8 +65,6 @@ fn main() -> std::io::Result<()> {
     });
 }
 ```
-
----
 
 ## Example
 
@@ -110,16 +102,12 @@ fn main() -> std::io::Result<()> {
 
 To quickly run this example, clone this repository, and run `cargo run --example word_count_mut`.
 
----
-
 ## Design
 
 The design decisions behind Portia are recorded as RFDs at
 <https://github.com/portia-rs/rfd>: the guiding principles and standing policies, the
 separation of building FRP from driving it, the memory model, the value model, the
 transaction protocol, and the I/O edge.
-
----
 
 ## Inspiration
 
@@ -136,8 +124,6 @@ field rewrite.
 
 [na-rust]: https://crates.io/crates/sodium-rust
 [frp-book]: https://www.manning.com/books/functional-reactive-programming
-
----
 
 ## License
 
